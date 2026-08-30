@@ -1,0 +1,11 @@
+.DS_Store
+.env
+.idea/
+.vscode/
+**/bin/
+**/obj/
+frontend/node_modules/
+frontend/dist/
+data/
+.tools/
+backend/Oa.Api/storage/

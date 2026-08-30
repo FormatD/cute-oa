@@ -1,0 +1,22 @@
+{
+  "name": "xxx-oa-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vitejs/plugin-vue": "latest",
+    "pinia": "^2.3.1",
+    "vite": "latest",
+    "vue": "latest",
+    "vue-router": "^4.6.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vue-tsc": "latest"
+  }
+}

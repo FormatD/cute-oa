@@ -1,0 +1,41 @@
+name: Verify OA
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: oa_test
+          POSTGRES_USER: oa
+          POSTGRES_PASSWORD: oa_dev_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U oa -d oa_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+      - name: Build and domain tests
+        run: bash scripts/verify.sh
+      - name: PostgreSQL persistence integration
+        env:
+          OA_TEST_CONNECTION: Host=localhost;Port=5432;Database=oa_test;Username=oa;Password=oa_dev_password
+        run: dotnet run --project tests/Oa.Postgres.Tests/Oa.Postgres.Tests.csproj
