@@ -116,6 +116,23 @@ function resetFilters() {
   void docStore.loadDocuments()
 }
 
+const mustReadChecked = computed({
+  get: () => docStore.filterMustRead === true,
+  set: (val: boolean) => {
+    docStore.filterMustRead = val ? true : undefined
+    if (!val) docStore.filterPendingAck = undefined
+    onSearch()
+  }
+})
+
+const pendingAckChecked = computed({
+  get: () => docStore.filterPendingAck === true,
+  set: (val: boolean) => {
+    docStore.filterPendingAck = val ? true : undefined
+    onSearch()
+  }
+})
+
 // Document Create/Edit
 function openCreateDocument() {
   editingDocId.value = null
@@ -367,35 +384,38 @@ async function deleteCategory(cat: DocumentCategory) {
 
     <!-- Main Content Area -->
     <main class="kb-main">
-      <!-- Search and Filter Bar -->
-      <section class="panel search-panel">
-        <div class="search-row">
-          <div class="search-input-wrap">
-            <input
-              v-model="docStore.keyword"
-              placeholder="搜索制度标题、文号、摘要或正文关键词…"
-              @keyup.enter="onSearch"
-            />
-            <button class="search-btn" @click="onSearch">检索</button>
-          </div>
-
-          <div class="filter-controls">
-            <select v-if="isManager" v-model="docStore.selectedStatus" @change="onSearch">
-              <option :value="null">全部状态</option>
-              <option :value="1">已发布</option>
-              <option :value="0">编制草稿</option>
-              <option :value="2">已归档</option>
-            </select>
-
-            <button class="secondary" @click="resetFilters">重置筛选</button>
-          </div>
-        </div>
-
-        <div v-if="docStore.selectedTag" class="active-tag-chip">
-          <span>当前标签：{{ docStore.selectedTag }}</span>
-          <button @click="selectTag('')">✕</button>
-        </div>
-      </section>
+      <!-- Unified Filter Bar -->
+      <form class="filter-bar" @submit.prevent="onSearch">
+        <input
+          v-model="docStore.keyword"
+          placeholder="搜索制度标题、文号、摘要或正文关键词"
+        />
+        <select v-model="docStore.selectedCategoryId" @change="onSearch">
+          <option value="">全部目录分类</option>
+          <option v-for="cat in docStore.categories" :key="cat.id" :value="cat.id">
+            {{ cat.name }}
+          </option>
+        </select>
+        <select v-if="isManager" v-model="docStore.selectedStatus" @change="onSearch">
+          <option :value="null">全部状态</option>
+          <option :value="1">已发布</option>
+          <option :value="0">编制草稿</option>
+          <option :value="2">已归档</option>
+        </select>
+        <label class="inline-check">
+          <input v-model="mustReadChecked" type="checkbox" />
+          全员/部门必读
+        </label>
+        <label v-if="mustReadChecked" class="inline-check">
+          <input v-model="pendingAckChecked" type="checkbox" />
+          待我签署
+        </label>
+        <button type="submit">查询</button>
+        <button class="secondary" type="button" @click="resetFilters">重置</button>
+        <button v-if="docStore.selectedTag" class="secondary" type="button" @click="selectTag('')">
+          标签: #{{ docStore.selectedTag }} ✕
+        </button>
+      </form>
 
       <!-- Document Cards List -->
       <div v-if="docStore.loading" class="panel empty">
@@ -856,54 +876,8 @@ async function deleteCategory(cat: DocumentCategory) {
   padding: 8px;
 }
 
-.search-panel {
-  padding: 16px 20px;
-  margin-bottom: 16px;
-}
-
-.search-row {
-  display: flex;
-  gap: 12px;
-  align-items: center;
-}
-
-.search-input-wrap {
-  display: flex;
-  flex: 1;
-  gap: 8px;
-}
-
-.search-input-wrap input {
-  flex: 1;
-}
-
-.search-btn {
-  white-space: nowrap;
-}
-
-.filter-controls {
-  display: flex;
-  gap: 8px;
-}
-
-.active-tag-chip {
-  margin-top: 10px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: #e6f7ff;
-  color: #1890ff;
-  padding: 4px 10px;
-  border-radius: 12px;
-  font-size: 12px;
-}
-
-.active-tag-chip button {
-  background: none;
-  border: none;
-  color: #1890ff;
-  cursor: pointer;
-  padding: 0;
+.kb-main .filter-bar input:first-child {
+  flex: 1 1 200px;
 }
 
 .doc-card-grid {
