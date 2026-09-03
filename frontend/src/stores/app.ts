@@ -1,15 +1,16 @@
 import { defineStore } from 'pinia'
-import type { ExpenseClaim, FlowTask, LeaveRequest, PaymentInput, PurchaseRequest, TravelRequest } from '../api/types'
+import type { ExpenseClaim, FlowTask, LeaveRequest, PaymentInput, PurchaseRequest, SealRequest, TravelRequest } from '../api/types'
 import { useAuthStore } from './auth'
 import { useExpenseStore } from './expense'
 import { useLeaveStore } from './leave'
 import { usePurchaseStore } from './purchase'
+import { useSealStore } from './seal'
 import { useTravelStore } from './travel'
 import { useWorkflowStore } from './workflow'
 import { useWorkspaceStore } from './workspace'
 
 type TaskAction = 'approve' | 'reject'
-type BusinessType = 'leave' | 'expense' | 'travel' | 'purchase'
+type BusinessType = 'leave' | 'expense' | 'travel' | 'purchase' | 'seal'
 
 /**
  * Compatibility facade for cross-module UI actions.
@@ -23,6 +24,7 @@ export const useAppStore = defineStore('app', () => {
   const expense = useExpenseStore()
   const travel = useTravelStore()
   const purchase = usePurchaseStore()
+  const seal = useSealStore()
   const workflow = useWorkflowStore()
 
   async function login(userId: string, password: string) {
@@ -57,6 +59,7 @@ export const useAppStore = defineStore('app', () => {
   async function submitExpense() { return refreshAfter(await expense.submitExpense(auth.currentUser?.name ?? '')) }
   async function submitTravel() { return refreshAfter(await travel.submitTravel()) }
   async function submitPurchase() { return refreshAfter(await purchase.submitPurchase()) }
+  async function submitSeal() { return refreshAfter(await seal.submitSeal()) }
 
   async function processTask(task: FlowTask, action: TaskAction, businessType: BusinessType, comment: string) {
     return refreshAfter(await workflow.processTask(task, action, businessType, comment))
@@ -76,6 +79,9 @@ export const useAppStore = defineStore('app', () => {
   async function withdrawPurchase(item: PurchaseRequest) { return refreshAfter(await purchase.withdrawPurchase(item)) }
   async function registerPurchaseOrder(item: PurchaseRequest) { return refreshAfter(await purchase.registerOrder(item)) }
   async function receivePurchase(item: PurchaseRequest) { return refreshAfter(await purchase.receive(item)) }
+  async function withdrawSeal(item: SealRequest) { return refreshAfter(await seal.withdrawSeal(item)) }
+  async function registerSealExecution(item: SealRequest) { return refreshAfter(await seal.registerExecution(item)) }
+  async function registerSealReturn(item: SealRequest) { return refreshAfter(await seal.registerReturn(item)) }
 
   return {
     initialize: workspace.initialize,
@@ -90,6 +96,7 @@ export const useAppStore = defineStore('app', () => {
     submitExpense,
     submitTravel,
     submitPurchase,
+    submitSeal,
     processTask,
     transferTask,
     registerPayment,
@@ -98,6 +105,9 @@ export const useAppStore = defineStore('app', () => {
     withdrawTravel,
     withdrawPurchase,
     registerPurchaseOrder,
-    receivePurchase
+    receivePurchase,
+    withdrawSeal,
+    registerSealExecution,
+    registerSealReturn
   }
 })

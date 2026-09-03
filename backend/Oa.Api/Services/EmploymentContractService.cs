@@ -340,19 +340,22 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
             db.ChangeTracker.Clear();
             return ServiceResult<T>.Failure("劳动合同已被其他操作更新，请刷新后重试。", "CONCURRENCY_001");
         }
-        catch (DbUpdateException exception) when (IsActivePeriodConflict(exception))
+        catch (Exception exception) when (IsActivePeriodConflict(exception))
         {
             db.ChangeTracker.Clear();
             return ServiceResult<T>.Failure("该员工存在日期重叠的有效合同。", "CONTRACT_002");
         }
     }
 
-    private static bool IsActivePeriodConflict(DbUpdateException exception) =>
-        exception.InnerException is PostgresException
-        {
-            SqlState: PostgresErrorCodes.ExclusionViolation,
-            ConstraintName: "EX_employment_contract_active_period"
-        };
+    private static bool IsActivePeriodConflict(Exception exception)
+    {
+        var postgresException = (exception as DbUpdateException)?.InnerException as PostgresException
+            ?? (exception.InnerException as DbUpdateException)?.InnerException as PostgresException
+            ?? exception.GetBaseException() as PostgresException;
+        return postgresException is not null &&
+            ((postgresException.SqlState == PostgresErrorCodes.ExclusionViolation && postgresException.ConstraintName == "EX_employment_contract_active_period")
+             || postgresException.SqlState == PostgresErrorCodes.DeadlockDetected);
+    }
 
     private bool FilesExist(IReadOnlyList<string> ids) { var parsed = ids.Select(value => Guid.TryParse(value, out var id) ? id : Guid.Empty).ToList(); return parsed.All(id => id != Guid.Empty) && db.Files.Count(item => item.TenantId == TenantId && parsed.Contains(item.Id)) == parsed.Count; }
     private bool AttachmentsCanBeAssigned(Employee actor, IReadOnlyList<string> ids, Guid? currentId)

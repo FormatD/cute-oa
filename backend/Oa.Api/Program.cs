@@ -34,6 +34,7 @@ builder.Services.AddScoped<LeaveService>();
 builder.Services.AddScoped<ExpenseService>();
 builder.Services.AddScoped<TravelService>();
 builder.Services.AddScoped<PurchaseService>();
+builder.Services.AddScoped<SealService>();
 builder.Services.AddScoped<IdempotencyService>();
 builder.Services.AddScoped<NotificationService>();
 var fileScanningMode = FileScanningPolicy.ValidateMode(builder.Configuration["FileScanning:Mode"], builder.Environment.IsDevelopment());
@@ -57,6 +58,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<ExpenseStatus>());
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<TravelStatus>());
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<PurchaseStatus>());
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<SealStatus>());
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<FlowTaskStatus>());
 });
 if (builder.Configuration.GetValue<bool>("Persistence:UsePostgreSql"))
@@ -497,7 +499,7 @@ app.MapPost("/api/v1/process/definitions/{id:guid}/publish", (Guid id, HttpReque
 app.MapGet("/api/v1/flow/delegations/my", (HttpRequest request, DemoAuthService auth, DelegationService service) => Results.Ok(service.ListMine(Actor(request, auth))));
 app.MapPost("/api/v1/flow/delegations", (CreateFlowDelegationRequest body, HttpRequest request, DemoAuthService auth, DelegationService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Create(actor, body), true); });
 app.MapPost("/api/v1/flow/delegations/{id:guid}/cancel", (Guid id, HttpRequest request, DemoAuthService auth, DelegationService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Cancel(actor, id)); });
-app.MapGet("/api/v1/flow/instances/{id:guid}", (Guid id, HttpRequest request, DemoAuthService auth, FlowInstanceService flows, LeaveService leave, ExpenseService expense, TravelService travel, PurchaseService purchase) =>
+app.MapGet("/api/v1/flow/instances/{id:guid}", (Guid id, HttpRequest request, DemoAuthService auth, FlowInstanceService flows, LeaveService leave, ExpenseService expense, TravelService travel, PurchaseService purchase, SealService seal) =>
 {
     var actor = Actor(request, auth);
     var result = flows.Get(id);
@@ -508,6 +510,7 @@ app.MapGet("/api/v1/flow/instances/{id:guid}", (Guid id, HttpRequest request, De
         "Expense" => expense.Get(actor, result.Value.BusinessId).IsSuccess,
         "Travel" => travel.Get(actor, result.Value.BusinessId).IsSuccess,
         "Purchase" => purchase.Get(actor, result.Value.BusinessId).IsSuccess,
+        "Seal" => seal.Get(actor, result.Value.BusinessId).IsSuccess,
         _ => false
     };
     return permitted ? Results.Ok(result.Value) : Results.Json(new { code = "AUTH_002", message = "无权查看该流程实例。" }, statusCode: StatusCodes.Status403Forbidden);
@@ -522,7 +525,7 @@ app.MapPost("/api/v1/files", async (IFormFile? file, HttpRequest request, DemoAu
     if (file is null) return Results.BadRequest(new { code = "FILE_001", message = "请选择要上传的文件。" });
     return await WriteAsync(request, actor, idempotency, () => service.UploadAsync(actor, file, cancellationToken), true);
 }).DisableAntiforgery();
-app.MapGet("/api/v1/files/{id:guid}", (Guid id, string resourceType, Guid resourceId, HttpRequest request, DemoAuthService auth, LeaveService leave, ExpenseService expense, TravelService travel, PurchaseService purchase, AttendanceService attendance, EmploymentContractService contracts, FileService files) =>
+app.MapGet("/api/v1/files/{id:guid}", (Guid id, string resourceType, Guid resourceId, HttpRequest request, DemoAuthService auth, LeaveService leave, ExpenseService expense, TravelService travel, PurchaseService purchase, SealService seal, AttendanceService attendance, EmploymentContractService contracts, FileService files) =>
 {
     var actor = Actor(request, auth);
     var permitted = resourceType.ToLowerInvariant() switch
@@ -531,6 +534,7 @@ app.MapGet("/api/v1/files/{id:guid}", (Guid id, string resourceType, Guid resour
         "expense" => expense.Get(actor, resourceId).Value is { } claim && (claim.Items.Any(item => item.Attachments?.Contains(id.ToString()) == true) || claim.Payment?.ProofFile == id.ToString()),
         "travel" => travel.Get(actor, resourceId).Value?.Attachments.Contains(id.ToString()) == true,
         "purchase" => purchase.Get(actor, resourceId).Value is { } requisition && (requisition.Attachments.Contains(id.ToString()) || requisition.Order?.Attachments.Contains(id.ToString()) == true || requisition.Receipt?.Attachments.Contains(id.ToString()) == true),
+        "seal" => seal.Get(actor, resourceId).Value is { } requestDoc && (requestDoc.Attachments.Contains(id.ToString()) || requestDoc.Execution?.Attachments.Contains(id.ToString()) == true || requestDoc.Return?.Attachments.Contains(id.ToString()) == true),
         "attendance" => attendance.Get(actor, resourceId).Value?.Appeals.Any(appeal => appeal.Attachments.Contains(id.ToString())) == true,
         "contract" => contracts.Get(actor, resourceId).Value?.Attachments.Contains(id.ToString()) == true,
         _ => false
@@ -539,11 +543,11 @@ app.MapGet("/api/v1/files/{id:guid}", (Guid id, string resourceType, Guid resour
     var opened = files.Open(actor, id);
     return opened.IsSuccess ? Results.File(opened.Value!.Content, opened.Value.Descriptor.ContentType, opened.Value.Descriptor.Name, enableRangeProcessing: true) : Results.NotFound(new { code = opened.Code, message = opened.Error });
 });
-app.MapGet("/api/v1/demo/summary", (HttpRequest request, DemoAuthService auth, DemoData data, LeaveService leave, ExpenseService expense, TravelService travel, PurchaseService purchase, FlowCopyService copies, EmploymentContractService contracts) =>
+app.MapGet("/api/v1/demo/summary", (HttpRequest request, DemoAuthService auth, DemoData data, LeaveService leave, ExpenseService expense, TravelService travel, PurchaseService purchase, SealService seal, FlowCopyService copies, EmploymentContractService contracts) =>
 {
     var actor = Actor(request, auth);
     var contractAlerts = contracts.AlertSummary(actor);
-    return Results.Ok(new { tenant = data.Tenant, currentUser = data.ToProfile(actor), pendingTaskCount = leave.GetPendingTasks(actor).Count + expense.GetPendingTasks(actor).Count + travel.GetPendingTasks(actor).Count + purchase.GetPendingTasks(actor).Count, pendingReadCount = copies.ListMine(actor).Count(item => item.ReadAt is null), contractRiskCount = contractAlerts.AtRiskContracts, leaveBalance = leave.GetBalance(actor) });
+    return Results.Ok(new { tenant = data.Tenant, currentUser = data.ToProfile(actor), pendingTaskCount = leave.GetPendingTasks(actor).Count + expense.GetPendingTasks(actor).Count + travel.GetPendingTasks(actor).Count + purchase.GetPendingTasks(actor).Count + seal.GetPendingTasks(actor).Count, pendingReadCount = copies.ListMine(actor).Count(item => item.ReadAt is null), contractRiskCount = contractAlerts.AtRiskContracts, leaveBalance = leave.GetBalance(actor) });
 });
 
 app.MapGet("/api/v1/leave-requests", (string? keyword, int? status, string? applicantId, DateOnly? startDate, DateOnly? endDate, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, LeaveService service) => Results.Ok(Paging.Create(service.List(Actor(request, auth), new DocumentListQuery(keyword, status, applicantId, startDate, endDate)), page, pageSize)));
@@ -629,6 +633,32 @@ app.MapPost("/api/v1/purchase-requests/demo-data", (HttpRequest request, DemoAut
     if (!configuration.GetValue<bool>("DemoFeatures:AllowDataGeneration")) return Results.NotFound(new { code = "DATA_001", message = "演示数据生成功能未启用。" });
     var actor = Actor(request, auth);
     return Write(request, actor, idempotency, () => service.GenerateDemoData(actor), atomic: true, fingerprintPayload: new { operation = "purchase-demo-data" });
+});
+
+app.MapGet("/api/v1/seal-requests", (string? keyword, int? status, string? applicantId, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, SealService service) =>
+    Results.Ok(service.List(Actor(request, auth), new DocumentListQuery(keyword, status, applicantId, null, null, null, null), page, pageSize)));
+app.MapGet("/api/v1/seal-requests/{id:guid}", (Guid id, HttpRequest request, DemoAuthService auth, SealService service) =>
+{
+    var result = service.Get(Actor(request, auth), id);
+    return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: result.Code == "AUTH_002" ? StatusCodes.Status403Forbidden : StatusCodes.Status404NotFound);
+});
+app.MapPost("/api/v1/seal-requests", (SaveSealRequest body, HttpRequest request, DemoAuthService auth, SealService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.CreateDraft(actor, body), created: true, atomic: true, fingerprintPayload: body); });
+app.MapPatch("/api/v1/seal-requests/{id:guid}", (Guid id, int version, SaveSealRequest body, HttpRequest request, DemoAuthService auth, SealService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Update(actor, id, version, body), atomic: true, fingerprintPayload: new { id, version, body }); });
+app.MapDelete("/api/v1/seal-requests/{id:guid}", (Guid id, HttpRequest request, DemoAuthService auth, SealService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Delete(actor, id), atomic: true, fingerprintPayload: new { id }); });
+app.MapPost("/api/v1/seal-requests/{id:guid}/submit", (Guid id, HttpRequest request, DemoAuthService auth, SealService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Submit(actor, id), atomic: true, fingerprintPayload: new { id }); });
+app.MapPost("/api/v1/seal-requests/{id:guid}/withdraw", (Guid id, HttpRequest request, DemoAuthService auth, SealService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Withdraw(actor, id), atomic: true, fingerprintPayload: new { id }); });
+app.MapGet("/api/v1/seal-tasks/my", (HttpRequest request, DemoAuthService auth, SealService service) => Results.Ok(service.GetPendingTasks(Actor(request, auth))));
+app.MapGet("/api/v1/seal-tasks/done", (HttpRequest request, DemoAuthService auth, SealService service) => Results.Ok(service.GetProcessedTasks(Actor(request, auth))));
+app.MapPost("/api/v1/seal-tasks/{id:guid}/approve", (Guid id, ApproveTaskRequest body, HttpRequest request, DemoAuthService auth, SealService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Approve(actor, id, body.Comment), atomic: true, fingerprintPayload: body); });
+app.MapPost("/api/v1/seal-tasks/{id:guid}/reject", (Guid id, RejectTaskRequest body, HttpRequest request, DemoAuthService auth, SealService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Reject(actor, id, body.Comment), atomic: true, fingerprintPayload: body); });
+app.MapPost("/api/v1/seal-tasks/{id:guid}/transfer", (Guid id, TransferTaskRequest body, HttpRequest request, DemoAuthService auth, SealService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Transfer(actor, id, body), atomic: true, fingerprintPayload: body); });
+app.MapPost("/api/v1/seal-requests/{id:guid}/execution", (Guid id, RegisterSealExecutionRequest body, HttpRequest request, DemoAuthService auth, SealService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.RegisterExecution(actor, id, body), atomic: true, fingerprintPayload: body); });
+app.MapPost("/api/v1/seal-requests/{id:guid}/return", (Guid id, RegisterSealReturnRequest body, HttpRequest request, DemoAuthService auth, SealService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.RegisterReturn(actor, id, body), atomic: true, fingerprintPayload: body); });
+app.MapPost("/api/v1/seal-requests/demo-data", (HttpRequest request, DemoAuthService auth, SealService service, IdempotencyService idempotency, IConfiguration configuration) =>
+{
+    if (!configuration.GetValue<bool>("DemoFeatures:AllowDataGeneration")) return Results.NotFound(new { code = "DATA_001", message = "演示数据生成功能未启用。" });
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.GenerateDemoData(actor), atomic: true, fingerprintPayload: new { operation = "seal-demo-data" });
 });
 
 app.Run();

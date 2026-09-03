@@ -11,6 +11,7 @@ import { createLeaveApi } from './modules/leave'
 import { createOrganizationApi } from './modules/organization'
 import { createPersonnelApi } from './modules/personnel'
 import { createPurchaseApi } from './modules/purchase'
+import { createSealApi } from './modules/seal'
 import { createSystemApi } from './modules/system'
 import { createTravelApi } from './modules/travel'
 import { createWorkflowApi } from './modules/workflow'
@@ -28,6 +29,7 @@ function createApiClient(http: HttpClient) {
     organization: createOrganizationApi(http),
     personnel: createPersonnelApi(http),
     purchase: createPurchaseApi(http),
+    seal: createSealApi(http),
     system: createSystemApi(http),
     travel: createTravelApi(http),
     workflow: createWorkflowApi(http)

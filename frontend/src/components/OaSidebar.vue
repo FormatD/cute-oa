@@ -20,6 +20,7 @@ function hasPermission(permission: string) { return props.currentUser?.permissio
       <button :class="{ active: activeNav === 'expense' }" @click="go('expense')"><span>¥</span>费用报销</button>
       <button :class="{ active: activeNav === 'travel' }" @click="go('travel')"><span>⌖</span>出差管理</button>
       <button :class="{ active: activeNav === 'purchase' }" @click="go('purchase')"><span>▦</span>采购管理</button>
+      <button :class="{ active: activeNav === 'seal' }" @click="go('seal')"><span>印</span>用章管理</button>
       <button :class="{ active: activeNav === 'approval' }" @click="go('approval')"><span>✓</span>审批中心 <b v-if="summary?.pendingTaskCount">{{ summary.pendingTaskCount }}</b></button>
       <button :class="{ active: activeNav === 'copies' }" @click="go('copies')"><span>▤</span>待我阅读 <b v-if="summary?.pendingReadCount">{{ summary.pendingReadCount }}</b></button>
       <button :class="{ active: activeNav === 'delegations' }" @click="go('delegations')"><span>⇄</span>审批委托</button>

@@ -16,6 +16,8 @@ export const createWorkflowApi = ({ request }: HttpClient) => ({
   getProcessedTravelTasks: () => request<FlowTask[]>('/travel-tasks/done'),
   getPurchaseTasks: () => request<FlowTask[]>('/purchase-tasks/my'),
   getProcessedPurchaseTasks: () => request<FlowTask[]>('/purchase-tasks/done'),
+  getSealTasks: () => request<FlowTask[]>('/seal-tasks/my'),
+  getProcessedSealTasks: () => request<FlowTask[]>('/seal-tasks/done'),
   processLeaveTask: (id: string, action: 'approve' | 'reject', comment: string) => request(`/flow/tasks/${id}/${action}`, { method: 'POST', body: JSON.stringify({ comment }) }),
   transferLeaveTask: (id: string, assigneeId: string, comment: string) => request(`/flow/tasks/${id}/transfer`, { method: 'POST', body: JSON.stringify({ assigneeId, comment }) }),
   processExpenseTask: (id: string, action: 'approve' | 'reject', comment: string) => request(`/expense-tasks/${id}/${action}`, { method: 'POST', body: JSON.stringify({ comment }) }),
@@ -23,5 +25,7 @@ export const createWorkflowApi = ({ request }: HttpClient) => ({
   processTravelTask: (id: string, action: 'approve' | 'reject', comment: string) => request(`/travel-tasks/${id}/${action}`, { method: 'POST', body: JSON.stringify({ comment }) }),
   transferTravelTask: (id: string, assigneeId: string, comment: string) => request(`/travel-tasks/${id}/transfer`, { method: 'POST', body: JSON.stringify({ assigneeId, comment }) }),
   processPurchaseTask: (id: string, action: 'approve' | 'reject', comment: string) => request(`/purchase-tasks/${id}/${action}`, { method: 'POST', body: JSON.stringify({ comment }) }),
-  transferPurchaseTask: (id: string, assigneeId: string, comment: string) => request(`/purchase-tasks/${id}/transfer`, { method: 'POST', body: JSON.stringify({ assigneeId, comment }) })
+  transferPurchaseTask: (id: string, assigneeId: string, comment: string) => request(`/purchase-tasks/${id}/transfer`, { method: 'POST', body: JSON.stringify({ assigneeId, comment }) }),
+  processSealTask: (id: string, action: 'approve' | 'reject', comment: string) => request(`/seal-tasks/${id}/${action}`, { method: 'POST', body: JSON.stringify({ comment }) }),
+  transferSealTask: (id: string, assigneeId: string, comment: string) => request(`/seal-tasks/${id}/transfer`, { method: 'POST', body: JSON.stringify({ assigneeId, comment }) })
 })

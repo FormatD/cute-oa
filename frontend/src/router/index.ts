@@ -23,6 +23,8 @@ import TravelPage from '../views/TravelPage.vue'
 import TravelDetailPage from '../views/TravelDetailPage.vue'
 import PurchasePage from '../views/PurchasePage.vue'
 import PurchaseDetailPage from '../views/PurchaseDetailPage.vue'
+import SealPage from '../views/SealPage.vue'
+import SealDetailPage from '../views/SealDetailPage.vue'
 import PersonnelPage from '../views/PersonnelPage.vue'
 import PersonnelDetailPage from '../views/PersonnelDetailPage.vue'
 import PersonnelCasePage from '../views/PersonnelCasePage.vue'
@@ -49,6 +51,8 @@ export const router = createRouter({
     { path: '/travel/:id', component: TravelDetailPage, props: true },
     { path: '/purchase', component: PurchasePage },
     { path: '/purchase/:id', component: PurchaseDetailPage, props: true },
+    { path: '/seal', component: SealPage },
+    { path: '/seal/:id', component: SealDetailPage, props: true },
     { path: '/hr/employees', component: PersonnelPage },
     { path: '/hr/employees/:id', component: PersonnelDetailPage, props: true },
     { path: '/hr/personnel-cases', component: PersonnelCasePage },

@@ -14,6 +14,7 @@ import { useOrganizationStore } from './organization'
 import { usePersonnelCaseStore } from './personnel-cases'
 import { usePersonnelStore } from './personnel'
 import { usePurchaseStore } from './purchase'
+import { useSealStore } from './seal'
 import { useTravelStore } from './travel'
 import { useUiStore } from './ui'
 import { useWorkflowStore } from './workflow'
@@ -28,6 +29,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const expense = useExpenseStore()
   const travel = useTravelStore()
   const purchase = usePurchaseStore()
+  const seal = useSealStore()
   const workflow = useWorkflowStore()
   const organization = useOrganizationStore()
   const personnel = usePersonnelStore()
@@ -88,6 +90,8 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       travel.loadApproved(auth.currentUserId),
       purchase.loadPurchases(),
       purchase.loadInitiated(auth.currentUserId),
+      seal.loadSeals(),
+      seal.loadInitiated(auth.currentUserId),
       workflow.loadTasks(),
       workflow.loadNotifications(),
       workflow.loadCopies()
@@ -102,6 +106,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     expense.reset()
     travel.reset()
     purchase.reset()
+    seal.reset()
     workflow.reset()
     organization.reset()
     personnel.reset()

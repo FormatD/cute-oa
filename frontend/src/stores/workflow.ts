@@ -20,12 +20,15 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const processedTravelTasks = ref<FlowTask[]>([])
   const purchaseTasks = ref<FlowTask[]>([])
   const processedPurchaseTasks = ref<FlowTask[]>([])
+  const sealTasks = ref<FlowTask[]>([])
+  const processedSealTasks = ref<FlowTask[]>([])
   const notifications = ref<Notification[]>([])
   const copies = ref<FlowCopy[]>([])
   const leaveTaskPage = ref(1)
   const expenseTaskPage = ref(1)
   const travelTaskPage = ref(1)
   const purchaseTaskPage = ref(1)
+  const sealTaskPage = ref(1)
   const notificationPage = ref(1)
   const processedTaskPage = ref(1)
   const copyPage = ref(1)
@@ -35,11 +38,13 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const pagedExpenseTasks = computed(() => paginate([...expenseTasks.value].reverse(), expenseTaskPage.value))
   const pagedTravelTasks = computed(() => paginate([...travelTasks.value].reverse(), travelTaskPage.value))
   const pagedPurchaseTasks = computed(() => paginate([...purchaseTasks.value].reverse(), purchaseTaskPage.value))
+  const pagedSealTasks = computed(() => paginate([...sealTasks.value].reverse(), sealTaskPage.value))
   const processedTaskItems = computed(() => [
     ...processedTasks.value.map(task => ({ ...task, businessType: '请假', route: 'leave', resourceId: task.leaveRequestId })),
     ...processedExpenseTasks.value.map(task => ({ ...task, businessType: '报销', route: 'expense', resourceId: task.expenseClaimId })),
     ...processedTravelTasks.value.map(task => ({ ...task, businessType: '出差', route: 'travel', resourceId: task.travelRequestId })),
-    ...processedPurchaseTasks.value.map(task => ({ ...task, businessType: '采购', route: 'purchase', resourceId: task.purchaseRequestId }))
+    ...processedPurchaseTasks.value.map(task => ({ ...task, businessType: '采购', route: 'purchase', resourceId: task.purchaseRequestId })),
+    ...processedSealTasks.value.map(task => ({ ...task, businessType: '用章', route: 'seal', resourceId: task.sealRequestId }))
   ])
   const pagedProcessedTasks = computed(() => paginate(processedTaskItems.value, processedTaskPage.value))
   const pagedNotifications = computed(() => paginate([...notifications.value].sort((a, b) => b.createdAt.localeCompare(a.createdAt)), notificationPage.value))
@@ -47,8 +52,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
   const unreadCopies = computed(() => copies.value.filter(item => !item.readAt))
 
   async function loadTasks() {
-    const [pendingLeaves, completedLeaves, pendingExpenses, completedExpenses, pendingTravels, completedTravels, pendingPurchases, completedPurchases] = await Promise.all([
-      api.getLeaveTasks(), api.getProcessedLeaveTasks(), api.getExpenseTasks(), api.getProcessedExpenseTasks(), api.getTravelTasks(), api.getProcessedTravelTasks(), api.getPurchaseTasks(), api.getProcessedPurchaseTasks()
+    const [pendingLeaves, completedLeaves, pendingExpenses, completedExpenses, pendingTravels, completedTravels, pendingPurchases, completedPurchases, pendingSeals, completedSeals] = await Promise.all([
+      api.getLeaveTasks(), api.getProcessedLeaveTasks(), api.getExpenseTasks(), api.getProcessedExpenseTasks(), api.getTravelTasks(), api.getProcessedTravelTasks(), api.getPurchaseTasks(), api.getProcessedPurchaseTasks(), api.getSealTasks(), api.getProcessedSealTasks()
     ])
     tasks.value = pendingLeaves
     processedTasks.value = completedLeaves
@@ -58,6 +63,8 @@ export const useWorkflowStore = defineStore('workflow', () => {
     processedTravelTasks.value = completedTravels
     purchaseTasks.value = pendingPurchases
     processedPurchaseTasks.value = completedPurchases
+    sealTasks.value = pendingSeals
+    processedSealTasks.value = completedSeals
   }
 
   async function loadNotifications() {
@@ -99,7 +106,7 @@ export const useWorkflowStore = defineStore('workflow', () => {
     }
   }
 
-  async function processTask(task: FlowTask, action: 'approve' | 'reject', businessType: 'leave' | 'expense' | 'travel' | 'purchase', comment: string) {
+  async function processTask(task: FlowTask, action: 'approve' | 'reject', businessType: 'leave' | 'expense' | 'travel' | 'purchase' | 'seal', comment: string) {
     const normalizedComment = comment.trim()
     if (action === 'reject' && !normalizedComment) {
       ui.error = '驳回必须填写处理意见。'
@@ -110,17 +117,18 @@ export const useWorkflowStore = defineStore('workflow', () => {
       if (businessType === 'leave') await api.processLeaveTask(task.id, action, normalizedComment)
       else if (businessType === 'expense') await api.processExpenseTask(task.id, action, normalizedComment)
       else if (businessType === 'travel') await api.processTravelTask(task.id, action, normalizedComment)
-      else await api.processPurchaseTask(task.id, action, normalizedComment)
-      const label = businessType === 'leave' ? '请假' : businessType === 'expense' ? '报销' : businessType === 'travel' ? '出差' : '采购'
+      else if (businessType === 'purchase') await api.processPurchaseTask(task.id, action, normalizedComment)
+      else await api.processSealTask(task.id, action, normalizedComment)
+      const label = businessType === 'leave' ? '请假' : businessType === 'expense' ? '报销' : businessType === 'travel' ? '出差' : businessType === 'purchase' ? '采购' : '用章'
       ui.message = action === 'approve' ? `${label}审批已通过。` : `${label}申请已驳回。`
       return true
     } catch (cause) {
-      ui.error = cause instanceof Error ? cause.message : businessType === 'leave' ? '处理待办失败。' : '处理报销待办失败。'
+      ui.error = cause instanceof Error ? cause.message : `处理${businessType === 'seal' ? '用章' : '业务'}待办失败。`
       return false
     }
   }
 
-  async function transferTask(task: FlowTask, businessType: 'leave' | 'expense' | 'travel' | 'purchase', assigneeId: string, comment: string) {
+  async function transferTask(task: FlowTask, businessType: 'leave' | 'expense' | 'travel' | 'purchase' | 'seal', assigneeId: string, comment: string) {
     const normalizedAssigneeId = assigneeId.trim()
     const normalizedComment = comment.trim()
     if (!normalizedAssigneeId || !normalizedComment) {
@@ -132,11 +140,13 @@ export const useWorkflowStore = defineStore('workflow', () => {
       if (businessType === 'leave') await api.transferLeaveTask(task.id, normalizedAssigneeId, normalizedComment)
       else if (businessType === 'expense') await api.transferExpenseTask(task.id, normalizedAssigneeId, normalizedComment)
       else if (businessType === 'travel') await api.transferTravelTask(task.id, normalizedAssigneeId, normalizedComment)
-      else await api.transferPurchaseTask(task.id, normalizedAssigneeId, normalizedComment)
-      ui.message = `${businessType === 'leave' ? '请假' : businessType === 'expense' ? '报销' : businessType === 'travel' ? '出差' : '采购'}审批任务已转办。`
+      else if (businessType === 'purchase') await api.transferPurchaseTask(task.id, normalizedAssigneeId, normalizedComment)
+      else await api.transferSealTask(task.id, normalizedAssigneeId, normalizedComment)
+      const label = businessType === 'leave' ? '请假' : businessType === 'expense' ? '报销' : businessType === 'travel' ? '出差' : businessType === 'purchase' ? '采购' : '用章'
+      ui.message = `${label}审批任务已转办。`
       return true
     } catch (cause) {
-      ui.error = cause instanceof Error ? cause.message : `转办${businessType === 'leave' ? '请假' : '报销'}审批任务失败。`
+      ui.error = cause instanceof Error ? cause.message : `转办${businessType}审批任务失败。`
       return false
     }
   }
@@ -150,9 +160,11 @@ export const useWorkflowStore = defineStore('workflow', () => {
     processedTravelTasks.value = []
     purchaseTasks.value = []
     processedPurchaseTasks.value = []
+    sealTasks.value = []
+    processedSealTasks.value = []
     notifications.value = []
     copies.value = []
   }
 
-  return { tasks, expenseTasks, travelTasks, purchaseTasks, processedTasks, processedExpenseTasks, processedTravelTasks, processedPurchaseTasks, notifications, copies, leaveTaskPage, expenseTaskPage, travelTaskPage, purchaseTaskPage, notificationPage, processedTaskPage, copyPage, copyTotal, copyTotalPages, pagedLeaveTasks, pagedExpenseTasks, pagedTravelTasks, pagedPurchaseTasks, pagedProcessedTasks, pagedNotifications, pagedCopies, unreadCopies, loadTasks, loadNotifications, loadCopies, markNotificationRead, markCopyRead, processTask, transferTask, reset }
+  return { tasks, expenseTasks, travelTasks, purchaseTasks, sealTasks, processedTasks, processedExpenseTasks, processedTravelTasks, processedPurchaseTasks, processedSealTasks, notifications, copies, leaveTaskPage, expenseTaskPage, travelTaskPage, purchaseTaskPage, sealTaskPage, notificationPage, processedTaskPage, copyPage, copyTotal, copyTotalPages, pagedLeaveTasks, pagedExpenseTasks, pagedTravelTasks, pagedPurchaseTasks, pagedSealTasks, pagedProcessedTasks, pagedNotifications, pagedCopies, unreadCopies, loadTasks, loadNotifications, loadCopies, markNotificationRead, markCopyRead, processTask, transferTask, reset }
 })

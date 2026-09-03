@@ -42,6 +42,7 @@ var validProductionConfiguration = new ConfigurationBuilder().AddInMemoryCollect
     ["Authentication:MultiFactor:RequiredPermissions:3"] = OaPermissions.AttendanceManage,
     ["Authentication:MultiFactor:RequiredPermissions:4"] = OaPermissions.ContractManage,
     ["Authentication:MultiFactor:RequiredPermissions:5"] = OaPermissions.PurchaseManage,
+    ["Authentication:MultiFactor:RequiredPermissions:6"] = OaPermissions.SealManage,
     ["Persistence:UsePostgreSql"] = "true",
     ["ConnectionStrings:OaDatabase"] = "Host=database.internal;Database=oa;Username=oa_app;Password=secret;SSL Mode=Require;Pooling=true;Maximum Pool Size=100",
     ["Cors:AllowedOrigins:0"] = "https://oa.example.com",

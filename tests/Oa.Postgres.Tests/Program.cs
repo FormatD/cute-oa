@@ -256,6 +256,9 @@ Guid offboardingCaseId;
 Guid personnelAlertTaskId;
 Guid purchaseId;
 Guid withdrawnPurchaseId;
+Guid inOfficeSealId;
+Guid outOfficeSealId;
+Guid withdrawnSealId;
 string purchaseOrderNumber = string.Empty;
 string fileRoot;
 var idempotencyKey = $"pg-integration-{Guid.NewGuid():N}";
@@ -840,8 +843,8 @@ await using (var writeDb = new OaDbContext(options))
         throw new InvalidOperationException("公告关键动作审计日志不完整。");
 
     var definitions = processes.List(administrator);
-    if (!definitions.IsSuccess || definitions.Value!.Count != 4 || definitions.Value.Any(item => item.Status != ProcessDefinitionStatus.Published) || definitions.Value.All(item => item.BusinessType != "Travel") || definitions.Value.All(item => item.BusinessType != "Purchase"))
-        throw new InvalidOperationException("默认请假、报销、出差和采购流程未能初始化为已发布版本。");
+    if (!definitions.IsSuccess || definitions.Value!.Count != 5 || definitions.Value.Any(item => item.Status != ProcessDefinitionStatus.Published) || definitions.Value.All(item => item.BusinessType != "Travel") || definitions.Value.All(item => item.BusinessType != "Purchase") || definitions.Value.All(item => item.BusinessType != "Seal"))
+        throw new InvalidOperationException("默认请假、报销、出差、采购和用章流程未能初始化为已发布版本。");
     if (processes.List(employee).IsSuccess)
         throw new InvalidOperationException("普通员工可以越权维护流程定义。");
     fileRoot = Path.Combine(Path.GetTempPath(), "cute-oa-file-test", Guid.NewGuid().ToString("N"));
@@ -1528,6 +1531,107 @@ await using (var writeDb = new OaDbContext(options))
     if (purchaseService.Get(employee, deletablePurchaseDraft.Value.Id).IsSuccess)
         throw new InvalidOperationException("已删除的草稿仍能被查询。");
 
+    var sealService = new SealService(data, writeDb, notifications, fileService, processes, null, copyService);
+    var today = DateOnly.FromDateTime(DateTime.Today);
+
+    var emptyTitleDraft = sealService.CreateDraft(employee, new SaveSealRequest("", "人事材料", "在职证明", "公章", 1, false, null, null, null, "测试", [], []));
+    if (emptyTitleDraft.Code != "SEAL_001") throw new InvalidOperationException("空主题用章申请未被拒绝。");
+
+    var invalidCopiesDraft = sealService.CreateDraft(employee, new SaveSealRequest("份数非法", "人事材料", "在职证明", "公章", 0, false, null, null, null, "测试", [], []));
+    if (invalidCopiesDraft.Code != "SEAL_001") throw new InvalidOperationException("用印份数小于1未被拒绝。");
+
+    var invalidOutDraft = sealService.CreateDraft(employee, new SaveSealRequest("外带未指定日期", "人事材料", "在职证明", "公章", 1, true, null, null, null, "测试", [], []));
+    if (invalidOutDraft.Code != "SEAL_002") throw new InvalidOperationException("外带未指定日期未被拒绝。");
+
+    var inOfficeDraft = sealService.CreateDraft(employee, new SaveSealRequest(
+        "员工出国签证在职及收入证明用印", "人事材料", "在职及收入证明", "合同专用章", 1, false, null, null, null,
+        "办理个人旅游签证使用", [fileId.ToString()], ["u-chen"]));
+    if (!inOfficeDraft.IsSuccess || inOfficeDraft.Value!.Copies != 1 || inOfficeDraft.Value.IsOut)
+        throw new InvalidOperationException(inOfficeDraft.Error ?? "在司用章草稿创建失败。");
+    inOfficeSealId = inOfficeDraft.Value.Id;
+
+    var inOfficeSubmitted = sealService.Submit(employee, inOfficeSealId);
+    if (!inOfficeSubmitted.IsSuccess || inOfficeSubmitted.Value!.Tasks.Count != 1 || inOfficeSubmitted.Value.ProcessDefinitionCode != "SEAL_DEFAULT")
+        throw new InvalidOperationException("低风险在司用章未路由至单级直属上级。");
+    if (inOfficeSubmitted.Value.Tasks[0].AssigneeId != "u-li")
+        throw new InvalidOperationException("用章审批人解析不符合预期。");
+
+    var inOfficeApprove = sealService.Approve(data.GetEmployee("u-li"), inOfficeSubmitted.Value.Tasks[0].Id, "核实属实，同意盖章");
+    if (!inOfficeApprove.IsSuccess || inOfficeApprove.Value!.Status != SealStatus.Approved)
+        throw new InvalidOperationException("在司用章单级审批完成未进入 Approved 状态。");
+
+    var unauthorizedExecution = sealService.RegisterExecution(data.GetEmployee("u-chen"), inOfficeSealId, new RegisterSealExecutionRequest(
+        inOfficeApprove.Value.Version, today, "陈助理", "越权登记盖章", []));
+    if (unauthorizedExecution.Code != "AUTH_002")
+        throw new InvalidOperationException("无 SEAL_MANAGE 权限员工被允许登记用印执行。");
+
+    var authorizedExecution = sealService.RegisterExecution(hr, inOfficeSealId, new RegisterSealExecutionRequest(
+        inOfficeApprove.Value.Version, today, "孙行政", "核对原件一致，已在指定位置加盖合同章", []));
+    if (!authorizedExecution.IsSuccess || authorizedExecution.Value!.Status != SealStatus.Executed || authorizedExecution.Value.Execution?.OperatorName != "孙行政")
+        throw new InvalidOperationException(authorizedExecution.Error ?? "在司用印执行登记失败。");
+
+    var outOfficeDraft = sealService.CreateDraft(employee, new SaveSealRequest(
+        "外省重点战略合作框架协议外带用印", "合同协议", "战略合作框架协议", "公章", 4, true,
+        today, today.AddDays(3), "张晨", "赴杭州合作方现场签署并加盖公章", [fileId.ToString()], ["u-chen"]));
+    if (!outOfficeDraft.IsSuccess || !outOfficeDraft.Value!.IsOut)
+        throw new InvalidOperationException("外带用章草稿创建失败。");
+    outOfficeSealId = outOfficeDraft.Value.Id;
+
+    var outOfficeSubmitted = sealService.Submit(employee, outOfficeSealId);
+    if (!outOfficeSubmitted.IsSuccess || outOfficeSubmitted.Value!.Tasks.Count != 3)
+        throw new InvalidOperationException("外带公章未触发三级审批路由（上级+HR+总经理）。");
+    if (outOfficeSubmitted.Value.Tasks[0].AssigneeId != "u-li" || outOfficeSubmitted.Value.Tasks[1].AssigneeId != "u-sun" || outOfficeSubmitted.Value.Tasks[2].AssigneeId != "u-wang")
+        throw new InvalidOperationException("外带公章三级审批人顺序不符合预期。");
+
+    var outApprove1 = sealService.Approve(data.GetEmployee("u-li"), outOfficeSubmitted.Value.Tasks[0].Id, "同意直属部门外带");
+    if (!outApprove1.IsSuccess || outApprove1.Value!.Status != SealStatus.Approving)
+        throw new InvalidOperationException("第一节点审批后状态异常。");
+
+    var outApprove2 = sealService.Approve(hr, outOfficeSubmitted.Value.Tasks[1].Id, "印章外带台账已登记，请注意安全");
+    if (!outApprove2.IsSuccess || outApprove2.Value!.Status != SealStatus.Approving)
+        throw new InvalidOperationException("第二节点审批后状态异常。");
+
+    var outApprove3 = sealService.Approve(data.GetEmployee("u-wang"), outOfficeSubmitted.Value.Tasks[2].Id, "同意公章借出外带");
+    if (!outApprove3.IsSuccess || outApprove3.Value!.Status != SealStatus.Approved)
+        throw new InvalidOperationException("总经理审批后外带用章未进入 Approved 状态。");
+
+    var registerOut = sealService.RegisterExecution(hr, outOfficeSealId, new RegisterSealExecutionRequest(
+        outApprove3.Value.Version, today, "张晨", "公章交接完毕，领用出库", []));
+    if (!registerOut.IsSuccess || registerOut.Value!.Status != SealStatus.Out)
+        throw new InvalidOperationException("外带借出出库登记后状态未进入 Out。");
+
+    var futureReturn = sealService.RegisterReturn(hr, outOfficeSealId, new RegisterSealReturnRequest(
+        registerOut.Value.Version, today.AddDays(2), "INTACT", "孙行政", "未来归还测试", []));
+    if (futureReturn.Code != "SEAL_004")
+        throw new InvalidOperationException("未来归还日期未被拒绝。");
+
+    var registerReturn = sealService.RegisterReturn(hr, outOfficeSealId, new RegisterSealReturnRequest(
+        registerOut.Value.Version, today, "INTACT", "孙行政", "印面完好，字迹清晰，归还入库", []));
+    if (!registerReturn.IsSuccess || registerReturn.Value!.Status != SealStatus.Returned || registerReturn.Value.Return?.SealCondition != "INTACT")
+        throw new InvalidOperationException(registerReturn.Error ?? "外带归还登记后状态未进入 Returned。");
+
+    var twoTierDraft = sealService.CreateDraft(employee, new SaveSealRequest(
+        "招投标文件盖章", "招投标文件", "智慧政务平台投标书", "公章", 2, false, null, null, null, "参与项目招投标", []));
+    if (!twoTierDraft.IsSuccess) throw new InvalidOperationException("二类重要文档草稿创建失败。");
+    var twoTierSubmitted = sealService.Submit(employee, twoTierDraft.Value.Id);
+    if (!twoTierSubmitted.IsSuccess || twoTierSubmitted.Value!.Tasks.Count != 2 || twoTierSubmitted.Value.Tasks[0].AssigneeId != "u-li" || twoTierSubmitted.Value.Tasks[1].AssigneeId != "u-sun")
+        throw new InvalidOperationException("招投标文件未按规则路由至直属上级与HR两级审批。");
+
+    var shortSealDraft = sealService.CreateDraft(employee, new SaveSealRequest(
+        "误提交用章", "其他", "临时文件", "公章", 1, false, null, null, null, "临时测试", []));
+    var shortSealSubmitted = sealService.Submit(employee, shortSealDraft.Value!.Id);
+    var withdrawSealResult = sealService.Withdraw(employee, shortSealDraft.Value.Id);
+    if (!withdrawSealResult.IsSuccess || withdrawSealResult.Value!.Status != SealStatus.Withdrawn)
+        throw new InvalidOperationException("用章申请撤回失败。");
+    withdrawnSealId = shortSealDraft.Value.Id;
+
+    var deletableSealDraft = sealService.CreateDraft(employee, new SaveSealRequest(
+        "删除测试草稿", "其他", "删除测试文件", "公章", 1, false, null, null, null, "删除测试", []));
+    if (!sealService.Delete(employee, deletableSealDraft.Value!.Id).IsSuccess)
+        throw new InvalidOperationException("用章草稿删除失败。");
+    if (sealService.Get(employee, deletableSealDraft.Value.Id).IsSuccess)
+        throw new InvalidOperationException("已删除的用章草稿仍能被查询。");
+
     var idempotency = new IdempotencyService(writeDb);
     idempotency.Store(employee.Id, "POST:/api/v1/leave-requests", idempotencyKey, 201, "{\"id\":\"cached\"}");
     if (idempotency.Find(employee.Id, "POST:/api/v1/leave-requests", idempotencyKey) is not { StatusCode: 201 })
@@ -1883,6 +1987,26 @@ await using (var readDb = new OaDbContext(options))
         throw new InvalidOperationException("采购下单或验收审计日志未跨 DbContext 持久化。");
     if (reloadedPurchaseService.Get(employee, withdrawnPurchaseId).Value?.Status != PurchaseStatus.Withdrawn)
         throw new InvalidOperationException("已撤回采购申请状态未跨 DbContext 持久化。");
+
+    var reloadedSealService = new SealService(data, readDb);
+    var reloadedInOffice = reloadedSealService.Get(employee, inOfficeSealId);
+    if (!reloadedInOffice.IsSuccess || reloadedInOffice.Value!.Status != SealStatus.Executed || reloadedInOffice.Value.Execution?.OperatorName != "孙行政")
+        throw new InvalidOperationException("在司用章申请、执行记录或最终状态未跨 DbContext 持久化。");
+    if (reloadedInOffice.Value.Tasks.Count != 1 || reloadedInOffice.Value.Tasks[0].Status != FlowTaskStatus.Approved)
+        throw new InvalidOperationException("在司用章单级任务未跨 DbContext 持久化为 Approved。");
+
+    var reloadedOutOffice = reloadedSealService.Get(employee, outOfficeSealId);
+    if (!reloadedOutOffice.IsSuccess || reloadedOutOffice.Value!.Status != SealStatus.Returned || reloadedOutOffice.Value.Execution?.OperatorName != "张晨" || reloadedOutOffice.Value.Return?.SealCondition != "INTACT")
+        throw new InvalidOperationException("外带用章借出、归还或最终状态未跨 DbContext 持久化。");
+    if (reloadedOutOffice.Value.Tasks.Count != 3 || reloadedOutOffice.Value.Tasks.All(task => task.Status != FlowTaskStatus.Approved))
+        throw new InvalidOperationException("外带用章三级任务未跨 DbContext 持久化为 Approved。");
+    if (reloadedOutOffice.Value.FlowInstances.SingleOrDefault() is not { Status: FlowInstanceStatus.Completed } sealFlowInstance || sealFlowInstance.Actions.Count < 4)
+        throw new InvalidOperationException("外带用章流程实例或动作轨迹未跨 DbContext 持久化。");
+    if (!await readDb.AuditLogs.AnyAsync(item => item.ResourceType == "SealRequest" && item.ResourceId == inOfficeSealId.ToString() && item.Action == "SEAL_EXECUTED") ||
+        !await readDb.AuditLogs.AnyAsync(item => item.ResourceType == "SealRequest" && item.ResourceId == outOfficeSealId.ToString() && item.Action == "SEAL_RETURNED"))
+        throw new InvalidOperationException("用章执行或归还审计日志未跨 DbContext 持久化。");
+    if (reloadedSealService.Get(employee, withdrawnSealId).Value?.Status != SealStatus.Withdrawn)
+        throw new InvalidOperationException("已撤回用章申请状态未跨 DbContext 持久化。");
     if (!await readDb.IdempotencyKeys.AnyAsync(x => x.Key == idempotencyKey))
         throw new InvalidOperationException("幂等键跨 DbContext 未保留。");
     if (!await readDb.WorkCalendarEntries.AnyAsync(x => x.Date == new DateOnly(2031, 1, 6) && !x.IsWorkingDay))

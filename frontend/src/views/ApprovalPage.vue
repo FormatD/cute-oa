@@ -9,7 +9,7 @@ import { useEmployeeDirectoryStore } from '../stores/employee-directory'
 import { useUiStore } from '../stores/ui'
 import { useWorkflowStore } from '../stores/workflow'
 
-type BusinessType = 'leave' | 'expense' | 'travel' | 'purchase'
+type BusinessType = 'leave' | 'expense' | 'travel' | 'purchase' | 'seal'
 type DialogMode = 'decision' | 'transfer'
 
 const app = useAppStore()
@@ -25,7 +25,7 @@ const dialog = reactive<{ open: boolean; mode: DialogMode; businessType: Busines
 })
 const transferCandidates = computed(() => employeeDirectory.employees.filter(employee => employee.id !== auth.currentUserId))
 const dialogTitle = computed(() => dialog.mode === 'transfer' ? '转办审批任务' : dialog.action === 'reject' ? '驳回审批' : '同意审批')
-const businessLabel = (type: BusinessType) => type === 'leave' ? '请假' : type === 'expense' ? '报销' : type === 'travel' ? '出差' : '采购'
+const businessLabel = (type: BusinessType) => type === 'leave' ? '请假' : type === 'expense' ? '报销' : type === 'travel' ? '出差' : type === 'purchase' ? '采购' : '用章'
 const dialogDescription = computed(() => `${businessLabel(dialog.businessType)}审批 · 第 ${dialog.task?.sequence ?? '—'} 节点`)
 
 function openDecision(task: FlowTask, businessType: BusinessType, action: 'approve' | 'reject') {
@@ -93,6 +93,12 @@ async function submitDialog() {
     <div class="section-title"><div><p class="eyebrow">PURCHASE APPROVAL</p><h2>待我审批的采购</h2></div></div>
     <div class="table-wrap"><table class="data-table"><thead><tr><th>审批事项</th><th>当前节点</th><th>操作</th></tr></thead><tbody><tr v-for="task in workflow.pagedPurchaseTasks.items" :key="task.id"><td>采购审批</td><td>第 {{ task.sequence }} 节点</td><td class="task-actions"><button class="secondary" :disabled="!task.purchaseRequestId" @click="task.purchaseRequestId && router.push(`/purchase/${task.purchaseRequestId}`)">详情</button><button @click="openDecision(task, 'purchase', 'approve')">同意</button><button class="secondary" @click="openDecision(task, 'purchase', 'reject')">驳回</button><button class="secondary" @click="openTransfer(task, 'purchase')">转办</button></td></tr></tbody></table></div>
     <div class="pagination"><span>共 {{ workflow.pagedPurchaseTasks.total }} 条</span><div><button class="secondary" :disabled="workflow.pagedPurchaseTasks.currentPage === 1" @click="workflow.purchaseTaskPage--">上一页</button><b>{{ workflow.pagedPurchaseTasks.currentPage }} / {{ workflow.pagedPurchaseTasks.totalPages }}</b><button class="secondary" :disabled="workflow.pagedPurchaseTasks.currentPage === workflow.pagedPurchaseTasks.totalPages" @click="workflow.purchaseTaskPage++">下一页</button></div></div>
+  </section>
+
+  <section v-if="workflow.sealTasks.length" class="panel approval-panel">
+    <div class="section-title"><div><p class="eyebrow">SEAL APPROVAL</p><h2>待我审批的用章</h2></div></div>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>审批事项</th><th>当前节点</th><th>操作</th></tr></thead><tbody><tr v-for="task in workflow.pagedSealTasks.items" :key="task.id"><td>用章审批</td><td>第 {{ task.sequence }} 节点</td><td class="task-actions"><button class="secondary" :disabled="!task.sealRequestId" @click="task.sealRequestId && router.push(`/seal/${task.sealRequestId}`)">详情</button><button @click="openDecision(task, 'seal', 'approve')">同意</button><button class="secondary" @click="openDecision(task, 'seal', 'reject')">驳回</button><button class="secondary" @click="openTransfer(task, 'seal')">转办</button></td></tr></tbody></table></div>
+    <div class="pagination"><span>共 {{ workflow.pagedSealTasks.total }} 条</span><div><button class="secondary" :disabled="workflow.pagedSealTasks.currentPage === 1" @click="workflow.sealTaskPage--">上一页</button><b>{{ workflow.pagedSealTasks.currentPage }} / {{ workflow.pagedSealTasks.totalPages }}</b><button class="secondary" :disabled="workflow.pagedSealTasks.currentPage === workflow.pagedSealTasks.totalPages" @click="workflow.sealTaskPage++">下一页</button></div></div>
   </section>
 
   <section v-if="workflow.pagedProcessedTasks.total" class="panel approval-panel">

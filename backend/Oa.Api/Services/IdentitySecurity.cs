@@ -27,8 +27,10 @@ public static class OaPermissions
     public const string ContractManage = "CONTRACT_MANAGE";
     public const string PurchaseScopeView = "PURCHASE_SCOPE_VIEW";
     public const string PurchaseManage = "PURCHASE_MANAGE";
+    public const string SealScopeView = "SEAL_SCOPE_VIEW";
+    public const string SealManage = "SEAL_MANAGE";
 
-    public static IReadOnlyList<string> All { get; } = [UserManage, ProcessManage, AuditView, CalendarManage, ExpensePay, ExpenseAllView, LeaveScopeView, ExpenseScopeView, OrgManage, AnnouncementManage, TravelScopeView, PersonnelScopeView, PersonnelExport, PersonnelManage, AttendanceScopeView, AttendanceManage, ContractScopeView, ContractManage, PurchaseScopeView, PurchaseManage];
+    public static IReadOnlyList<string> All { get; } = [UserManage, ProcessManage, AuditView, CalendarManage, ExpensePay, ExpenseAllView, LeaveScopeView, ExpenseScopeView, OrgManage, AnnouncementManage, TravelScopeView, PersonnelScopeView, PersonnelExport, PersonnelManage, AttendanceScopeView, AttendanceManage, ContractScopeView, ContractManage, PurchaseScopeView, PurchaseManage, SealScopeView, SealManage];
     public static IReadOnlyList<PermissionView> Definitions { get; } =
     [
         new(UserManage, "用户管理", "维护用户、账号、角色和权限配置"),
@@ -50,7 +52,9 @@ public static class OaPermissions
         new(ContractScopeView, "劳动合同范围查看", "按独立数据范围查看员工劳动合同"),
         new(ContractManage, "劳动合同维护", "创建、激活、续签、终止劳动合同并处理预警"),
         new(PurchaseScopeView, "采购范围查看", "按角色配置的数据范围查看他人采购申请"),
-        new(PurchaseManage, "采购执行", "登记采购下单并代为验收")
+        new(PurchaseManage, "采购执行", "登记采购下单并代为验收"),
+        new(SealScopeView, "用章范围查看", "按角色配置的数据范围查看他人用章申请"),
+        new(SealManage, "印章管理", "执行在司用印登记、外借出库与归还核验")
     ];
 }
 
@@ -61,7 +65,7 @@ public static class OaDataScopes
     public const string DepartmentAndChildren = "DEPARTMENT_AND_CHILDREN";
     public const string Company = "COMPANY";
     public static IReadOnlyList<string> All { get; } = [Self, Department, DepartmentAndChildren, Company];
-    public static IReadOnlyList<string> ResourceTypes { get; } = ["Leave", "Expense", "Travel", "Personnel", "Attendance", "Contract", "Purchase"];
+    public static IReadOnlyList<string> ResourceTypes { get; } = ["Leave", "Expense", "Travel", "Personnel", "Attendance", "Contract", "Purchase", "Seal"];
 }
 
 public static class IdentityDefaults
@@ -123,7 +127,7 @@ public static class IdentityDefaults
         ["总经理"] = [],
         ["财务专员"] = [OaPermissions.ExpensePay, OaPermissions.ExpenseAllView, OaPermissions.ExpenseScopeView],
         ["财务经理"] = [OaPermissions.ExpensePay, OaPermissions.ExpenseAllView, OaPermissions.ExpenseScopeView],
-        ["HR/行政"] = [OaPermissions.CalendarManage, OaPermissions.AnnouncementManage, OaPermissions.PersonnelScopeView, OaPermissions.PersonnelExport, OaPermissions.PersonnelManage, OaPermissions.AttendanceScopeView, OaPermissions.AttendanceManage, OaPermissions.ContractScopeView, OaPermissions.ContractManage],
+        ["HR/行政"] = [OaPermissions.CalendarManage, OaPermissions.AnnouncementManage, OaPermissions.PersonnelScopeView, OaPermissions.PersonnelExport, OaPermissions.PersonnelManage, OaPermissions.AttendanceScopeView, OaPermissions.AttendanceManage, OaPermissions.ContractScopeView, OaPermissions.ContractManage, OaPermissions.SealScopeView, OaPermissions.SealManage],
         ["系统管理员"] = OaPermissions.All
     };
 
@@ -137,7 +141,8 @@ public static class IdentityDefaults
             ["Personnel"] = role is "HR/行政" or "系统管理员" ? OaDataScopes.Company : OaDataScopes.Self,
             ["Attendance"] = role is "HR/行政" or "系统管理员" ? OaDataScopes.Company : OaDataScopes.Self,
             ["Contract"] = role is "HR/行政" or "系统管理员" ? OaDataScopes.Company : OaDataScopes.Self,
-            ["Purchase"] = role == "系统管理员" ? OaDataScopes.Company : OaDataScopes.Self
+            ["Purchase"] = role == "系统管理员" ? OaDataScopes.Company : OaDataScopes.Self,
+            ["Seal"] = role is "HR/行政" or "系统管理员" ? OaDataScopes.Company : OaDataScopes.Self
         });
 }
 

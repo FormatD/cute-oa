@@ -10,6 +10,7 @@ public static class ProcessDefaults
     public static readonly Guid ExpenseId = Guid.Parse("a2222222-2222-2222-2222-222222222222");
     public static readonly Guid TravelId = Guid.Parse("a3333333-3333-3333-3333-333333333333");
     public static readonly Guid PurchaseId = Guid.Parse("a4444444-4444-4444-4444-444444444444");
+    public static readonly Guid SealId = Guid.Parse("a5555555-5555-5555-5555-555555555555");
 
     public static IReadOnlyList<ProcessDefinitionView> All { get; } =
     [
@@ -34,6 +35,12 @@ public static class ProcessDefaults
             new(Guid.Empty, 1, 5_000m, ["DIRECT_MANAGER"]),
             new(Guid.Empty, 2, 50_000m, ["DIRECT_MANAGER", "ROLE:财务经理"]),
             new(Guid.Empty, 3, null, ["DIRECT_MANAGER", "ROLE:财务经理", "ROLE:总经理"])
+        ], "system", DateTimeOffset.UnixEpoch, "system", DateTimeOffset.UnixEpoch),
+        new(SealId, "SEAL_DEFAULT", "默认用章审批", "Seal", 1, ProcessDefinitionStatus.Published,
+        [
+            new(Guid.Empty, 1, 1m, ["DIRECT_MANAGER"]),
+            new(Guid.Empty, 2, 2m, ["DIRECT_MANAGER", "ROLE:HR/行政"]),
+            new(Guid.Empty, 3, null, ["DIRECT_MANAGER", "ROLE:HR/行政", "ROLE:总经理"])
         ], "system", DateTimeOffset.UnixEpoch, "system", DateTimeOffset.UnixEpoch)
     ];
 }
@@ -153,12 +160,12 @@ public sealed class ProcessDefinitionService(OaDbContext db, DemoData data) : IP
     private ServiceResult<bool> Validate(string name, string businessType, IReadOnlyList<ProcessRouteInput> routes, int priority, IReadOnlyList<string>? departmentIds, IReadOnlyList<string>? leaveTypes)
     {
         if (string.IsNullOrWhiteSpace(name) || name.Trim().Length > 100) return ServiceResult<bool>.Failure("流程名称应为 1–100 个字符。");
-        if (businessType is not ("Leave" or "Expense" or "Travel" or "Purchase")) return ServiceResult<bool>.Failure("业务类型仅支持 Leave、Expense、Travel 或 Purchase。");
+        if (businessType is not ("Leave" or "Expense" or "Travel" or "Purchase" or "Seal")) return ServiceResult<bool>.Failure("业务类型仅支持 Leave、Expense、Travel、Purchase 或 Seal。");
         if (priority is < 0 or > 1000) return ServiceResult<bool>.Failure("流程优先级应为 0–1000。", "VALIDATION_001");
         var departments = (departmentIds ?? []).Distinct().ToList();
         if (departments.Any(id => data.Departments.All(item => item.Id != id))) return ServiceResult<bool>.Failure("适用部门不存在。", "VALIDATION_001");
         var categories = (leaveTypes ?? []).Distinct().ToList();
-        if (businessType is "Expense" or "Travel" or "Purchase" && categories.Count > 0) return ServiceResult<bool>.Failure("非请假流程不能设置请假类型条件。", "VALIDATION_001");
+        if (businessType is "Expense" or "Travel" or "Purchase" or "Seal" && categories.Count > 0) return ServiceResult<bool>.Failure("非请假流程不能设置请假类型条件。", "VALIDATION_001");
         if (categories.Any(value => !Enum.TryParse<LeaveType>(value, true, out _))) return ServiceResult<bool>.Failure("适用假别包含无效值。", "VALIDATION_001");
         if (routes.Count == 0 || routes[^1].MaxValue is not null || routes.Take(routes.Count - 1).Any(route => route.MaxValue is null or <= 0))
             return ServiceResult<bool>.Failure("流程至少包含一条规则，且仅最后一条可作为无上限规则。");
