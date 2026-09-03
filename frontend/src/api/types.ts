@@ -116,3 +116,106 @@ export type EmploymentContract = { id: string; contractNumber: string; userId: s
 export type SaveEmploymentContract = { userId: string; contractType: EmploymentContractType; signedDate: string | null; startDate: string; endDate: string | null; probationStartDate: string | null; probationEndDate: string | null; workLocation: string; positionName: string; projectDescription: string | null; attachments: string[]; notes: string | null; version: number; changeReason: string }
 export type ContractAlertSummary = { missingWrittenContract: number; expired: number; within7Days: number; within30Days: number; within60Days: number; within90Days: number; openEndedReviewRequired: number; unacknowledged: number; atRiskContracts: number }
 export type GenerateContractDemoResult = { created: number; skipped: number }
+
+export type DocumentCategory = {
+  id: string
+  code: string
+  name: string
+  description: string | null
+  parentId: string | null
+  departmentId: string | null
+  sortOrder: number
+  documentCount: number
+}
+
+export type SaveDocumentCategory = {
+  code: string
+  name: string
+  description?: string | null
+  parentId?: string | null
+  departmentId?: string | null
+  sortOrder: number
+}
+
+export type DocumentStatus = 'Draft' | 'Published' | 'Archived'
+
+export type KnowledgeDocument = {
+  id: string
+  number: string
+  categoryId: string
+  categoryName: string
+  title: string
+  summary: string
+  content: string
+  tags: string[]
+  version: number
+  status: DocumentStatus
+  isMustRead: boolean
+  departmentId: string | null
+  effectiveDate: string
+  expiryDate: string | null
+  attachments: string[]
+  viewCount: number
+  downloadCount: number
+  createdBy: string
+  createdByName: string
+  publishedAt: string | null
+  publishedByName: string | null
+  archivedAt: string | null
+  createdAt: string
+  updatedAt: string
+  hasAcknowledged: boolean
+  acknowledgedAt: string | null
+}
+
+export type SaveDocument = {
+  title: string
+  categoryId: string
+  summary: string
+  content: string
+  tags?: string[]
+  isMustRead: boolean
+  departmentId?: string | null
+  effectiveDate: string
+  expiryDate?: string | null
+  attachments?: string[]
+}
+
+export type ReviseDocument = {
+  version: number
+  title: string
+  summary: string
+  content: string
+  changeNotes?: string
+  attachments?: string[]
+}
+
+export type DocumentVersion = {
+  id: string
+  version: number
+  title: string
+  summary: string
+  content: string
+  changeNotes: string | null
+  attachments: string[]
+  publishedAt: string
+  publishedByName: string
+}
+
+export type DocumentAcknowledgement = {
+  id: string
+  documentId: string
+  documentVersion: number
+  userId: string
+  userName: string
+  departmentName: string | null
+  acknowledgedAt: string
+}
+
+export type DocumentAcknowledgementStats = {
+  totalRequired: number
+  totalAcknowledged: number
+  acknowledgedPercentage: number
+  acknowledgedList: DocumentAcknowledgement[]
+  pendingList: { id: string; name: string; departmentName: string; managerName: string | null }[]
+}

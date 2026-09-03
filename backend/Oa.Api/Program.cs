@@ -35,6 +35,7 @@ builder.Services.AddScoped<ExpenseService>();
 builder.Services.AddScoped<TravelService>();
 builder.Services.AddScoped<PurchaseService>();
 builder.Services.AddScoped<SealService>();
+builder.Services.AddScoped<KnowledgeDocumentService>();
 builder.Services.AddScoped<IdempotencyService>();
 builder.Services.AddScoped<NotificationService>();
 var fileScanningMode = FileScanningPolicy.ValidateMode(builder.Configuration["FileScanning:Mode"], builder.Environment.IsDevelopment());
@@ -525,7 +526,7 @@ app.MapPost("/api/v1/files", async (IFormFile? file, HttpRequest request, DemoAu
     if (file is null) return Results.BadRequest(new { code = "FILE_001", message = "请选择要上传的文件。" });
     return await WriteAsync(request, actor, idempotency, () => service.UploadAsync(actor, file, cancellationToken), true);
 }).DisableAntiforgery();
-app.MapGet("/api/v1/files/{id:guid}", (Guid id, string resourceType, Guid resourceId, HttpRequest request, DemoAuthService auth, LeaveService leave, ExpenseService expense, TravelService travel, PurchaseService purchase, SealService seal, AttendanceService attendance, EmploymentContractService contracts, FileService files) =>
+app.MapGet("/api/v1/files/{id:guid}", (Guid id, string resourceType, Guid resourceId, HttpRequest request, DemoAuthService auth, LeaveService leave, ExpenseService expense, TravelService travel, PurchaseService purchase, SealService seal, AttendanceService attendance, EmploymentContractService contracts, KnowledgeDocumentService documents, FileService files) =>
 {
     var actor = Actor(request, auth);
     var permitted = resourceType.ToLowerInvariant() switch
@@ -537,6 +538,7 @@ app.MapGet("/api/v1/files/{id:guid}", (Guid id, string resourceType, Guid resour
         "seal" => seal.Get(actor, resourceId).Value is { } requestDoc && (requestDoc.Attachments.Contains(id.ToString()) || requestDoc.Execution?.Attachments.Contains(id.ToString()) == true || requestDoc.Return?.Attachments.Contains(id.ToString()) == true),
         "attendance" => attendance.Get(actor, resourceId).Value?.Appeals.Any(appeal => appeal.Attachments.Contains(id.ToString())) == true,
         "contract" => contracts.Get(actor, resourceId).Value?.Attachments.Contains(id.ToString()) == true,
+        "document" => documents.CanAccessAttachment(actor, resourceId, id),
         _ => false
     };
     if (!permitted) return Results.NotFound(new { code = "DATA_001", message = "文件不存在或无查看权限。" });
@@ -659,6 +661,109 @@ app.MapPost("/api/v1/seal-requests/demo-data", (HttpRequest request, DemoAuthSer
     if (!configuration.GetValue<bool>("DemoFeatures:AllowDataGeneration")) return Results.NotFound(new { code = "DATA_001", message = "演示数据生成功能未启用。" });
     var actor = Actor(request, auth);
     return Write(request, actor, idempotency, () => service.GenerateDemoData(actor), atomic: true, fingerprintPayload: new { operation = "seal-demo-data" });
+});
+
+// -------------------------------------------------------------
+// Document Center & Knowledge Base Endpoints
+// -------------------------------------------------------------
+app.MapGet("/api/v1/documents/categories", (HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service) =>
+    Results.Ok(service.ListCategories(Actor(request, auth)).Value));
+
+app.MapPost("/api/v1/documents/categories", (SaveCategoryRequest body, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.SaveCategory(actor, body), created: true, atomic: true, fingerprintPayload: body);
+});
+
+app.MapPut("/api/v1/documents/categories/{id:guid}", (Guid id, SaveCategoryRequest body, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.SaveCategory(actor, body, id), atomic: true, fingerprintPayload: new { id, body });
+});
+
+app.MapDelete("/api/v1/documents/categories/{id:guid}", (Guid id, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.DeleteCategory(actor, id), atomic: true, fingerprintPayload: new { id });
+});
+
+app.MapGet("/api/v1/documents", (string? keyword, Guid? categoryId, string? tag, int? status, bool? mustRead, bool? pendingAck, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service) =>
+{
+    var actor = Actor(request, auth);
+    var docStatus = status.HasValue ? (DocumentStatus?)status.Value : null;
+    var result = service.ListDocuments(actor, keyword, categoryId, tag, docStatus, mustRead, pendingAck, page ?? 1, pageSize ?? 20);
+    return Results.Ok(result.Value);
+});
+
+app.MapGet("/api/v1/documents/{id:guid}", (Guid id, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service) =>
+{
+    var actor = Actor(request, auth);
+    var result = service.GetDocument(actor, id);
+    return result.IsSuccess ? Results.Ok(result.Value) : Results.NotFound(new { code = result.Code, message = result.Error });
+});
+
+app.MapPost("/api/v1/documents", (SaveDocumentRequest body, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.CreateDraft(actor, body), created: true, atomic: true, fingerprintPayload: body);
+});
+
+app.MapPut("/api/v1/documents/{id:guid}", (Guid id, SaveDocumentRequest body, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.UpdateDraft(actor, id, body), atomic: true, fingerprintPayload: new { id, body });
+});
+
+app.MapDelete("/api/v1/documents/{id:guid}", (Guid id, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.DeleteDraft(actor, id), atomic: true, fingerprintPayload: new { id });
+});
+
+app.MapPost("/api/v1/documents/{id:guid}/publish", (Guid id, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.PublishDocument(actor, id), atomic: true, fingerprintPayload: new { id });
+});
+
+app.MapPost("/api/v1/documents/{id:guid}/revise", (Guid id, ReviseDocumentRequest body, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.ReviseDocument(actor, id, body), atomic: true, fingerprintPayload: new { id, body });
+});
+
+app.MapPost("/api/v1/documents/{id:guid}/archive", (Guid id, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.ArchiveDocument(actor, id), atomic: true, fingerprintPayload: new { id });
+});
+
+app.MapPost("/api/v1/documents/{id:guid}/acknowledge", (Guid id, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    var clientIp = request.HttpContext.Connection.RemoteIpAddress?.ToString();
+    return Write(request, actor, idempotency, () => service.AcknowledgeDocument(actor, id, clientIp), atomic: true, fingerprintPayload: new { id });
+});
+
+app.MapGet("/api/v1/documents/{id:guid}/acknowledgement-stats", (Guid id, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service) =>
+{
+    var actor = Actor(request, auth);
+    var result = service.GetAcknowledgementStats(actor, id);
+    return result.IsSuccess ? Results.Ok(result.Value) : Results.BadRequest(new { code = result.Code, message = result.Error });
+});
+
+app.MapGet("/api/v1/documents/{id:guid}/versions", (Guid id, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service) =>
+{
+    var actor = Actor(request, auth);
+    var result = service.ListVersions(actor, id);
+    return result.IsSuccess ? Results.Ok(result.Value) : Results.BadRequest(new { code = result.Code, message = result.Error });
+});
+
+app.MapPost("/api/v1/documents/demo-data", (HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency, IConfiguration configuration) =>
+{
+    if (!configuration.GetValue<bool>("DemoFeatures:AllowDataGeneration")) return Results.NotFound(new { code = "DATA_001", message = "演示数据生成功能未启用。" });
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.GenerateDemoData(actor), atomic: true, fingerprintPayload: new { operation = "document-demo-data" });
 });
 
 app.Run();

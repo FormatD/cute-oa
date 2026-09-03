@@ -4,6 +4,7 @@ import { createAnnouncementApi } from './modules/announcements'
 import { createAttendanceApi } from './modules/attendance'
 import { createAuthApi } from './modules/auth'
 import { createContractApi } from './modules/contracts'
+import { createDocumentApi } from './modules/documents'
 import { createExpenseApi } from './modules/expense'
 import { createFileApi } from './modules/files'
 import { createIdentityApi } from './modules/identity'
@@ -22,6 +23,7 @@ function createApiClient(http: HttpClient) {
     attendance: createAttendanceApi(http),
     auth: createAuthApi(http),
     contracts: createContractApi(http),
+    documents: createDocumentApi(http),
     expense: createExpenseApi(http),
     files: createFileApi(http),
     identity: createIdentityApi(http),

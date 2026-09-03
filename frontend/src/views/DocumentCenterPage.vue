@@ -1,0 +1,1094 @@
+<script setup lang="ts">
+import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { useAuthStore } from '../stores/auth'
+import { useDocumentStore } from '../stores/documents'
+import { useUiStore } from '../stores/ui'
+import OaDialog from '../components/OaDialog.vue'
+import type { DocumentCategory, KnowledgeDocument, SaveDocument, SaveDocumentCategory } from '../api/types'
+
+const router = useRouter()
+const auth = useAuthStore()
+const docStore = useDocumentStore()
+const ui = useUiStore()
+
+const isManager = computed(() => auth.currentUser?.permissions?.includes('DOCUMENT_MANAGE') === true)
+
+// Dialogs
+const documentEditorOpen = ref(false)
+const editingDocId = ref<string | null>(null)
+const categoryManagerOpen = ref(false)
+const categoryEditorOpen = ref(false)
+const editingCatId = ref<string | null>(null)
+
+const docForm = reactive<{
+  title: string
+  categoryId: string
+  departmentId: string
+  summary: string
+  content: string
+  tagsInput: string
+  isMustRead: boolean
+  effectiveDate: string
+  expiryDate: string
+  attachments: string[]
+}>({
+  title: '',
+  categoryId: '',
+  departmentId: '',
+  summary: '',
+  content: '',
+  tagsInput: '',
+  isMustRead: false,
+  effectiveDate: new Date().toISOString().slice(0, 10),
+  expiryDate: '',
+  attachments: []
+})
+
+const catForm = reactive<{
+  code: string
+  name: string
+  description: string
+  departmentId: string
+  sortOrder: number
+}>({
+  code: '',
+  name: '',
+  description: '',
+  departmentId: '',
+  sortOrder: 10
+})
+
+onMounted(async () => {
+  await Promise.all([
+    docStore.loadCategories(),
+    docStore.loadDocuments()
+  ])
+})
+
+function onSearch() {
+  docStore.page = 1
+  void docStore.loadDocuments()
+}
+
+function selectCategory(catId: string) {
+  docStore.selectedCategoryId = docStore.selectedCategoryId === catId ? '' : catId
+  docStore.page = 1
+  void docStore.loadDocuments()
+}
+
+function selectQuickFilter(type: 'all' | 'mustRead' | 'pendingAck' | 'draft' | 'archived') {
+  docStore.selectedCategoryId = ''
+  docStore.selectedTag = ''
+  docStore.keyword = ''
+  docStore.selectedStatus = null
+  docStore.filterMustRead = undefined
+  docStore.filterPendingAck = undefined
+
+  if (type === 'mustRead') {
+    docStore.filterMustRead = true
+  } else if (type === 'pendingAck') {
+    docStore.filterMustRead = true
+    docStore.filterPendingAck = true
+  } else if (type === 'draft') {
+    docStore.selectedStatus = 0
+  } else if (type === 'archived') {
+    docStore.selectedStatus = 2
+  }
+  docStore.page = 1
+  void docStore.loadDocuments()
+}
+
+function selectTag(tag: string) {
+  docStore.selectedTag = docStore.selectedTag === tag ? '' : tag
+  docStore.page = 1
+  void docStore.loadDocuments()
+}
+
+function resetFilters() {
+  docStore.keyword = ''
+  docStore.selectedCategoryId = ''
+  docStore.selectedTag = ''
+  docStore.selectedStatus = null
+  docStore.filterMustRead = undefined
+  docStore.filterPendingAck = undefined
+  docStore.page = 1
+  void docStore.loadDocuments()
+}
+
+// Document Create/Edit
+function openCreateDocument() {
+  editingDocId.value = null
+  docForm.title = ''
+  docForm.categoryId = docStore.categories[0]?.id ?? ''
+  docForm.departmentId = ''
+  docForm.summary = ''
+  docForm.content = ''
+  docForm.tagsInput = ''
+  docForm.isMustRead = false
+  docForm.effectiveDate = new Date().toISOString().slice(0, 10)
+  docForm.expiryDate = ''
+  docForm.attachments = []
+  documentEditorOpen.value = true
+}
+
+function openEditDocument(doc: KnowledgeDocument) {
+  editingDocId.value = doc.id
+  docForm.title = doc.title
+  docForm.categoryId = doc.categoryId
+  docForm.departmentId = doc.departmentId || ''
+  docForm.summary = doc.summary
+  docForm.content = doc.content
+  docForm.tagsInput = doc.tags.join(', ')
+  docForm.isMustRead = doc.isMustRead
+  docForm.effectiveDate = doc.effectiveDate
+  docForm.expiryDate = doc.expiryDate || ''
+  docForm.attachments = [...doc.attachments]
+  documentEditorOpen.value = true
+}
+
+async function submitDocument() {
+  if (!docForm.title.trim()) {
+    ui.showToast('请输入制度文档标题', 'error')
+    return
+  }
+  if (!docForm.categoryId) {
+    ui.showToast('请选择所属目录分类', 'error')
+    return
+  }
+  if (!docForm.summary.trim()) {
+    ui.showToast('请输入文档摘要', 'error')
+    return
+  }
+  if (!docForm.content.trim()) {
+    ui.showToast('请输入文档正文', 'error')
+    return
+  }
+
+  const tags = docForm.tagsInput.split(/[,，]/).map(t => t.trim()).filter(Boolean)
+  const payload: SaveDocument = {
+    title: docForm.title.trim(),
+    categoryId: docForm.categoryId,
+    departmentId: docForm.departmentId.trim() || null,
+    summary: docForm.summary.trim(),
+    content: docForm.content.trim(),
+    tags,
+    isMustRead: docForm.isMustRead,
+    effectiveDate: docForm.effectiveDate,
+    expiryDate: docForm.expiryDate.trim() || null,
+    attachments: docForm.attachments
+  }
+
+  let res: KnowledgeDocument | null = null
+  if (editingDocId.value) {
+    res = await docStore.updateDraft(editingDocId.value, payload)
+  } else {
+    res = await docStore.createDraft(payload)
+  }
+
+  if (res) {
+    documentEditorOpen.value = false
+  }
+}
+
+async function publishDraft(doc: KnowledgeDocument) {
+  await docStore.publishDocument(doc.id)
+}
+
+async function deleteDraft(doc: KnowledgeDocument) {
+  if (confirm(`确认删除制度草稿《${doc.title}》吗？`)) {
+    await docStore.deleteDraft(doc.id)
+  }
+}
+
+// Category Management
+function openCategoryManager() {
+  categoryManagerOpen.value = true
+}
+
+function openCreateCategory() {
+  editingCatId.value = null
+  catForm.code = ''
+  catForm.name = ''
+  catForm.description = ''
+  catForm.departmentId = ''
+  catForm.sortOrder = 10
+  categoryEditorOpen.value = true
+}
+
+function openEditCategory(cat: DocumentCategory) {
+  editingCatId.value = cat.id
+  catForm.code = cat.code
+  catForm.name = cat.name
+  catForm.description = cat.description || ''
+  catForm.departmentId = cat.departmentId || ''
+  catForm.sortOrder = cat.sortOrder
+  categoryEditorOpen.value = true
+}
+
+async function submitCategory() {
+  if (!catForm.code.trim()) {
+    ui.showToast('请输入分类编码', 'error')
+    return
+  }
+  if (!catForm.name.trim()) {
+    ui.showToast('请输入分类名称', 'error')
+    return
+  }
+
+  const payload: SaveDocumentCategory = {
+    code: catForm.code.trim().toUpperCase(),
+    name: catForm.name.trim(),
+    description: catForm.description.trim() || null,
+    departmentId: catForm.departmentId.trim() || null,
+    sortOrder: Number(catForm.sortOrder) || 10
+  }
+
+  const ok = await docStore.saveCategory(payload, editingCatId.value || undefined)
+  if (ok) {
+    categoryEditorOpen.value = false
+  }
+}
+
+async function deleteCategory(cat: DocumentCategory) {
+  if (cat.documentCount > 0) {
+    ui.showToast('该分类下存在有效文档，不可删除', 'error')
+    return
+  }
+  if (confirm(`确认删除分类「${cat.name}」吗？`)) {
+    await docStore.deleteCategory(cat.id)
+  }
+}
+</script>
+
+<template>
+  <div class="page-heading">
+    <div>
+      <p class="eyebrow">COMPANY KNOWLEDGE BASE</p>
+      <h1>企业知识库与制度中心</h1>
+      <p>集中查阅全公司规章制度、工作规范指引、合规守则及公文合同模板。</p>
+    </div>
+    <div class="actions">
+      <button v-if="isManager" class="secondary" @click="docStore.generateDemoData">
+        生成示例制度
+      </button>
+      <button v-if="isManager" class="secondary" @click="openCategoryManager">
+        目录分类管理
+      </button>
+      <button v-if="isManager" @click="openCreateDocument">
+        <span>＋</span> 编制制度/文档
+      </button>
+    </div>
+  </div>
+
+  <!-- Must-Read Policy Alert Banner -->
+  <aside v-if="docStore.pendingMustReadDocuments.length" class="must-read-banner">
+    <div class="banner-icon">⚠</div>
+    <div class="banner-content">
+      <strong>待签收合规提醒</strong>
+      <p>您有 {{ docStore.pendingMustReadDocuments.length }} 份重要企业合规制度尚未完成在线签署确认，请尽快查阅并签署：</p>
+      <div class="banner-links">
+        <button
+          v-for="doc in docStore.pendingMustReadDocuments"
+          :key="doc.id"
+          class="banner-link-btn"
+          @click="router.push(`/documents/${doc.id}`)"
+        >
+          《{{ doc.title }}》v{{ doc.version }} (立即签署 →)
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <div class="knowledge-layout">
+    <!-- Left Navigation Column -->
+    <aside class="kb-sidebar">
+      <section class="panel nav-panel">
+        <h3>快捷视图</h3>
+        <ul class="filter-nav">
+          <li
+            :class="{ active: !docStore.selectedCategoryId && !docStore.filterMustRead && docStore.selectedStatus === null }"
+            @click="selectQuickFilter('all')"
+          >
+            <span>全部制度与文档</span>
+            <small>{{ docStore.total }}</small>
+          </li>
+          <li
+            :class="{ active: docStore.filterMustRead && !docStore.filterPendingAck }"
+            @click="selectQuickFilter('mustRead')"
+          >
+            <span>★ 全员/部门必读</span>
+          </li>
+          <li
+            :class="{ active: docStore.filterPendingAck }"
+            @click="selectQuickFilter('pendingAck')"
+          >
+            <span class="highlight-text">⚠ 待我签署确认</span>
+            <b v-if="docStore.pendingMustReadDocuments.length" class="badge">
+              {{ docStore.pendingMustReadDocuments.length }}
+            </b>
+          </li>
+          <li
+            v-if="isManager"
+            :class="{ active: docStore.selectedStatus === 0 }"
+            @click="selectQuickFilter('draft')"
+          >
+            <span>草稿箱</span>
+          </li>
+          <li
+            v-if="isManager"
+            :class="{ active: docStore.selectedStatus === 2 }"
+            @click="selectQuickFilter('archived')"
+          >
+            <span>已归档文档</span>
+          </li>
+        </ul>
+
+        <hr class="divider" />
+
+        <div class="category-header">
+          <h3>目录分类</h3>
+          <button v-if="isManager" class="text-btn" @click="openCreateCategory">＋ 新增</button>
+        </div>
+        <ul class="category-tree">
+          <li
+            v-for="cat in docStore.categories"
+            :key="cat.id"
+            :class="{ active: docStore.selectedCategoryId === cat.id }"
+            @click="selectCategory(cat.id)"
+          >
+            <span class="cat-name">📁 {{ cat.name }}</span>
+            <span class="cat-count">{{ cat.documentCount }}</span>
+          </li>
+          <li v-if="!docStore.categories.length" class="empty-text">暂无分类</li>
+        </ul>
+      </section>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="kb-main">
+      <!-- Search and Filter Bar -->
+      <section class="panel search-panel">
+        <div class="search-row">
+          <div class="search-input-wrap">
+            <input
+              v-model="docStore.keyword"
+              placeholder="搜索制度标题、文号、摘要或正文关键词…"
+              @keyup.enter="onSearch"
+            />
+            <button class="search-btn" @click="onSearch">检索</button>
+          </div>
+
+          <div class="filter-controls">
+            <select v-if="isManager" v-model="docStore.selectedStatus" @change="onSearch">
+              <option :value="null">全部状态</option>
+              <option :value="1">已发布</option>
+              <option :value="0">编制草稿</option>
+              <option :value="2">已归档</option>
+            </select>
+
+            <button class="secondary" @click="resetFilters">重置筛选</button>
+          </div>
+        </div>
+
+        <div v-if="docStore.selectedTag" class="active-tag-chip">
+          <span>当前标签：{{ docStore.selectedTag }}</span>
+          <button @click="selectTag('')">✕</button>
+        </div>
+      </section>
+
+      <!-- Document Cards List -->
+      <div v-if="docStore.loading" class="panel empty">
+        正在加载企业知识库…
+      </div>
+
+      <div v-else-if="docStore.documents.length" class="doc-card-grid">
+        <article
+          v-for="doc in docStore.documents"
+          :key="doc.id"
+          class="doc-card"
+          :class="{ 'must-read-card': doc.isMustRead && !doc.hasAcknowledged }"
+        >
+          <div class="doc-card-header">
+            <span class="cat-badge">{{ doc.categoryName }}</span>
+            <span class="version-chip">v{{ doc.version }}.0</span>
+            <span v-if="doc.status === 'Draft'" class="status-badge draft">草稿</span>
+            <span v-else-if="doc.status === 'Archived'" class="status-badge archived">已归档</span>
+            <span v-if="doc.isMustRead && !doc.hasAcknowledged" class="ack-badge pending">
+              必读 · 待签收
+            </span>
+            <span v-else-if="doc.isMustRead && doc.hasAcknowledged" class="ack-badge done">
+              ✓ 已签署
+            </span>
+          </div>
+
+          <h2 class="doc-title" @click="router.push(`/documents/${doc.id}`)">
+            {{ doc.title }}
+          </h2>
+
+          <p class="doc-summary">{{ doc.summary }}</p>
+
+          <div v-if="doc.tags && doc.tags.length" class="doc-tags">
+            <span
+              v-for="tag in doc.tags"
+              :key="tag"
+              class="doc-tag"
+              :class="{ selected: docStore.selectedTag === tag }"
+              @click.stop="selectTag(tag)"
+            >
+              #{{ tag }}
+            </span>
+          </div>
+
+          <div class="doc-card-footer">
+            <div class="doc-meta">
+              <span class="doc-number">{{ doc.number }}</span>
+              <span>发布于 {{ (doc.publishedAt || doc.createdAt).slice(0, 10) }}</span>
+              <span v-if="doc.departmentId" class="dept-scope">仅限指定部门</span>
+            </div>
+
+            <div class="doc-actions">
+              <button
+                v-if="doc.status === 'Draft' && isManager"
+                class="secondary small-btn"
+                @click="openEditDocument(doc)"
+              >
+                编辑草稿
+              </button>
+              <button
+                v-if="doc.status === 'Draft' && isManager"
+                class="small-btn"
+                @click="publishDraft(doc)"
+              >
+                正式发布
+              </button>
+              <button
+                v-if="doc.status === 'Draft' && isManager"
+                class="danger-outline small-btn"
+                @click="deleteDraft(doc)"
+              >
+                删除
+              </button>
+              <button
+                v-if="doc.status === 'Published'"
+                class="secondary small-btn"
+                @click="router.push(`/documents/${doc.id}`)"
+              >
+                阅读全文 →
+              </button>
+            </div>
+          </div>
+        </article>
+      </div>
+
+      <div v-else class="panel empty">
+        暂无符合条件的制度文档。
+      </div>
+
+      <!-- Pagination -->
+      <div v-if="docStore.totalPages > 1" class="pagination">
+        <span>共 {{ docStore.total }} 篇制度文档</span>
+        <div>
+          <button
+            class="secondary"
+            :disabled="docStore.page <= 1"
+            @click="docStore.loadDocuments(docStore.page - 1)"
+          >
+            上一页
+          </button>
+          <b>{{ docStore.page }} / {{ docStore.totalPages }}</b>
+          <button
+            class="secondary"
+            :disabled="docStore.page >= docStore.totalPages"
+            @click="docStore.loadDocuments(docStore.page + 1)"
+          >
+            下一页
+          </button>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Document Create / Edit Dialog -->
+  <OaDialog
+    :open="documentEditorOpen"
+    :title="editingDocId ? '编辑制度文档草稿' : '编制新制度/规范文档'"
+    description="编制完成后保存在草稿箱中，确认无误后可一键正式向全员或部门发布。"
+    :submit-label="editingDocId ? '更新草稿' : '保存草稿'"
+    :busy="docStore.loading"
+    @close="documentEditorOpen = false"
+    @submit="submitDocument"
+  >
+    <label class="dialog-field">
+      文档标题
+      <input v-model="docForm.title" maxlength="100" placeholder="例如：《差旅标准与费用报销管理实施细则》" />
+    </label>
+
+    <div class="field-row">
+      <label class="dialog-field">
+        所属目录分类
+        <select v-model="docForm.categoryId">
+          <option v-for="cat in docStore.categories" :key="cat.id" :value="cat.id">
+            {{ cat.name }}
+          </option>
+        </select>
+      </label>
+
+      <label class="dialog-field">
+        适用部门
+        <select v-model="docForm.departmentId">
+          <option value="">全公司公开</option>
+          <option value="engineering">研发部</option>
+          <option value="finance">财务部</option>
+          <option value="hr">行政人事部</option>
+          <option value="sales">销售部</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="field-row">
+      <label class="dialog-field">
+        生效日期
+        <input v-model="docForm.effectiveDate" type="date" />
+      </label>
+
+      <label class="dialog-field">
+        失效日期（可选）
+        <input v-model="docForm.expiryDate" type="date" placeholder="长期有效留空" />
+      </label>
+    </div>
+
+    <div class="field-row">
+      <label class="dialog-field">
+        检索标签（以逗号分隔）
+        <input v-model="docForm.tagsInput" placeholder="例如：财务, 报销, 差旅标准" />
+      </label>
+
+      <label class="dialog-field checkbox-field">
+        <input v-model="docForm.isMustRead" type="checkbox" />
+        <span>要求全员/部门员工在线签署确认（必读制度）</span>
+      </label>
+    </div>
+
+    <label class="dialog-field">
+      摘要简介（1–300 字）
+      <textarea v-model="docForm.summary" rows="2" maxlength="300" placeholder="简要概述该制度的核心适用范围及调整要点"></textarea>
+    </label>
+
+    <label class="dialog-field">
+      正文内容（支持 Markdown 语法与表格）
+      <textarea v-model="docForm.content" rows="12" maxlength="20000" placeholder="支持 # 标题、* 列表、表格及引用语法…"></textarea>
+    </label>
+  </OaDialog>
+
+  <!-- Category Manager Dialog -->
+  <OaDialog
+    :open="categoryManagerOpen"
+    title="目录分类管理"
+    description="管理企业知识库的一级目录与可见性设置。"
+    submit-label="关闭"
+    @close="categoryManagerOpen = false"
+    @submit="categoryManagerOpen = false"
+  >
+    <div class="cat-mgr-header">
+      <button class="secondary" @click="openCreateCategory">＋ 新增分类</button>
+    </div>
+
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>分类名称</th>
+          <th>编码</th>
+          <th>适用部门</th>
+          <th>排序号</th>
+          <th>文档数</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="cat in docStore.categories" :key="cat.id">
+          <td><strong>{{ cat.name }}</strong></td>
+          <td><code>{{ cat.code }}</code></td>
+          <td>{{ cat.departmentId || '全公司' }}</td>
+          <td>{{ cat.sortOrder }}</td>
+          <td>{{ cat.documentCount }}</td>
+          <td class="task-actions">
+            <button class="secondary small-btn" @click="openEditCategory(cat)">编辑</button>
+            <button
+              v-if="cat.documentCount === 0"
+              class="danger-outline small-btn"
+              @click="deleteCategory(cat)"
+            >
+              删除
+            </button>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+  </OaDialog>
+
+  <!-- Category Edit Dialog -->
+  <OaDialog
+    :open="categoryEditorOpen"
+    :title="editingCatId ? '编辑分类' : '新增分类'"
+    description="设置分类名称、编码及适用部门。"
+    submit-label="保存分类"
+    @close="categoryEditorOpen = false"
+    @submit="submitCategory"
+  >
+    <label class="dialog-field">
+      分类名称
+      <input v-model="catForm.name" maxlength="100" placeholder="例如：技术规范与架构指引" />
+    </label>
+
+    <label class="dialog-field">
+      分类编码
+      <input
+        v-model="catForm.code"
+        maxlength="64"
+        placeholder="例如：TECH_GUIDE（唯一大写英文字符）"
+        :disabled="!!editingCatId"
+      />
+    </label>
+
+    <label class="dialog-field">
+      适用部门
+      <select v-model="catForm.departmentId">
+        <option value="">全公司公开</option>
+        <option value="engineering">研发部</option>
+        <option value="finance">财务部</option>
+        <option value="hr">行政人事部</option>
+        <option value="sales">销售部</option>
+      </select>
+    </label>
+
+    <label class="dialog-field">
+      排序号
+      <input v-model.number="catForm.sortOrder" type="number" />
+    </label>
+
+    <label class="dialog-field">
+      描述说明
+      <input v-model="catForm.description" maxlength="200" placeholder="分类简述" />
+    </label>
+  </OaDialog>
+</template>
+
+<style scoped>
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.must-read-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  background: #fff8e6;
+  border: 1px solid #ffd591;
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin-bottom: 20px;
+}
+
+.banner-icon {
+  font-size: 24px;
+  color: #fa8c16;
+}
+
+.banner-content strong {
+  color: #d46b08;
+  font-size: 15px;
+}
+
+.banner-content p {
+  margin: 4px 0 10px;
+  color: #595959;
+  font-size: 13px;
+}
+
+.banner-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.banner-link-btn {
+  background: #fa8c16;
+  color: #fff;
+  border: none;
+  padding: 6px 14px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+  font-weight: 500;
+}
+.banner-link-btn:hover {
+  background: #d46b08;
+}
+
+.knowledge-layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 20px;
+}
+
+.kb-sidebar {
+  display: flex;
+  flex-direction: column;
+}
+
+.nav-panel {
+  padding: 16px;
+}
+
+.nav-panel h3 {
+  font-size: 14px;
+  color: #8c8c8c;
+  text-transform: uppercase;
+  margin-bottom: 12px;
+}
+
+.filter-nav {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.filter-nav li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  color: #262626;
+  transition: all 0.2s;
+}
+
+.filter-nav li:hover {
+  background: #f5f5f5;
+}
+
+.filter-nav li.active {
+  background: #e6f7ff;
+  color: #1890ff;
+  font-weight: 600;
+}
+
+.highlight-text {
+  color: #fa8c16;
+}
+
+.badge {
+  background: #ff4d4f;
+  color: #fff;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 10px;
+}
+
+.divider {
+  border: none;
+  border-top: 1px solid #f0f0f0;
+  margin: 16px 0;
+}
+
+.category-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.text-btn {
+  background: transparent;
+  border: none;
+  color: #1890ff;
+  cursor: pointer;
+  padding: 0;
+  font-size: 12px;
+}
+
+.category-tree {
+  list-style: none;
+  padding: 0;
+  margin: 10px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.category-tree li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.category-tree li:hover {
+  background: #f5f5f5;
+}
+
+.category-tree li.active {
+  background: #e6f7ff;
+  color: #1890ff;
+  font-weight: 600;
+}
+
+.cat-count {
+  background: #f0f0f0;
+  color: #595959;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 8px;
+}
+
+.empty-text {
+  color: #bfbfbf;
+  font-size: 12px;
+  padding: 8px;
+}
+
+.search-panel {
+  padding: 16px 20px;
+  margin-bottom: 16px;
+}
+
+.search-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.search-input-wrap {
+  display: flex;
+  flex: 1;
+  gap: 8px;
+}
+
+.search-input-wrap input {
+  flex: 1;
+}
+
+.search-btn {
+  white-space: nowrap;
+}
+
+.filter-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.active-tag-chip {
+  margin-top: 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #e6f7ff;
+  color: #1890ff;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+}
+
+.active-tag-chip button {
+  background: none;
+  border: none;
+  color: #1890ff;
+  cursor: pointer;
+  padding: 0;
+}
+
+.doc-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 16px;
+}
+
+.doc-card {
+  background: #fff;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+
+.doc-card:hover {
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  border-color: #d9d9d9;
+}
+
+.must-read-card {
+  border-left: 4px solid #fa8c16;
+}
+
+.doc-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.cat-badge {
+  background: #f5f5f5;
+  color: #595959;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.version-chip {
+  background: #fafafa;
+  color: #8c8c8c;
+  border: 1px solid #d9d9d9;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.status-badge {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.status-badge.draft {
+  background: #fffbe6;
+  color: #d48806;
+}
+.status-badge.archived {
+  background: #f5f5f5;
+  color: #bfbfbf;
+}
+
+.ack-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 500;
+}
+.ack-badge.pending {
+  background: #fff1f0;
+  color: #f5222d;
+  border: 1px solid #ffa39e;
+}
+.ack-badge.done {
+  background: #f6ffed;
+  color: #52c41a;
+  border: 1px solid #b7eb8f;
+}
+
+.doc-title {
+  font-size: 16px;
+  color: #1f1f1f;
+  margin: 0 0 8px;
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.doc-title:hover {
+  color: #1890ff;
+}
+
+.doc-summary {
+  font-size: 13px;
+  color: #595959;
+  line-height: 1.5;
+  margin: 0 0 12px;
+  flex: 1;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.doc-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.doc-tag {
+  font-size: 11px;
+  color: #8c8c8c;
+  background: #fafafa;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.doc-tag:hover,
+.doc-tag.selected {
+  background: #e6f7ff;
+  color: #1890ff;
+}
+
+.doc-card-footer {
+  border-top: 1px solid #f0f0f0;
+  padding-top: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.doc-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: #8c8c8c;
+}
+
+.doc-number {
+  font-family: monospace;
+}
+
+.dept-scope {
+  color: #fa8c16;
+}
+
+.doc-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.small-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.checkbox-field {
+  display: flex;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 8px;
+  margin-top: 24px;
+}
+
+.checkbox-field input {
+  width: auto;
+}
+
+.cat-mgr-header {
+  margin-bottom: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+</style>

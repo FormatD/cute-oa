@@ -259,6 +259,8 @@ Guid withdrawnPurchaseId;
 Guid inOfficeSealId;
 Guid outOfficeSealId;
 Guid withdrawnSealId;
+Guid testDocId;
+Guid testCatId;
 string purchaseOrderNumber = string.Empty;
 string fileRoot;
 var idempotencyKey = $"pg-integration-{Guid.NewGuid():N}";
@@ -1613,7 +1615,7 @@ await using (var writeDb = new OaDbContext(options))
     var twoTierDraft = sealService.CreateDraft(employee, new SaveSealRequest(
         "招投标文件盖章", "招投标文件", "智慧政务平台投标书", "公章", 2, false, null, null, null, "参与项目招投标", []));
     if (!twoTierDraft.IsSuccess) throw new InvalidOperationException("二类重要文档草稿创建失败。");
-    var twoTierSubmitted = sealService.Submit(employee, twoTierDraft.Value.Id);
+    var twoTierSubmitted = sealService.Submit(employee, twoTierDraft.Value!.Id);
     if (!twoTierSubmitted.IsSuccess || twoTierSubmitted.Value!.Tasks.Count != 2 || twoTierSubmitted.Value.Tasks[0].AssigneeId != "u-li" || twoTierSubmitted.Value.Tasks[1].AssigneeId != "u-sun")
         throw new InvalidOperationException("招投标文件未按规则路由至直属上级与HR两级审批。");
 
@@ -1631,6 +1633,87 @@ await using (var writeDb = new OaDbContext(options))
         throw new InvalidOperationException("用章草稿删除失败。");
     if (sealService.Get(employee, deletableSealDraft.Value.Id).IsSuccess)
         throw new InvalidOperationException("已删除的用章草稿仍能被查询。");
+
+    var docService = new KnowledgeDocumentService(data, writeDb);
+
+    // 1. Category tests
+    var unauthCat = docService.SaveCategory(employee, new SaveCategoryRequest("POLICY_SYS", "系统制度", "描述", null, null, 10));
+    if (unauthCat.Code != "AUTH_002") throw new InvalidOperationException("普通员工创建文档分类未被拦截。");
+
+    var catResult = docService.SaveCategory(hr, new SaveCategoryRequest("POLICY_SYS", "企业规章制度", "全公司通用治理制度", null, null, 10));
+    if (!catResult.IsSuccess) throw new InvalidOperationException("HR创建分类失败：" + catResult.Error);
+    testCatId = catResult.Value!.Id;
+
+    var catList = docService.ListCategories(employee);
+    if (!catList.IsSuccess || !catList.Value!.Any(c => c.Id == testCatId))
+        throw new InvalidOperationException("员工未能查询到新建的公开分类。");
+
+    // 2. Draft document tests
+    var unauthDoc = docService.CreateDraft(employee, new SaveDocumentRequest("测试制度", testCatId, "摘要", "正文", [], false, null, today, null, []));
+    if (unauthDoc.Code != "AUTH_002") throw new InvalidOperationException("普通员工编制制度草稿未被拦截。");
+
+    var emptyTitleDoc = docService.CreateDraft(hr, new SaveDocumentRequest("", testCatId, "摘要", "正文", [], false, null, today, null, []));
+    if (emptyTitleDoc.Code != "DOC_001") throw new InvalidOperationException("空标题制度草稿未被校验拦截。");
+
+    var validDraft = docService.CreateDraft(hr, new SaveDocumentRequest(
+        "企业员工廉洁合规行为守则", testCatId, "规范全体员工在日常履职中的廉洁自律与反商业贿赂行为准则。",
+        "### 第一条 适用范围\n全体正式及试用期在职员工。\n\n### 第二条 行为红线\n严禁收受商业贿赂或私自侵占公司商业机会。",
+        ["合规", "廉洁", "行为规范"], true, null, today, null, []));
+    if (!validDraft.IsSuccess || validDraft.Value!.Status != DocumentStatus.Draft)
+        throw new InvalidOperationException("HR编制制度草稿失败：" + validDraft.Error);
+    testDocId = validDraft.Value!.Id;
+
+    // 3. Draft cannot be acknowledged
+    var unpubAck = docService.AcknowledgeDocument(employee, testDocId, "127.0.0.1");
+    if (unpubAck.Code != "DOC_004") throw new InvalidOperationException("未发布草稿制度允许签署确认。");
+
+    // 4. Publish document
+    var publishResult = docService.PublishDocument(hr, testDocId);
+    if (!publishResult.IsSuccess || publishResult.Value!.Status != DocumentStatus.Published || publishResult.Value.Version != 1)
+        throw new InvalidOperationException("制度文档发布失败：" + publishResult.Error);
+
+    // 5. Query published documents by employee
+    var empList = docService.ListDocuments(employee, keyword: "廉洁", mustReadOnly: true);
+    if (!empList.IsSuccess || !empList.Value!.Items.Any(d => d.Id == testDocId))
+        throw new InvalidOperationException("员工按关键字未能检索到已发布的必读制度。");
+
+    // 6. Acknowledge document by employee
+    var ackResult = docService.AcknowledgeDocument(employee, testDocId, "192.168.1.100");
+    if (!ackResult.IsSuccess || ackResult.Value!.UserId != employee.Id || ackResult.Value.DocumentVersion != 1)
+        throw new InvalidOperationException("员工签署确认制度失败：" + ackResult.Error);
+
+    // Idempotent acknowledge
+    var dupAck = docService.AcknowledgeDocument(employee, testDocId, "192.168.1.100");
+    if (!dupAck.IsSuccess || dupAck.Value!.Id != ackResult.Value.Id)
+        throw new InvalidOperationException("员工重复签署同一版本未幂等返回。");
+
+    // 7. Check stats
+    var statsResult = docService.GetAcknowledgementStats(hr, testDocId);
+    if (!statsResult.IsSuccess || statsResult.Value!.TotalAcknowledged < 1 || statsResult.Value.AcknowledgedList.All(a => a.UserId != employee.Id))
+        throw new InvalidOperationException("制度签署看板统计数据不正确。");
+
+    // 8. Revise document to v2
+    var reviseResult = docService.ReviseDocument(hr, testDocId, new ReviseDocumentRequest(
+        1, "企业员工廉洁合规行为守则（2026修订版）",
+        "补充对礼品礼金申报登记限额的详细要求。",
+        "### 第一条 适用范围\n全体正式及试用期在职员工。\n\n### 第二条 行为红线\n严禁收受商业贿赂或私自侵占公司商业机会。\n\n### 第三条 礼品申报\n单次价值超过 200 元的商务礼品须于 3 日内向行政人事部登记报备。",
+        "新增第三条礼品申报流程细则", []));
+    if (!reviseResult.IsSuccess || reviseResult.Value!.Version != 2 || reviseResult.Value.Status != DocumentStatus.Published)
+        throw new InvalidOperationException("制度版本修订升级失败：" + reviseResult.Error);
+
+    var versionsList = docService.ListVersions(employee, testDocId);
+    if (!versionsList.IsSuccess || versionsList.Value!.Count < 2)
+        throw new InvalidOperationException("版本历史列表未包含升级记录。");
+
+    // 9. Employee acknowledges v2
+    var ackV2 = docService.AcknowledgeDocument(employee, testDocId, "192.168.1.100");
+    if (!ackV2.IsSuccess || ackV2.Value!.DocumentVersion != 2)
+        throw new InvalidOperationException("员工签署确认新版本 v2 失败：" + ackV2.Error);
+
+    // 10. Deletable draft test
+    var tempDraft = docService.CreateDraft(hr, new SaveDocumentRequest("待删除临时制度", testCatId, "临时摘要", "临时正文", [], false, null, today, null, []));
+    if (!tempDraft.IsSuccess || !docService.DeleteDraft(hr, tempDraft.Value!.Id).IsSuccess)
+        throw new InvalidOperationException("临时草稿删除失败。");
 
     var idempotency = new IdempotencyService(writeDb);
     idempotency.Store(employee.Id, "POST:/api/v1/leave-requests", idempotencyKey, 201, "{\"id\":\"cached\"}");
@@ -2007,6 +2090,17 @@ await using (var readDb = new OaDbContext(options))
         throw new InvalidOperationException("用章执行或归还审计日志未跨 DbContext 持久化。");
     if (reloadedSealService.Get(employee, withdrawnSealId).Value?.Status != SealStatus.Withdrawn)
         throw new InvalidOperationException("已撤回用章申请状态未跨 DbContext 持久化。");
+
+    var persistedDoc = await readDb.KnowledgeDocuments.SingleOrDefaultAsync(item => item.Id == testDocId);
+    if (persistedDoc is not { Status: (int)DocumentStatus.Published, Version: 2, IsMustRead: true })
+        throw new InvalidOperationException("制度文档发布状态、修订版本或必读标记未跨 DbContext 持久化。");
+    if (await readDb.DocumentVersions.CountAsync(item => item.DocumentId == testDocId) != 2)
+        throw new InvalidOperationException("制度文档两级版本快照历史未跨 DbContext 持久化。");
+    if (await readDb.DocumentAcknowledgements.CountAsync(item => item.DocumentId == testDocId && item.UserId == employee.Id) != 2)
+        throw new InvalidOperationException("员工两级版本签署记录未跨 DbContext 持久化。");
+    if (!await readDb.AuditLogs.AnyAsync(item => item.ResourceType == "KnowledgeDocument" && item.ResourceId == testDocId.ToString() && item.Action == "DOCUMENT_PUBLISHED") ||
+        !await readDb.AuditLogs.AnyAsync(item => item.ResourceType == "KnowledgeDocument" && item.ResourceId == testDocId.ToString() && item.Action == "DOCUMENT_ACKNOWLEDGED"))
+        throw new InvalidOperationException("制度发布或签署审计日志未跨 DbContext 持久化。");
     if (!await readDb.IdempotencyKeys.AnyAsync(x => x.Key == idempotencyKey))
         throw new InvalidOperationException("幂等键跨 DbContext 未保留。");
     if (!await readDb.WorkCalendarEntries.AnyAsync(x => x.Date == new DateOnly(2031, 1, 6) && !x.IsWorkingDay))

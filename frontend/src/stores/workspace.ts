@@ -7,6 +7,7 @@ import { useCalendarStore } from './calendar'
 import { useContractStore } from './contracts'
 import { useDashboardStore } from './dashboard'
 import { useDetailStore } from './detail'
+import { useDocumentStore } from './documents'
 import { useEmployeeDirectoryStore } from './employee-directory'
 import { useExpenseStore } from './expense'
 import { useLeaveStore } from './leave'
@@ -37,6 +38,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const attendance = useAttendanceStore()
   const contracts = useContractStore()
   const announcements = useAnnouncementStore()
+  const documents = useDocumentStore()
   const detail = useDetailStore()
 
   const initialized = ref(false)
@@ -94,7 +96,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       seal.loadInitiated(auth.currentUserId),
       workflow.loadTasks(),
       workflow.loadNotifications(),
-      workflow.loadCopies()
+      workflow.loadCopies(),
+      documents.loadCategories().catch(() => undefined),
+      documents.loadDocuments().catch(() => undefined)
     ])
   }
 
@@ -114,6 +118,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     attendance.reset()
     contracts.reset()
     announcements.reset()
+    documents.reset()
     detail.reset()
     initialized.value = false
   }

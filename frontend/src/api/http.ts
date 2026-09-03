@@ -10,7 +10,7 @@ export type ApiRequest = <T>(path: string, init?: RequestInit, requiresAuth?: bo
 export type HttpClient = {
   request: ApiRequest
   uploadFile: (file: File) => Promise<FileDescriptor>
-  downloadFile: (id: string, resourceType: 'leave' | 'expense' | 'travel' | 'purchase' | 'seal' | 'attendance' | 'contract', resourceId: string) => Promise<void>
+  downloadFile: (id: string, resourceType: 'leave' | 'expense' | 'travel' | 'purchase' | 'seal' | 'attendance' | 'contract' | 'document', resourceId: string) => Promise<void>
   download: (path: string, fallbackName: string) => Promise<void>
 }
 
@@ -81,7 +81,7 @@ export function createHttpClient(
     return response.json()
   }
 
-  async function downloadFile(id: string, resourceType: 'leave' | 'expense' | 'travel' | 'purchase' | 'seal' | 'attendance' | 'contract', resourceId: string) {
+  async function downloadFile(id: string, resourceType: 'leave' | 'expense' | 'travel' | 'purchase' | 'seal' | 'attendance' | 'contract' | 'document', resourceId: string) {
     return download(`/files/${id}?resourceType=${resourceType}&resourceId=${resourceId}`, 'attachment')
   }
 

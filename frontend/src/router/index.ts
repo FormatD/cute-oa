@@ -33,6 +33,8 @@ import AttendancePage from '../views/AttendancePage.vue'
 import AttendanceDetailPage from '../views/AttendanceDetailPage.vue'
 import ContractPage from '../views/ContractPage.vue'
 import ContractDetailPage from '../views/ContractDetailPage.vue'
+import DocumentCenterPage from '../views/DocumentCenterPage.vue'
+import DocumentDetailPage from '../views/DocumentDetailPage.vue'
 
 export const router = createRouter({
   history: createWebHashHistory(),
@@ -40,6 +42,8 @@ export const router = createRouter({
     { path: '/', redirect: '/workbench' },
     { path: '/login', component: LoginPage, meta: { public: true } },
     { path: '/workbench', component: WorkbenchPage },
+    { path: '/documents', component: DocumentCenterPage },
+    { path: '/documents/:id', component: DocumentDetailPage, props: true },
     { path: '/announcements', component: AnnouncementPage },
     { path: '/announcements/:id', component: AnnouncementDetailPage },
     { path: '/announcement-admin', component: AnnouncementManagementPage, meta: { permission: 'ANNOUNCEMENT_MANAGE' } },

@@ -12,5 +12,15 @@ export const useUiStore = defineStore('ui', () => {
     error.value = ''
   }
 
-  return { message, error, submitting, sidebarOpen, resetFeedback }
+  function showToast(msg: string, type: 'success' | 'error' | 'info' = 'info') {
+    if (type === 'error') {
+      error.value = msg
+      message.value = ''
+    } else {
+      message.value = msg
+      error.value = ''
+    }
+  }
+
+  return { message, error, submitting, sidebarOpen, resetFeedback, showToast }
 })

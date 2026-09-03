@@ -14,6 +14,7 @@ function hasPermission(permission: string) { return props.currentUser?.permissio
     <nav class="nav-menu" aria-label="主导航">
       <p class="nav-label">工作台</p>
       <button :class="{ active: activeNav === 'workbench' }" @click="go('workbench')"><span>⌂</span>工作台</button>
+      <button :class="{ active: activeNav === 'documents' }" @click="go('documents')"><span>📖</span>知识库与制度</button>
       <button :class="{ active: activeNav === 'announcements' }" @click="go('announcements')"><span>◈</span>公司公告</button>
       <p class="nav-label">业务中心</p>
       <button :class="{ active: activeNav === 'leave' }" @click="go('leave')"><span>◫</span>请假管理</button>
