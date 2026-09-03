@@ -1,0 +1,17 @@
+[
+  {
+    "userId": "employee-001",
+    "employeeNumber": "EMP-2026-001",
+    "hireDate": "2026-03-02",
+    "employmentType": "FULL_TIME",
+    "personnelStatus": "ACTIVE",
+    "probationEndDate": null,
+    "regularizedDate": "2026-06-02",
+    "cumulativeWorkStartDate": "2020-07-01",
+    "departureDate": null,
+    "departureReason": null,
+    "workEmail": "employee-001@example.com",
+    "workPhone": "+86 21 5555 0101",
+    "workLocation": "上海办公室"
+  }
+]

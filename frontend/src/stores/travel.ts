@@ -1,9 +1,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createHttpClient } from '../api/http'
-import { createTravelApi } from '../api/modules/travel'
+import { useApiClient } from '../api/client'
 import type { ListFilters, TravelForm, TravelRequest } from '../api/types'
-import { useAuthStore } from './auth'
 import { PAGE_SIZE } from './pagination'
 import { useUiStore } from './ui'
 
@@ -11,8 +9,8 @@ const blankFilters = (): ListFilters => ({ keyword: '', status: '', applicantId:
 export const blankTravelForm = (): TravelForm => ({ purpose: '', estimatedBudget: '', itinerary: [{ destination: '', startDate: '', endDate: '', transportation: '高铁', purpose: '' }], companionIds: [], attachments: [], copyRecipientIds: [] })
 
 export const useTravelStore = defineStore('travel', () => {
-  const auth = useAuthStore(); const ui = useUiStore()
-  const api = createTravelApi(createHttpClient(() => auth.accessToken, auth.clearSession, auth.refreshAccessToken))
+  const ui = useUiStore()
+  const api = useApiClient().travel
   const travels = ref<TravelRequest[]>([]); const initiatedTravels = ref<TravelRequest[]>([]); const travelDetail = ref<TravelRequest | null>(null)
   const approvedTravels = ref<TravelRequest[]>([])
   const travelForm = ref<TravelForm>(blankTravelForm()); const showTravelForm = ref(false); const travelFilters = ref<ListFilters>(blankFilters())

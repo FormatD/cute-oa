@@ -9,3 +9,6 @@ frontend/dist/
 data/
 .tools/
 backend/Oa.Api/storage/
+backups/*.dump
+deploy/secrets/
+deploy/tls/

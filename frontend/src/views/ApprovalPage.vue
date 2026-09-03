@@ -5,27 +5,27 @@ import type { FlowTask } from '../api/types'
 import OaDialog from '../components/OaDialog.vue'
 import { useAppStore } from '../stores/app'
 import { useAuthStore } from '../stores/auth'
+import { useEmployeeDirectoryStore } from '../stores/employee-directory'
 import { useUiStore } from '../stores/ui'
 import { useWorkflowStore } from '../stores/workflow'
-import { useWorkspaceStore } from '../stores/workspace'
 
-type BusinessType = 'leave' | 'expense' | 'travel'
+type BusinessType = 'leave' | 'expense' | 'travel' | 'purchase'
 type DialogMode = 'decision' | 'transfer'
 
 const app = useAppStore()
 const auth = useAuthStore()
+const employeeDirectory = useEmployeeDirectoryStore()
 const ui = useUiStore()
 const workflow = useWorkflowStore()
-const workspace = useWorkspaceStore()
 const router = useRouter()
 const processing = ref(false)
 const dialogError = ref('')
 const dialog = reactive<{ open: boolean; mode: DialogMode; businessType: BusinessType; action: 'approve' | 'reject'; task: FlowTask | null; comment: string; assigneeId: string }>({
   open: false, mode: 'decision', businessType: 'leave', action: 'approve', task: null, comment: '', assigneeId: ''
 })
-const transferCandidates = computed(() => workspace.employees.filter(employee => employee.id !== auth.currentUserId))
+const transferCandidates = computed(() => employeeDirectory.employees.filter(employee => employee.id !== auth.currentUserId))
 const dialogTitle = computed(() => dialog.mode === 'transfer' ? '转办审批任务' : dialog.action === 'reject' ? '驳回审批' : '同意审批')
-const businessLabel = (type: BusinessType) => type === 'leave' ? '请假' : type === 'expense' ? '报销' : '出差'
+const businessLabel = (type: BusinessType) => type === 'leave' ? '请假' : type === 'expense' ? '报销' : type === 'travel' ? '出差' : '采购'
 const dialogDescription = computed(() => `${businessLabel(dialog.businessType)}审批 · 第 ${dialog.task?.sequence ?? '—'} 节点`)
 
 function openDecision(task: FlowTask, businessType: BusinessType, action: 'approve' | 'reject') {
@@ -89,6 +89,12 @@ async function submitDialog() {
     <div class="pagination"><span>共 {{ workflow.pagedTravelTasks.total }} 条</span><div><button class="secondary" :disabled="workflow.pagedTravelTasks.currentPage === 1" @click="workflow.travelTaskPage--">上一页</button><b>{{ workflow.pagedTravelTasks.currentPage }} / {{ workflow.pagedTravelTasks.totalPages }}</b><button class="secondary" :disabled="workflow.pagedTravelTasks.currentPage === workflow.pagedTravelTasks.totalPages" @click="workflow.travelTaskPage++">下一页</button></div></div>
   </section>
 
+  <section v-if="workflow.purchaseTasks.length" class="panel approval-panel">
+    <div class="section-title"><div><p class="eyebrow">PURCHASE APPROVAL</p><h2>待我审批的采购</h2></div></div>
+    <div class="table-wrap"><table class="data-table"><thead><tr><th>审批事项</th><th>当前节点</th><th>操作</th></tr></thead><tbody><tr v-for="task in workflow.pagedPurchaseTasks.items" :key="task.id"><td>采购审批</td><td>第 {{ task.sequence }} 节点</td><td class="task-actions"><button class="secondary" :disabled="!task.purchaseRequestId" @click="task.purchaseRequestId && router.push(`/purchase/${task.purchaseRequestId}`)">详情</button><button @click="openDecision(task, 'purchase', 'approve')">同意</button><button class="secondary" @click="openDecision(task, 'purchase', 'reject')">驳回</button><button class="secondary" @click="openTransfer(task, 'purchase')">转办</button></td></tr></tbody></table></div>
+    <div class="pagination"><span>共 {{ workflow.pagedPurchaseTasks.total }} 条</span><div><button class="secondary" :disabled="workflow.pagedPurchaseTasks.currentPage === 1" @click="workflow.purchaseTaskPage--">上一页</button><b>{{ workflow.pagedPurchaseTasks.currentPage }} / {{ workflow.pagedPurchaseTasks.totalPages }}</b><button class="secondary" :disabled="workflow.pagedPurchaseTasks.currentPage === workflow.pagedPurchaseTasks.totalPages" @click="workflow.purchaseTaskPage++">下一页</button></div></div>
+  </section>
+
   <section v-if="workflow.pagedProcessedTasks.total" class="panel approval-panel">
     <div class="section-title"><div><p class="eyebrow">PROCESSED</p><h2>我的已办</h2></div></div>
     <div class="table-wrap"><table class="data-table"><thead><tr><th>业务类型</th><th>处理节点</th><th>处理结果</th><th>处理意见</th><th>操作</th></tr></thead><tbody><tr v-for="task in workflow.pagedProcessedTasks.items" :key="`${task.route}-${task.id}`"><td>{{ task.businessType }}</td><td>第 {{ task.sequence }} 节点</td><td><em>{{ task.status }}</em></td><td>{{ task.comment || '—' }}</td><td><button class="secondary" :disabled="!task.resourceId" @click="task.resourceId && router.push(`/${task.route}/${task.resourceId}`)">查看单据</button></td></tr></tbody></table></div>
@@ -101,7 +107,7 @@ async function submitDialog() {
     <div class="pagination"><span>共 {{ workflow.pagedNotifications.total }} 条</span><div><button class="secondary" :disabled="workflow.pagedNotifications.currentPage === 1" @click="workflow.notificationPage--">上一页</button><b>{{ workflow.pagedNotifications.currentPage }} / {{ workflow.pagedNotifications.totalPages }}</b><button class="secondary" :disabled="workflow.pagedNotifications.currentPage === workflow.pagedNotifications.totalPages" @click="workflow.notificationPage++">下一页</button></div></div>
   </section>
 
-  <p v-if="!workflow.tasks.length && !workflow.expenseTasks.length && !workflow.travelTasks.length && !workflow.pagedProcessedTasks.total && !workflow.notifications.length" class="empty">暂无待办、已办或通知。</p>
+  <p v-if="!workflow.tasks.length && !workflow.expenseTasks.length && !workflow.travelTasks.length && !workflow.purchaseTasks.length && !workflow.pagedProcessedTasks.total && !workflow.notifications.length" class="empty">暂无待办、已办或通知。</p>
 
   <OaDialog :open="dialog.open" :title="dialogTitle" :description="dialogDescription" :submit-label="dialog.mode === 'transfer' ? '确认转办' : dialog.action === 'reject' ? '确认驳回' : '确认同意'" :busy="processing" :danger="dialog.mode === 'decision' && dialog.action === 'reject'" @close="closeDialog" @submit="submitDialog">
     <div class="operation-summary"><strong>{{ businessLabel(dialog.businessType) }}审批</strong><span>第 {{ dialog.task?.sequence }} 节点</span></div>

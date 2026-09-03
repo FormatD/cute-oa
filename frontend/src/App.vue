@@ -5,18 +5,18 @@ import OaHeader from './components/OaHeader.vue'
 import OaSidebar from './components/OaSidebar.vue'
 import { useAppStore } from './stores/app'
 import { useAuthStore } from './stores/auth'
+import { useDashboardStore } from './stores/dashboard'
 import { useUiStore } from './stores/ui'
 import { useWorkflowStore } from './stores/workflow'
-import { useWorkspaceStore } from './stores/workspace'
 
 const router = useRouter()
 const route = useRoute()
 const app = useAppStore()
 const auth = useAuthStore()
+const dashboard = useDashboardStore()
 const ui = useUiStore()
 const workflow = useWorkflowStore()
-const workspace = useWorkspaceStore()
-const activeNav = computed(() => route.path.startsWith('/hr/contracts') ? 'contracts' : route.path.split('/')[1] || 'workbench')
+const activeNav = computed(() => route.path.startsWith('/hr/contracts') ? 'contracts' : route.path.startsWith('/hr/personnel-cases') ? 'personnel-cases' : route.path.split('/')[1] || 'workbench')
 const publicLayout = computed(() => route.meta.public === true)
 
 function navigate(route: string) { router.push(`/${route}`); ui.sidebarOpen = false }
@@ -31,7 +31,7 @@ watch(() => auth.authenticated, authenticated => {
 <template>
   <RouterView v-if="publicLayout" />
   <main v-else-if="auth.authenticated" class="app-shell">
-    <OaSidebar :open="ui.sidebarOpen" :active-nav="activeNav" :summary="workspace.summary" :current-user="auth.currentUser" @navigate="navigate" @close="ui.sidebarOpen = false" />
+    <OaSidebar :open="ui.sidebarOpen" :active-nav="activeNav" :summary="dashboard.summary" :current-user="auth.currentUser" @navigate="navigate" @close="ui.sidebarOpen = false" />
     <div v-if="ui.sidebarOpen" class="sidebar-mask" @click="ui.sidebarOpen = false"></div>
     <section class="page-frame">
       <OaHeader :active-nav="activeNav" :current-user="auth.currentUser" :notifications="workflow.notifications" @menu="ui.sidebarOpen = true" @logout="logout" />

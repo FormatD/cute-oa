@@ -13,6 +13,7 @@ namespace Oa.Api.Persistence.Migrations
     [DbContext(typeof(OaDbContext))]
     partial class OaDbContextModelSnapshot : ModelSnapshot
     {
+        /// <inheritdoc />
         protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
@@ -154,6 +155,7 @@ namespace Oa.Api.Persistence.Migrations
                         .HasColumnType("character varying(64)");
 
                     b.Property<string>("Status")
+                        .IsConcurrencyToken()
                         .IsRequired()
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
@@ -178,7 +180,10 @@ namespace Oa.Api.Persistence.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("AttendanceRecordId");
+                    b.HasIndex("AttendanceRecordId")
+                        .IsUnique()
+                        .HasDatabaseName("UX_attendance_appeal_pending_record")
+                        .HasFilter("\"Status\" = 'PENDING'");
 
                     b.HasIndex("TenantId", "Status", "SubmittedAt");
 
@@ -194,6 +199,10 @@ namespace Oa.Api.Persistence.Migrations
                     b.Property<bool>("IsLocked")
                         .HasColumnType("boolean");
 
+                    b.Property<string>("LockReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
                     b.Property<DateTimeOffset?>("LockedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -205,10 +214,6 @@ namespace Oa.Api.Persistence.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
 
-                    b.Property<string>("LockReason")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
                     b.Property<DateOnly>("Month")
                         .HasColumnType("date");
 
@@ -216,6 +221,10 @@ namespace Oa.Api.Persistence.Migrations
                         .IsRequired()
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
+
+                    b.Property<string>("UnlockReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
 
                     b.Property<DateTimeOffset?>("UnlockedAt")
                         .HasColumnType("timestamp with time zone");
@@ -228,24 +237,78 @@ namespace Oa.Api.Persistence.Migrations
                         .HasMaxLength(64)
                         .HasColumnType("character varying(64)");
 
-                    b.Property<string>("UnlockReason")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
                     b.Property<DateTimeOffset>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("Version")
+                        .IsConcurrencyToken()
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
 
-                    b.HasIndex("TenantId", "IsLocked", "Month");
-
                     b.HasIndex("TenantId", "Month")
                         .IsUnique();
 
+                    b.HasIndex("TenantId", "IsLocked", "Month");
+
                     b.ToTable("attendance_month_lock", (string)null);
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.AttendanceMonthSnapshotRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("CreatedByName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("LockReason")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<DateOnly>("Month")
+                        .HasColumnType("date");
+
+                    b.Property<int>("RowCount")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Sequence")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("SnapshotHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("SnapshotJson")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("TenantId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Month", "CreatedAt");
+
+                    b.HasIndex("TenantId", "Month", "Sequence")
+                        .IsUnique();
+
+                    b.ToTable("attendance_month_snapshot", (string)null);
                 });
 
             modelBuilder.Entity("Oa.Api.Persistence.AttendanceRecordEntity", b =>
@@ -333,6 +396,7 @@ namespace Oa.Api.Persistence.Migrations
                         .HasColumnType("character varying(64)");
 
                     b.Property<int>("Version")
+                        .IsConcurrencyToken()
                         .HasColumnType("integer");
 
                     b.Property<DateOnly>("WorkDate")
@@ -401,6 +465,7 @@ namespace Oa.Api.Persistence.Migrations
                         .HasColumnType("character varying(64)");
 
                     b.Property<int>("Version")
+                        .IsConcurrencyToken()
                         .HasColumnType("integer");
 
                     b.Property<TimeOnly>("WorkEnd")
@@ -811,6 +876,7 @@ namespace Oa.Api.Persistence.Migrations
                         .HasColumnType("character varying(64)");
 
                     b.Property<int>("Version")
+                        .IsConcurrencyToken()
                         .HasColumnType("integer");
 
                     b.Property<string>("WorkLocation")
@@ -1399,6 +1465,10 @@ namespace Oa.Api.Persistence.Migrations
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)");
 
+                    b.Property<string>("RequestHash")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
                     b.Property<string>("ResponseJson")
                         .IsRequired()
                         .HasColumnType("jsonb");
@@ -1429,6 +1499,10 @@ namespace Oa.Api.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<decimal>("Adjustment")
+                        .HasPrecision(6, 1)
+                        .HasColumnType("numeric(6,1)");
+
                     b.Property<decimal>("Entitled")
                         .HasPrecision(6, 1)
                         .HasColumnType("numeric(6,1)");
@@ -1439,6 +1513,10 @@ namespace Oa.Api.Persistence.Migrations
 
                     b.Property<int>("LeaveType")
                         .HasColumnType("integer");
+
+                    b.Property<decimal>("StatutoryEntitled")
+                        .HasPrecision(6, 1)
+                        .HasColumnType("numeric(6,1)");
 
                     b.Property<string>("TenantId")
                         .IsRequired()
@@ -1452,9 +1530,19 @@ namespace Oa.Api.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Year")
+                        .HasColumnType("integer");
+
                     b.HasKey("Id");
 
-                    b.HasIndex("TenantId", "UserId", "LeaveType")
+                    b.HasIndex("TenantId", "UserId", "LeaveType", "Year")
                         .IsUnique();
 
                     b.ToTable("leave_balance", (string)null);
@@ -1479,6 +1567,9 @@ namespace Oa.Api.Persistence.Migrations
                     b.Property<string>("AttachmentsJson")
                         .IsRequired()
                         .HasColumnType("jsonb");
+
+                    b.Property<int?>("BalanceYear")
+                        .HasColumnType("integer");
 
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
@@ -1536,6 +1627,7 @@ namespace Oa.Api.Persistence.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("Version")
+                        .IsConcurrencyToken()
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
@@ -1548,6 +1640,61 @@ namespace Oa.Api.Persistence.Migrations
                     b.HasIndex("TenantId", "ApplicantId", "Status", "StartDate");
 
                     b.ToTable("leave_request", (string)null);
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.MfaChallengeRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset?>("ConsumedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset>("ExpiresAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("FailedAttempts")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("IpAddress")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("PendingSecretCiphertext")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("Purpose")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)");
+
+                    b.Property<string>("TokenHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("UserAgent")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TokenHash")
+                        .IsUnique();
+
+                    b.HasIndex("UserId", "ConsumedAt", "ExpiresAt");
+
+                    b.ToTable("mfa_challenge", (string)null);
                 });
 
             modelBuilder.Entity("Oa.Api.Persistence.NotificationRecord", b =>
@@ -1645,6 +1792,259 @@ namespace Oa.Api.Persistence.Migrations
                         .IsUnique();
 
                     b.ToTable("payment_record", (string)null);
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.PersonnelCaseAlertDeliveryRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AlertType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTimeOffset>("DeliveredAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("PersonnelCaseTaskId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("RecipientId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("TenantId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RecipientId");
+
+                    b.HasIndex("PersonnelCaseTaskId", "RecipientId", "AlertType")
+                        .IsUnique()
+                        .HasDatabaseName("UX_personnel_case_alert_delivery_task_recipient_type");
+
+                    b.HasIndex("TenantId", "DeliveredAt");
+
+                    b.ToTable("personnel_case_alert_delivery", (string)null);
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.PersonnelCaseRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("CancellationReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<DateTimeOffset?>("CancelledAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CancelledBy")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("CancelledByName")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTimeOffset?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CompletedBy")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("CompletedByName")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("CompletionComment")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("CreatedByName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("DepartmentName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<DateOnly>("EffectiveDate")
+                        .HasColumnType("date");
+
+                    b.Property<string>("EmployeeName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Notes")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("Number")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("OwnerId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("OwnerName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("TenantId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Type")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<int>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId");
+
+                    b.HasIndex("TenantId", "Number")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "Status", "EffectiveDate", "UpdatedAt");
+
+                    b.HasIndex("TenantId", "UserId", "Type", "EffectiveDate")
+                        .IsUnique();
+
+                    b.ToTable("personnel_case", (string)null);
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.PersonnelCaseTaskRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AssigneeId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("AssigneeName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Category")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTimeOffset?>("CompletedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CompletedBy")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("CompletedByName")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("CompletionNote")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<DateOnly>("DueDate")
+                        .HasColumnType("date");
+
+                    b.Property<Guid>("PersonnelCaseId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("Required")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("TenantId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PersonnelCaseId", "Code")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "AssigneeId", "Status", "DueDate");
+
+                    b.ToTable("personnel_case_task", (string)null);
                 });
 
             modelBuilder.Entity("Oa.Api.Persistence.PersonnelEventRecord", b =>
@@ -1754,6 +2154,7 @@ namespace Oa.Api.Persistence.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("Version")
+                        .IsConcurrencyToken()
                         .HasColumnType("integer");
 
                     b.Property<string>("WorkEmail")
@@ -1832,6 +2233,299 @@ namespace Oa.Api.Persistence.Migrations
                     b.HasIndex("TenantId", "DepartmentId", "Status", "SortOrder", "Name");
 
                     b.ToTable("position", (string)null);
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.PurchaseOrderRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<decimal>("ActualAmount")
+                        .HasPrecision(16, 2)
+                        .HasColumnType("numeric(16,2)");
+
+                    b.Property<string>("AttachmentsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("CreatedByName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateOnly>("ExpectedDeliveryDate")
+                        .HasColumnType("date");
+
+                    b.Property<string>("Notes")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<DateOnly>("OrderDate")
+                        .HasColumnType("date");
+
+                    b.Property<string>("OrderNumber")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<Guid>("PurchaseRequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Supplier")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("TenantId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PurchaseRequestId")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "OrderNumber")
+                        .IsUnique();
+
+                    b.ToTable("purchase_order", (string)null);
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.PurchaseReceiptRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AttachmentsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("CreatedByName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Notes")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<Guid>("PurchaseRequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateOnly>("ReceivedDate")
+                        .HasColumnType("date");
+
+                    b.Property<string>("Result")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("TenantId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PurchaseRequestId")
+                        .IsUnique();
+
+                    b.ToTable("purchase_receipt", (string)null);
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.PurchaseRequestRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ApplicantId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("ApplicantName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("AttachmentsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid?>("CurrentFlowInstanceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("DepartmentName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<decimal>("EstimatedTotal")
+                        .HasPrecision(16, 2)
+                        .HasColumnType("numeric(16,2)");
+
+                    b.Property<bool>("IsDemo")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("ItemCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ItemSearchText")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("ItemsJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb");
+
+                    b.Property<string>("Number")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("ProcessDefinitionCode")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<Guid?>("ProcessDefinitionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int?>("ProcessDefinitionVersion")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Purpose")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<DateOnly>("RequiredDate")
+                        .HasColumnType("date");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("SuggestedSupplier")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("TenantId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ProcessDefinitionId");
+
+                    b.HasIndex("TenantId", "ApplicantId", "Status", "CreatedAt");
+
+                    b.HasIndex("TenantId", "Number")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "RequiredDate", "Status");
+
+                    b.ToTable("purchase_request", (string)null);
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.PurchaseTaskRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("AssigneeId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("AssigneeName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Comment")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<Guid?>("DelegationId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("FlowInstanceId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("OriginalAssigneeId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("OriginalAssigneeName")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTimeOffset?>("ProcessedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("PurchaseRequestId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Sequence")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Status")
+                        .IsConcurrencyToken()
+                        .HasColumnType("integer");
+
+                    b.Property<string>("TenantId")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<int>("Version")
+                        .IsConcurrencyToken()
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("DelegationId");
+
+                    b.HasIndex("FlowInstanceId");
+
+                    b.HasIndex("PurchaseRequestId");
+
+                    b.HasIndex("TenantId", "AssigneeId", "Status", "Sequence");
+
+                    b.ToTable("purchase_task", (string)null);
                 });
 
             modelBuilder.Entity("Oa.Api.Persistence.ProcessDefinitionRecord", b =>
@@ -2200,8 +2894,27 @@ namespace Oa.Api.Persistence.Migrations
                     b.Property<int>("FailedLoginCount")
                         .HasColumnType("integer");
 
+                    b.Property<long?>("LastTotpTimeStep")
+                        .HasColumnType("bigint");
+
                     b.Property<DateTimeOffset?>("LockedUntil")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("MfaEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<DateTimeOffset?>("MfaEnabledAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("MfaSecretCiphertext")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<DateTimeOffset?>("MfaUpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("MustChangePassword")
+                        .HasColumnType("boolean");
 
                     b.Property<DateTimeOffset>("PasswordChangedAt")
                         .HasColumnType("timestamp with time zone");
@@ -2218,6 +2931,11 @@ namespace Oa.Api.Persistence.Migrations
                         .IsRequired()
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)");
+
+                    b.Property<string>("RecoveryCodeHashesJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasDefaultValue("[]");
 
                     b.HasKey("UserId");
 
@@ -2268,6 +2986,7 @@ namespace Oa.Api.Persistence.Migrations
                         .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("Version")
+                        .IsConcurrencyToken()
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
@@ -2517,11 +3236,53 @@ namespace Oa.Api.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Restrict);
                 });
 
+            modelBuilder.Entity("Oa.Api.Persistence.MfaChallengeRecord", b =>
+                {
+                    b.HasOne("Oa.Api.Persistence.UserRecord", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("Oa.Api.Persistence.PaymentRecordEntity", b =>
                 {
                     b.HasOne("Oa.Api.Persistence.ExpenseRecord", null)
                         .WithMany()
                         .HasForeignKey("ExpenseClaimId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.PersonnelCaseAlertDeliveryRecord", b =>
+                {
+                    b.HasOne("Oa.Api.Persistence.PersonnelCaseTaskRecord", null)
+                        .WithMany()
+                        .HasForeignKey("PersonnelCaseTaskId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("Oa.Api.Persistence.UserRecord", null)
+                        .WithMany()
+                        .HasForeignKey("RecipientId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.PersonnelCaseRecord", b =>
+                {
+                    b.HasOne("Oa.Api.Persistence.UserRecord", null)
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.PersonnelCaseTaskRecord", b =>
+                {
+                    b.HasOne("Oa.Api.Persistence.PersonnelCaseRecord", null)
+                        .WithMany()
+                        .HasForeignKey("PersonnelCaseId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
@@ -2550,6 +3311,51 @@ namespace Oa.Api.Persistence.Migrations
                         .WithMany()
                         .HasForeignKey("DepartmentId")
                         .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.PurchaseOrderRecord", b =>
+                {
+                    b.HasOne("Oa.Api.Persistence.PurchaseRequestRecord", null)
+                        .WithOne()
+                        .HasForeignKey("Oa.Api.Persistence.PurchaseOrderRecord", "PurchaseRequestId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.PurchaseReceiptRecord", b =>
+                {
+                    b.HasOne("Oa.Api.Persistence.PurchaseRequestRecord", null)
+                        .WithOne()
+                        .HasForeignKey("Oa.Api.Persistence.PurchaseReceiptRecord", "PurchaseRequestId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.PurchaseRequestRecord", b =>
+                {
+                    b.HasOne("Oa.Api.Persistence.ProcessDefinitionRecord", null)
+                        .WithMany()
+                        .HasForeignKey("ProcessDefinitionId")
+                        .OnDelete(DeleteBehavior.Restrict);
+                });
+
+            modelBuilder.Entity("Oa.Api.Persistence.PurchaseTaskRecord", b =>
+                {
+                    b.HasOne("Oa.Api.Persistence.FlowDelegationRecord", null)
+                        .WithMany()
+                        .HasForeignKey("DelegationId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Oa.Api.Persistence.FlowInstanceRecord", null)
+                        .WithMany()
+                        .HasForeignKey("FlowInstanceId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("Oa.Api.Persistence.PurchaseRequestRecord", null)
+                        .WithMany()
+                        .HasForeignKey("PurchaseRequestId")
+                        .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });
 

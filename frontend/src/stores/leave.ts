@@ -1,19 +1,16 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createHttpClient } from '../api/http'
-import { createLeaveApi } from '../api/modules/leave'
+import { useApiClient } from '../api/client'
 import type { LeaveForm, LeaveRequest, ListFilters } from '../api/types'
 import { PAGE_SIZE } from './pagination'
-import { useAuthStore } from './auth'
 import { useUiStore } from './ui'
 
 export const blankLeaveForm = (): LeaveForm => ({ type: 'Annual', startDate: '', startPeriod: 'FullDay', endDate: '', endPeriod: 'FullDay', reason: '', attachments: [], copyRecipientIds: [] })
 export const blankLeaveFilters = (): ListFilters => ({ keyword: '', status: '', applicantId: '', startDate: '', endDate: '' })
 
 export const useLeaveStore = defineStore('leave', () => {
-  const auth = useAuthStore()
   const ui = useUiStore()
-  const api = createLeaveApi(createHttpClient(() => auth.accessToken, auth.clearSession, auth.refreshAccessToken))
+  const api = useApiClient().leave
   const leaves = ref<LeaveRequest[]>([])
   const initiatedLeaves = ref<LeaveRequest[]>([])
   const form = ref<LeaveForm>(blankLeaveForm())

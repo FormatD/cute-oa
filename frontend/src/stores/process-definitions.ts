@@ -1,13 +1,10 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createHttpClient } from '../api/http'
-import { createSystemApi } from '../api/modules/system'
+import { useApiClient } from '../api/client'
 import type { CreateProcessDefinition, ProcessDefinition, UpdateProcessDefinition } from '../api/types'
-import { useAuthStore } from './auth'
 
 export const useProcessDefinitionStore = defineStore('process-definitions', () => {
-  const auth = useAuthStore()
-  const api = createSystemApi(createHttpClient(() => auth.accessToken, auth.clearSession, auth.refreshAccessToken))
+  const api = useApiClient().system
   const definitions = ref<ProcessDefinition[]>([])
   const loading = ref(false)
   const saving = ref(false)

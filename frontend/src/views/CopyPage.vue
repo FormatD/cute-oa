@@ -9,7 +9,7 @@ function changePage(offset: number) { workflow.copyPage += offset; void workflow
 async function open(item: FlowCopy) {
   await workflow.markCopyRead(item)
   if (!item.readAt) return
-  await router.push(`/${item.businessType === 'Leave' ? 'leave' : item.businessType === 'Expense' ? 'expense' : 'travel'}/${item.businessId}`)
+  await router.push(`/${item.businessType === 'Leave' ? 'leave' : item.businessType === 'Expense' ? 'expense' : item.businessType === 'Travel' ? 'travel' : 'purchase'}/${item.businessId}`)
 }
 </script>
 

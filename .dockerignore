@@ -1,0 +1,15 @@
+.git
+.idea
+.vscode
+**/bin
+**/obj
+**/node_modules
+frontend/dist
+data
+backups
+backend/Oa.Api/storage
+deploy/secrets
+deploy/tls
+*.user
+*.suo
+*.tsbuildinfo

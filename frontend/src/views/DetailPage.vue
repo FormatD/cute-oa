@@ -6,23 +6,23 @@ import FlowInstanceTimeline from '../components/FlowInstanceTimeline.vue'
 import { useAppStore } from '../stores/app'
 import { useAuthStore } from '../stores/auth'
 import { useDetailStore } from '../stores/detail'
+import { useEmployeeDirectoryStore } from '../stores/employee-directory'
 import { useExpenseStore } from '../stores/expense'
 import { useFileStore } from '../stores/files'
 import { useLeaveStore } from '../stores/leave'
-import { useWorkspaceStore } from '../stores/workspace'
 const props = defineProps<DetailView>()
 const app = useAppStore()
 const auth = useAuthStore()
 const detail = useDetailStore()
+const employeeDirectory = useEmployeeDirectoryStore()
 const expense = useExpenseStore()
 const files = useFileStore()
 const leave = useLeaveStore()
-const workspace = useWorkspaceStore()
 const router = useRouter()
 function load() { detail.loadDetail(props) }
 onMounted(load); watch(() => [props.module, props.id], load)
 function back() { router.push(`/${props.module === 'notification' ? 'approval' : props.module}`) }
-function copyNames(ids?: string[]) { return ids?.map(id => workspace.employees.find(item => item.id === id)?.name ?? id).join('、') || '无' }
+function copyNames(ids?: string[]) { return ids?.map(id => employeeDirectory.employees.find(item => item.id === id)?.name ?? id).join('、') || '无' }
 function isFileId(value?: string) { return Boolean(value && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) }
 </script>
 <template>

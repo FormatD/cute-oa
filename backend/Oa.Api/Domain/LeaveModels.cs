@@ -18,6 +18,7 @@ public sealed record CreateLeaveRequest(
 public sealed record ApproveTaskRequest(string? Comment);
 public sealed record RejectTaskRequest(string Comment);
 public sealed record TransferTaskRequest(string AssigneeId, string Comment);
+public sealed record AdjustLeaveBalanceRequest(LeaveType Type, int Year, decimal Adjustment, string Reason, int Version);
 public sealed record DocumentListQuery(string? Keyword, int? Status, string? ApplicantId, DateOnly? StartDate, DateOnly? EndDate, decimal? MinAmount = null, decimal? MaxAmount = null);
 
 public sealed class LeaveRequest
@@ -35,11 +36,12 @@ public sealed class LeaveRequest
     public string Reason { get; init; } = string.Empty;
     public IReadOnlyList<string> Attachments { get; init; } = [];
     public IReadOnlyList<string> CopyRecipientIds { get; init; } = [];
-    public int Version { get; init; } = 1;
+    public int Version { get; set; } = 1;
     public Guid? ProcessDefinitionId { get; set; }
     public string? ProcessDefinitionCode { get; set; }
     public int? ProcessDefinitionVersion { get; set; }
     public Guid? CurrentFlowInstanceId { get; set; }
+    public int? BalanceYear { get; set; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
     public LeaveStatus Status { get; set; } = LeaveStatus.Draft;
     public List<FlowTask> Tasks { get; } = [];
@@ -62,7 +64,7 @@ public sealed class FlowTask
     public DateTimeOffset? ProcessedAt { get; set; }
 }
 
-public sealed record LeaveBalance(decimal Entitled, decimal Frozen, decimal Used)
+public sealed record LeaveBalance(decimal Entitled, decimal Frozen, decimal Used, int Year = 0, decimal StatutoryEntitled = 0, decimal Adjustment = 0, int Version = 0)
 {
     public decimal Available => Entitled - Frozen - Used;
 }

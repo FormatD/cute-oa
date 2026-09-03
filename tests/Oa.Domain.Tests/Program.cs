@@ -1,4 +1,6 @@
 using Microsoft.Extensions.Configuration;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Builder;
 using Oa.Api.Domain;
 using Oa.Api.Services;
 
@@ -14,6 +16,134 @@ void True(bool condition, string name)
 {
     if (!condition) failures.Add($"{name}: assertion failed");
 }
+
+var keyPerFileRoot = Path.Combine(Path.GetTempPath(), $"oa-key-per-file-{Guid.NewGuid():N}");
+try
+{
+    Directory.CreateDirectory(keyPerFileRoot);
+    File.WriteAllText(Path.Combine(keyPerFileRoot, "Authentication__SigningKey"), "secret-from-mounted-file");
+    var keyPerFileConfiguration = new ConfigurationBuilder().AddKeyPerFile(keyPerFileRoot, optional: false).Build();
+    Equal("secret-from-mounted-file", keyPerFileConfiguration["Authentication:SigningKey"]!, "双下划线密钥文件映射为配置层级");
+}
+finally
+{
+    if (Directory.Exists(keyPerFileRoot)) Directory.Delete(keyPerFileRoot, recursive: true);
+}
+
+ProductionConfigurationPolicy.Validate(new ConfigurationBuilder().Build(), true);
+var validProductionConfiguration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+{
+    ["Authentication:SigningKey"] = "production-random-signing-key-example-2026-08-31-rotate-me",
+    ["Authentication:MultiFactor:Enabled"] = "true",
+    ["Authentication:MultiFactor:EncryptionKey"] = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+    ["Authentication:MultiFactor:RequiredPermissions:0"] = OaPermissions.UserManage,
+    ["Authentication:MultiFactor:RequiredPermissions:1"] = OaPermissions.PersonnelExport,
+    ["Authentication:MultiFactor:RequiredPermissions:2"] = OaPermissions.PersonnelManage,
+    ["Authentication:MultiFactor:RequiredPermissions:3"] = OaPermissions.AttendanceManage,
+    ["Authentication:MultiFactor:RequiredPermissions:4"] = OaPermissions.ContractManage,
+    ["Authentication:MultiFactor:RequiredPermissions:5"] = OaPermissions.PurchaseManage,
+    ["Persistence:UsePostgreSql"] = "true",
+    ["ConnectionStrings:OaDatabase"] = "Host=database.internal;Database=oa;Username=oa_app;Password=secret;SSL Mode=Require;Pooling=true;Maximum Pool Size=100",
+    ["Cors:AllowedOrigins:0"] = "https://oa.example.com",
+    ["Storage:Root"] = "/srv/cute-oa/files",
+    ["AllowedHosts"] = "api.oa.example.com",
+    ["ForwardedHeaders:KnownProxies:0"] = "10.0.0.10",
+    ["DemoFeatures:AllowDataGeneration"] = "false",
+    ["Bootstrap:Enabled"] = "true",
+    ["Bootstrap:AdminUserId"] = "oa-production-admin",
+    ["Bootstrap:AdminName"] = "生产引导管理员",
+    ["Bootstrap:DepartmentId"] = "management",
+    ["Bootstrap:DepartmentName"] = "管理部",
+    ["Bootstrap:AdminEmployeeNumber"] = "ADMIN-001",
+    ["Bootstrap:AdminHireDate"] = "2026-01-01",
+    ["Bootstrap:AdminPassword"] = "StrongBootstrap#2026",
+    ["PersonnelCases:CategoryAssignees:HR"] = "hr-owner",
+    ["PersonnelCases:CategoryAssignees:FINANCE"] = "finance-owner",
+    ["PersonnelCases:CategoryAssignees:IT"] = "it-owner",
+    ["PersonnelCases:CategoryAssignees:ADMIN"] = "admin-owner",
+    ["PersonnelCaseAlerts:Enabled"] = "true",
+    ["PersonnelCaseAlerts:IntervalMinutes"] = "60",
+    ["PersonnelCaseAlerts:DueSoonDays"] = "1",
+    ["PersonnelCaseAlerts:EscalateAfterDays"] = "3"
+}).Build();
+ProductionConfigurationPolicy.Validate(validProductionConfiguration, false);
+var invalidProductionConfiguration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+{
+    ["Authentication:SigningKey"] = "cute-oa-development-signing-key-change-before-production-2026",
+    ["Persistence:UsePostgreSql"] = "false",
+    ["Cors:AllowedOrigins:0"] = "http://localhost:5173",
+    ["Storage:Root"] = "storage/files",
+    ["AllowedHosts"] = "*",
+    ["LoginProtection:Enabled"] = "false",
+    ["ForwardedHeaders:KnownProxies:0"] = "0.0.0.0",
+    ["DemoFeatures:AllowDataGeneration"] = "true",
+    ["Bootstrap:Enabled"] = "true",
+    ["Bootstrap:AdminUserId"] = "u-admin",
+    ["Bootstrap:AdminName"] = "A",
+    ["Bootstrap:DepartmentId"] = "?",
+    ["Bootstrap:DepartmentName"] = "A",
+    ["Bootstrap:AdminEmployeeNumber"] = "?",
+    ["Bootstrap:AdminHireDate"] = "invalid",
+    ["Bootstrap:AdminPassword"] = IdentityDefaults.DemoPassword
+}).Build();
+try
+{
+    ProductionConfigurationPolicy.Validate(invalidProductionConfiguration, false);
+    failures.Add("生产环境接受了开发默认配置");
+}
+catch (InvalidOperationException exception)
+{
+    True(exception.Message.Contains("开发示例密钥") && exception.Message.Contains("MultiFactor") && exception.Message.Contains("UsePostgreSql") && exception.Message.Contains("无效生产源") && exception.Message.Contains("持久卷绝对路径") && exception.Message.Contains("AllowedHosts") && exception.Message.Contains("LoginProtection") && exception.Message.Contains("KnownProxies") && exception.Message.Contains("AllowDataGeneration") && exception.Message.Contains("Bootstrap") && exception.Message.Contains("PersonnelCaseAlerts"), "生产配置错误一次性返回完整门禁原因");
+}
+True(PasswordHasher.MeetsProductionPolicy("StrongBootstrap#2026") && !PasswordHasher.MeetsProductionPolicy(IdentityDefaults.DemoPassword), "生产引导密码执行独立强密码策略");
+Equal(new DateOnly(2026, 9, 1), BusinessTime.ChinaToday(new DateTimeOffset(2026, 8, 31, 16, 30, 0, TimeSpan.Zero)), "容器 UTC 日期按北京时间转换业务日期");
+Equal(new DateOnly(2026, 10, 1), BusinessTime.ChinaMonth(new DateTimeOffset(2026, 9, 30, 18, 0, 0, TimeSpan.Zero)), "北京时间业务月份稳定转换");
+
+var mfaConfiguration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+{
+    ["Authentication:MultiFactor:Enabled"] = "true",
+    ["Authentication:MultiFactor:EncryptionKey"] = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+}).Build();
+var mfaProtector = new MfaSecretProtector(mfaConfiguration);
+var protectedMfaSecret = mfaProtector.Protect("JBSWY3DPEHPK3PXP");
+True(protectedMfaSecret != "JBSWY3DPEHPK3PXP" && mfaProtector.Unprotect(protectedMfaSecret) == "JBSWY3DPEHPK3PXP", "TOTP 密钥使用认证加密保护并可恢复");
+var totpTimestamp = DateTimeOffset.FromUnixTimeSeconds(1_789_100_010);
+var totpCode = TotpGenerator.GenerateCode("JBSWY3DPEHPK3PXP", totpTimestamp);
+True(TotpGenerator.TryValidate("JBSWY3DPEHPK3PXP", totpCode, totpTimestamp, out _), "当前时间窗 TOTP 验证通过");
+True(TotpGenerator.TryValidate("JBSWY3DPEHPK3PXP", TotpGenerator.GenerateCode("JBSWY3DPEHPK3PXP", totpTimestamp.AddSeconds(-30)), totpTimestamp, out _), "相邻时间窗容差验证通过");
+True(!TotpGenerator.TryValidate("JBSWY3DPEHPK3PXP", "00000A", totpTimestamp, out _), "非法动态验证码被拒绝");
+
+var forwardedOptions = new ForwardedHeadersOptions();
+ReverseProxyPolicy.Configure(forwardedOptions, validProductionConfiguration);
+Equal(1, forwardedOptions.ForwardLimit!.Value, "转发头只接受一跳代理");
+True(forwardedOptions.RequireHeaderSymmetry, "转发头要求来源和协议数量对称");
+Equal("10.0.0.10", forwardedOptions.KnownProxies.Single().ToString(), "只信任配置的反向代理地址");
+
+var limiterClock = new ManualTimeProvider(new DateTimeOffset(2026, 8, 31, 8, 0, 0, TimeSpan.Zero));
+var limiterSettings = new LoginProtectionSettings(true, 60, 2, 3, 4, 1000);
+var accountLimiter = new LoginAttemptLimiter(limiterSettings, limiterClock);
+True(accountLimiter.TryAcquire("u-test", "10.1.1.1").IsAllowed, "账号来源组合第一次登录放行");
+True(accountLimiter.TryAcquire("u-test", "10.1.1.1").IsAllowed, "账号来源组合限额内放行");
+var pairBlocked = accountLimiter.TryAcquire("u-test", "10.1.1.1");
+True(!pairBlocked.IsAllowed && pairBlocked.RetryAfterSeconds == 60, "账号来源组合超过限额返回重试时间");
+True(accountLimiter.TryAcquire("u-test", "10.1.1.2").IsAllowed, "更换来源仍受账号总限额约束前放行");
+True(!accountLimiter.TryAcquire("u-test", "10.1.1.3").IsAllowed, "分散来源不能绕过账号总限额");
+limiterClock.Advance(TimeSpan.FromSeconds(61));
+True(accountLimiter.TryAcquire("u-test", "10.1.1.1").IsAllowed, "限流窗口到期后自动恢复");
+
+var ipLimiter = new LoginAttemptLimiter(limiterSettings, new ManualTimeProvider(new DateTimeOffset(2026, 8, 31, 9, 0, 0, TimeSpan.Zero)));
+for (var index = 0; index < 4; index++) True(ipLimiter.TryAcquire($"u-{index}", "10.2.2.2").IsAllowed, $"同来源第 {index + 1} 次限额内放行");
+True(!ipLimiter.TryAcquire("u-over-ip", "10.2.2.2").IsAllowed, "轮换账号不能绕过来源 IP 总限额");
+
+var securityContext = new DefaultHttpContext();
+securityContext.Request.Path = "/api/v1/auth/login";
+var securityNextCalled = false;
+await new SecurityHeadersMiddleware(_ => { securityNextCalled = true; return Task.CompletedTask; }).InvokeAsync(securityContext);
+True(securityNextCalled, "安全响应头中间件继续请求管道");
+Equal("nosniff", securityContext.Response.Headers.XContentTypeOptions.ToString(), "禁止 MIME 嗅探响应头");
+Equal("DENY", securityContext.Response.Headers.XFrameOptions.ToString(), "禁止页面嵌入响应头");
+Equal("no-store", securityContext.Response.Headers.CacheControl.ToString(), "认证响应禁止缓存");
+True(securityContext.Response.Headers.ContentSecurityPolicy.ToString().Contains("default-src 'none'"), "API 默认内容安全策略");
 
 var paging = Paging.Create(Enumerable.Range(1, 18).ToList(), 2, 8);
 Equal(18, paging.Total, "分页返回总数");
@@ -48,18 +178,36 @@ var authConfiguration = new ConfigurationBuilder().AddInMemoryCollection(new Dic
     ["Authentication:AccessTokenMinutes"] = "30"
 }).Build();
 var tokenService = new JwtTokenService(authConfiguration);
+var mfaPublicContext = new DefaultHttpContext();
+mfaPublicContext.Request.Path = "/api/v1/auth/mfa/verify";
+var mfaPublicNextCalled = false;
+await new BearerAuthenticationMiddleware(_ => { mfaPublicNextCalled = true; return Task.CompletedTask; }).InvokeAsync(mfaPublicContext, tokenService, data);
+True(mfaPublicNextCalled, "MFA 预认证验证端点不要求尚未签发的 Bearer 令牌");
 var authentication = new AuthenticationService(data, tokenService);
 var login = authentication.Login(new LoginRequest("u-zhang", "Oa@123456"));
 True(login.IsSuccess, "有效模拟账号可以登录");
 True(tokenService.TryValidate(login.Value!.Session.AccessToken, out var tokenIdentity) && tokenIdentity!.UserId == "u-zhang" && tokenIdentity.SessionId is null, "登录签发的 JWT 可验证并绑定正确用户");
 True(!tokenService.TryValidate(login.Value.Session.AccessToken + "x", out _), "被篡改的 JWT 无法通过签名验证");
 True(!authentication.Login(new LoginRequest("u-zhang", "wrong-password")).IsSuccess, "错误密码不能登录");
+True(!authentication.Login(new LoginRequest("u-missing", "wrong-password")).IsSuccess, "不存在账号使用统一认证失败响应");
+True(!authentication.Login(new LoginRequest("u-zhang", string.Empty)).IsSuccess, "空密码使用统一认证失败响应");
 True(!authentication.Login(new LoginRequest("u-disabled", "Oa@123456")).IsSuccess, "停用账号不能登录");
 var employee = data.GetEmployee("u-zhang");
 var manager = data.GetEmployee("u-li");
 var generalManager = data.GetEmployee("u-wang");
 var hr = data.GetEmployee("u-sun");
+Equal(0m, AnnualLeavePolicy.Calculate(new DateOnly(2026, 12, 31), new DateOnly(2026, 1, 1), 9, null), "连续工作未满十二个月不享受法定年假");
+Equal(5m, AnnualLeavePolicy.Calculate(new DateOnly(2027, 1, 1), new DateOnly(2026, 1, 1), 0, null), "连续工作满十二个月享受五天法定年假");
+Equal(10m, AnnualLeavePolicy.Calculate(new DateOnly(2026, 9, 1), new DateOnly(2016, 9, 1), 0, null), "累计工作满十年享受十天法定年假");
+Equal(15m, AnnualLeavePolicy.Calculate(new DateOnly(2026, 9, 1), new DateOnly(2006, 9, 1), 0, null), "累计工作满二十年享受十五天法定年假");
+Equal(2m, AnnualLeavePolicy.Calculate(new DateOnly(2026, 9, 1), new DateOnly(2020, 1, 1), 0, new DateOnly(2026, 7, 1)), "当年新入职按剩余日历天数向下折算年假");
 var service = new LeaveService(data);
+Equal(0m, service.GetBalance(employee, LeaveType.CompTime).Entitled, "调休不复用法定年假额度");
+var initialAnnualVersion = service.GetBalance(employee, LeaveType.Annual, 2026).Version;
+True(service.AdjustBalance(employee, employee.Id, new AdjustLeaveBalanceRequest(LeaveType.Annual, 2026, 1m, "员工尝试自行增加余额", initialAnnualVersion)).Code == "AUTH_002", "普通员工不能自行调整假期余额");
+var adjustedAnnual = service.AdjustBalance(hr, employee.Id, new AdjustLeaveBalanceRequest(LeaveType.Annual, 2026, 1m, "HR 核验后补充公司福利假", initialAnnualVersion));
+True(adjustedAnnual.IsSuccess && adjustedAnnual.Value is { Entitled: 6m, StatutoryEntitled: 5m, Adjustment: 1m }, "HR 可在法定额度之上按半天粒度调整并保留法定基线");
+True(service.AdjustBalance(hr, employee.Id, new AdjustLeaveBalanceRequest(LeaveType.Annual, 2026, 2m, "使用过期版本调整余额", initialAnnualVersion)).Code == "CONCURRENCY_001", "假期余额人工调整执行乐观锁校验");
 True(!service.CreateDraft(employee, new CreateLeaveRequest(LeaveType.Personal, new DateOnly(2026, 8, 31), LeavePeriod.FullDay, new DateOnly(2026, 8, 31), LeavePeriod.FullDay, "非法抄送", CopyRecipientIds: [employee.Id])).IsSuccess, "发起人不能将自己设置为抄送人");
 True(!service.CreateDraft(employee, new CreateLeaveRequest(LeaveType.Personal, new DateOnly(2026, 8, 31), LeavePeriod.FullDay, new DateOnly(2026, 8, 31), LeavePeriod.FullDay, "停用账号抄送", CopyRecipientIds: ["u-disabled"])).IsSuccess, "停用账号不能被设置为抄送人");
 var makeupWorkday = service.CreateDraft(employee, new CreateLeaveRequest(
@@ -104,6 +252,7 @@ True(approved.IsSuccess, "部门负责人可审批");
 True(service.GetProcessedTasks(manager).Any(task => task.Id == submitted.Value.Tasks[0].Id), "已处理请假任务进入我的已办");
 Equal(LeaveStatus.Completed, approved.Value!.Status, "全部审批通过后完成");
 Equal(1m, service.GetBalance(employee).Used, "完成后年假余额转为已使用");
+True(service.AdjustBalance(hr, employee.Id, new AdjustLeaveBalanceRequest(LeaveType.Annual, 2026, -5m, "尝试把额度调低到已使用量以下", service.GetBalance(employee).Version)).Code == "LEAVE_001", "人工调整后总额度不能低于冻结和已使用额度");
 True(service.List(employee, new DocumentListQuery("已更新", null, null, null, null)).Any(item => item.Id == draft.Value.Id), "请假列表支持关键字筛选");
 True(service.List(employee, new DocumentListQuery(null, (int)LeaveStatus.Completed, null, null, null)).Any(item => item.Id == draft.Value.Id), "请假列表支持状态筛选");
 
@@ -140,6 +289,13 @@ var withdrawableSubmitted = service.Submit(employee, withdrawableLeave.Value!.Id
 True(service.Withdraw(employee, withdrawableSubmitted.Value!.Id).IsSuccess, "申请人可撤回未处理的请假单");
 Equal(LeaveStatus.Withdrawn, withdrawableSubmitted.Value.Status, "撤回后请假状态正确");
 Equal(0m, service.GetBalance(employee).Frozen, "撤回后释放年假冻结额度");
+
+var crossYearAnnual = service.CreateDraft(employee, new CreateLeaveRequest(
+    LeaveType.Annual,
+    new DateOnly(2026, 12, 31), LeavePeriod.FullDay,
+    new DateOnly(2027, 1, 4), LeavePeriod.FullDay,
+    "跨年度年假应拆分申请"));
+True(crossYearAnnual.IsSuccess && service.Submit(employee, crossYearAnnual.Value!.Id).Code == "LEAVE_004", "年假跨自然年度时要求拆分以避免错扣年度余额");
 
 var transferableLeave = service.CreateDraft(employee, new CreateLeaveRequest(
     LeaveType.Personal, new DateOnly(2026, 9, 9), LeavePeriod.FullDay,
@@ -221,3 +377,10 @@ if (failures.Count > 0)
 
 Console.WriteLine("All domain tests passed.");
 return 0;
+
+sealed class ManualTimeProvider(DateTimeOffset now) : TimeProvider
+{
+    private DateTimeOffset current = now;
+    public override DateTimeOffset GetUtcNow() => current;
+    public void Advance(TimeSpan duration) => current = current.Add(duration);
+}

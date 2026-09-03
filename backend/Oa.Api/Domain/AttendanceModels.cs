@@ -68,6 +68,11 @@ public sealed record AttendanceMonthLockView(
     string? UnlockedBy,
     string? UnlockedByName,
     DateTimeOffset? UnlockedAt,
-    string? UnlockReason);
+    string? UnlockReason,
+    int? SnapshotSequence,
+    string? SnapshotHash,
+    int SnapshotRowCount,
+    DateTimeOffset? SnapshotCreatedAt);
 
 public sealed record ChangeAttendanceMonthLockRequest(string Reason, int Version);
+public sealed record AttendanceMonthSnapshotExport(byte[] Content, string FileName, int Sequence, string Hash, int RowCount);

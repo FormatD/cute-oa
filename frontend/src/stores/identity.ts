@@ -1,14 +1,11 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createHttpClient } from '../api/http'
-import { createIdentityApi } from '../api/modules/identity'
+import { useApiClient } from '../api/client'
 import type { CreateManagedUser, CreateSecurityRole, ManagedUser, PermissionDefinition, SecurityRole, UpdateManagedUser, UpdateSecurityRole } from '../api/types'
-import { useAuthStore } from './auth'
 import { PAGE_SIZE } from './pagination'
 
 export const useIdentityStore = defineStore('identity', () => {
-  const auth = useAuthStore()
-  const api = createIdentityApi(createHttpClient(() => auth.accessToken, auth.clearSession, auth.refreshAccessToken))
+  const api = useApiClient().identity
   const users = ref<ManagedUser[]>([])
   const roles = ref<SecurityRole[]>([])
   const permissions = ref<PermissionDefinition[]>([])
@@ -63,6 +60,10 @@ export const useIdentityStore = defineStore('identity', () => {
     return save(async () => { await api.resetPassword(id, password); message.value = '密码已重置，账号锁定状态已清除。' })
   }
 
+  async function resetMfa(id: string) {
+    return save(async () => { await api.resetMfa(id); message.value = '多因素认证已重置，相关登录会话已撤销。' })
+  }
+
   async function createRole(payload: CreateSecurityRole) {
     return saveRole(async () => { await api.createRole(payload); message.value = '角色已创建。' })
   }
@@ -110,5 +111,5 @@ export const useIdentityStore = defineStore('identity', () => {
   function search() { page.value = 1; void loadUsers() }
   function resetFilters() { filters.value = { keyword: '', status: '', departmentId: '' }; search() }
 
-  return { users, roles, permissions, filters, page, total, totalPages, loading, saving, error, message, pagedUsers, initialize, loadRoles, loadPermissions, loadUsers, createUser, updateUser, resetPassword, createRole, updateRole, deleteRole, search, resetFilters }
+  return { users, roles, permissions, filters, page, total, totalPages, loading, saving, error, message, pagedUsers, initialize, loadRoles, loadPermissions, loadUsers, createUser, updateUser, resetPassword, resetMfa, createRole, updateRole, deleteRole, search, resetFilters }
 })

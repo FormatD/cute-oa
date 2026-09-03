@@ -1,15 +1,12 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createHttpClient } from '../api/http'
-import { createOrganizationApi } from '../api/modules/organization'
+import { useApiClient } from '../api/client'
 import type { CreateDepartment, ManagedDepartment, UpdateDepartment } from '../api/types'
-import { useAuthStore } from './auth'
 import { useOrganizationStore } from './organization'
 
 export const useDepartmentAdminStore = defineStore('department-admin', () => {
-  const auth = useAuthStore()
   const organization = useOrganizationStore()
-  const api = createOrganizationApi(createHttpClient(() => auth.accessToken, auth.clearSession, auth.refreshAccessToken))
+  const api = useApiClient().organization
   const departments = ref<ManagedDepartment[]>([])
   const loading = ref(false)
   const saving = ref(false)

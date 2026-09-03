@@ -1,17 +1,15 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createHttpClient } from '../api/http'
-import { createContractApi, type ContractFilters } from '../api/modules/contracts'
+import { useApiClient } from '../api/client'
+import type { ContractFilters } from '../api/modules/contracts'
 import type { ContractAlertSummary, EmploymentContract, SaveEmploymentContract } from '../api/types'
-import { useAuthStore } from './auth'
 import { PAGE_SIZE } from './pagination'
 
 const blankFilters = (): ContractFilters => ({ keyword: '', departmentId: '', contractType: '', status: '', expiryDays: '' })
 const blankSummary = (): ContractAlertSummary => ({ missingWrittenContract: 0, expired: 0, within7Days: 0, within30Days: 0, within60Days: 0, within90Days: 0, openEndedReviewRequired: 0, unacknowledged: 0, atRiskContracts: 0 })
 
 export const useContractStore = defineStore('contracts', () => {
-  const auth = useAuthStore()
-  const api = createContractApi(createHttpClient(() => auth.accessToken, auth.clearSession, auth.refreshAccessToken))
+  const api = useApiClient().contracts
   const contracts = ref<EmploymentContract[]>([])
   const detail = ref<EmploymentContract | null>(null)
   const alertSummary = ref<ContractAlertSummary>(blankSummary())

@@ -1,3 +1,5 @@
+name: cute-oa
+
 services:
   postgres:
     # Pin to PostgreSQL 16: it initializes POSTGRES_USER correctly on the

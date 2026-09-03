@@ -1,14 +1,11 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createHttpClient } from '../api/http'
-import { createAnnouncementApi } from '../api/modules/announcements'
+import { useApiClient } from '../api/client'
 import type { Announcement, SaveAnnouncement } from '../api/types'
-import { useAuthStore } from './auth'
 import { PAGE_SIZE } from './pagination'
 
 export const useAnnouncementStore = defineStore('announcements', () => {
-  const auth = useAuthStore()
-  const api = createAnnouncementApi(createHttpClient(() => auth.accessToken, auth.clearSession, auth.refreshAccessToken))
+  const api = useApiClient().announcements
   const published = ref<Announcement[]>([])
   const publishedPage = ref(1)
   const publishedTotal = ref(0)

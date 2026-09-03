@@ -12,3 +12,4 @@ docker compose exec -T postgres psql -U oa -d postgres -v ON_ERROR_STOP=1 \
   -c 'DROP DATABASE IF EXISTS oa_test WITH (FORCE);' \
   -c 'CREATE DATABASE oa_test OWNER oa;'
 dotnet run --project tests/Oa.Postgres.Tests/Oa.Postgres.Tests.csproj
+bash scripts/verify-hr-profile-import.sh

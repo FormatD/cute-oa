@@ -1,14 +1,17 @@
 import type { FileDescriptor } from './types'
 
 const apiHostname = typeof window !== 'undefined' && window.location.hostname ? window.location.hostname : 'localhost'
-const baseUrl = `http://${apiHostname}:5234/api/v1`
+const runtimeOrigin = typeof window !== 'undefined' ? window.location.origin : 'http://localhost:5234'
+const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim()
+const baseUrl = (configuredBaseUrl || (import.meta.env.DEV ? `http://${apiHostname}:5234/api/v1` : `${runtimeOrigin}/api/v1`)).replace(/\/$/, '')
 
 export type ApiRequest = <T>(path: string, init?: RequestInit, requiresAuth?: boolean) => Promise<T>
 
 export type HttpClient = {
   request: ApiRequest
   uploadFile: (file: File) => Promise<FileDescriptor>
-  downloadFile: (id: string, resourceType: 'leave' | 'expense' | 'travel' | 'attendance' | 'contract', resourceId: string) => Promise<void>
+  downloadFile: (id: string, resourceType: 'leave' | 'expense' | 'travel' | 'purchase' | 'attendance' | 'contract', resourceId: string) => Promise<void>
+  download: (path: string, fallbackName: string) => Promise<void>
 }
 
 export function createHttpClient(
@@ -78,10 +81,14 @@ export function createHttpClient(
     return response.json()
   }
 
-  async function downloadFile(id: string, resourceType: 'leave' | 'expense' | 'travel' | 'attendance' | 'contract', resourceId: string) {
+  async function downloadFile(id: string, resourceType: 'leave' | 'expense' | 'travel' | 'purchase' | 'attendance' | 'contract', resourceId: string) {
+    return download(`/files/${id}?resourceType=${resourceType}&resourceId=${resourceId}`, 'attachment')
+  }
+
+  async function download(path: string, fallbackName: string) {
     const execute = () => {
       const accessToken = getAccessToken()
-      return fetch(`${baseUrl}/files/${id}?resourceType=${resourceType}&resourceId=${resourceId}`, {
+      return fetch(`${baseUrl}${path}`, {
         credentials: 'include',
         headers: { ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) }
       })
@@ -91,9 +98,9 @@ export function createHttpClient(
     if (!response.ok) {
       const error = await response.json().catch(() => ({}))
       if (response.status === 401) onUnauthorized?.()
-      throw new Error(error.message ?? '附件下载失败。')
+      throw new Error(error.message ?? '文件下载失败。')
     }
-    const name = response.headers.get('content-disposition')?.match(/filename\*?=(?:UTF-8''|\")?([^;\"]+)/i)?.[1] ?? 'attachment'
+    const name = response.headers.get('content-disposition')?.match(/filename\*?=(?:UTF-8''|\")?([^;\"]+)/i)?.[1] ?? fallbackName
     const url = URL.createObjectURL(await response.blob())
     const link = document.createElement('a')
     link.href = url
@@ -102,7 +109,7 @@ export function createHttpClient(
     URL.revokeObjectURL(url)
   }
 
-  return { request, uploadFile, downloadFile }
+  return { request, uploadFile, downloadFile, download }
 }
 
 export function toQuery(filters: object, page: number, pageSize: number) {
@@ -111,4 +118,11 @@ export function toQuery(filters: object, page: number, pageSize: number) {
   query.set('page', String(page))
   query.set('pageSize', String(pageSize))
   return `?${query.toString()}`
+}
+
+export function toFilterQuery(filters: object) {
+  const query = new URLSearchParams()
+  Object.entries(filters).forEach(([key, value]) => { if (value) query.set(key, String(value)) })
+  const value = query.toString()
+  return value ? `?${value}` : ''
 }

@@ -2,19 +2,21 @@ import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import type { DetailView, Notification, WorkCalendarEntry } from '../api/types'
 import { useExpenseStore } from './expense'
+import { useCalendarStore } from './calendar'
 import { useLeaveStore } from './leave'
 import { useTravelStore } from './travel'
+import { usePurchaseStore } from './purchase'
 import { useUiStore } from './ui'
 import { useWorkflowStore } from './workflow'
-import { useWorkspaceStore } from './workspace'
 
 export const useDetailStore = defineStore('detail', () => {
   const ui = useUiStore()
   const leave = useLeaveStore()
   const expense = useExpenseStore()
   const travel = useTravelStore()
+  const purchase = usePurchaseStore()
   const workflow = useWorkflowStore()
-  const workspace = useWorkspaceStore()
+  const calendar = useCalendarStore()
   const detailLoading = ref(false)
   const notificationDetail = ref<Notification | null>(null)
   const calendarDetail = ref<WorkCalendarEntry | null>(null)
@@ -31,6 +33,7 @@ export const useDetailStore = defineStore('detail', () => {
     leave.leaveDetail = null
     expense.expenseDetail = null
     travel.travelDetail = null
+    purchase.purchaseDetail = null
     notificationDetail.value = null
     calendarDetail.value = null
 
@@ -38,6 +41,7 @@ export const useDetailStore = defineStore('detail', () => {
       if (view.module === 'leave') await leave.loadLeaveDetail(view.id)
       if (view.module === 'expense') await expense.loadExpenseDetail(view.id)
       if (view.module === 'travel') await travel.loadTravelDetail(view.id)
+      if (view.module === 'purchase') await purchase.loadPurchaseDetail(view.id)
       if (view.module === 'notification') {
         notificationDetail.value = workflow.notifications.find(item => item.id === view.id) ?? null
         if (!notificationDetail.value) {
@@ -46,7 +50,7 @@ export const useDetailStore = defineStore('detail', () => {
         }
       }
       if (view.module === 'calendar') {
-        calendarDetail.value = workspace.calendarEntries.find(item => item.date === view.id) ?? null
+        calendarDetail.value = calendar.entries.find(item => item.date === view.id) ?? null
       }
     } catch (cause) {
       ui.error = cause instanceof Error ? cause.message : '详情加载失败。'

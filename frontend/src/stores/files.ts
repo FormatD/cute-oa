@@ -1,23 +1,20 @@
 import { defineStore } from 'pinia'
-import { createHttpClient } from '../api/http'
-import { useAuthStore } from './auth'
+import { useApiClient } from '../api/client'
+import type { FileResourceType } from '../api/modules/files'
 import { useUiStore } from './ui'
 
-export type FileResourceType = 'leave' | 'expense' | 'travel' | 'attendance' | 'contract'
-
 export const useFileStore = defineStore('files', () => {
-  const auth = useAuthStore()
   const ui = useUiStore()
-  const client = createHttpClient(() => auth.accessToken, auth.clearSession, auth.refreshAccessToken)
+  const api = useApiClient().files
 
   async function uploadFile(file: File) {
-    const uploaded = await client.uploadFile(file)
+    const uploaded = await api.upload(file)
     return uploaded.id
   }
 
   async function downloadAttachment(id: string, resourceType: FileResourceType, resourceId: string) {
     try {
-      await client.downloadFile(id, resourceType, resourceId)
+      await api.download(id, resourceType, resourceId)
     } catch (cause) {
       ui.error = cause instanceof Error ? cause.message : '附件下载失败。'
     }

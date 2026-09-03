@@ -1,10 +1,11 @@
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Oa.Api.Domain;
 using Oa.Api.Persistence;
 
 namespace Oa.Api.Services;
 
-public sealed class IdentityAdministrationService(OaDbContext db, DemoData data)
+public sealed class IdentityAdministrationService(OaDbContext db, DemoData data, IConfiguration? configuration = null)
 {
     private const string TenantId = IdentityDefaults.TenantId;
 
@@ -120,18 +121,109 @@ public sealed class IdentityAdministrationService(OaDbContext db, DemoData data)
         if (db.Users.Any(item => item.Id == id)) return ServiceResult<ManagedUserView>.Failure("用户 ID 已存在。", "DUPLICATE_001");
         var validation = Validate(request.Name, request.DepartmentId, request.PositionId, request.ManagerId, request.CumulativeWorkYears, "ACTIVE", request.Roles, id);
         if (!validation.IsSuccess) return ServiceResult<ManagedUserView>.Failure(validation.Error!, validation.Code!);
-        if (!PasswordHasher.MeetsPolicy(request.Password)) return ServiceResult<ManagedUserView>.Failure("密码须为 8–128 位并同时包含字母和数字。", "VALIDATION_001");
+        if (!PasswordHasher.MeetsProductionPolicy(request.Password)) return ServiceResult<ManagedUserView>.Failure("临时密码须为 12–128 位，并包含大小写字母、数字和特殊字符。", "VALIDATION_001");
 
-        var user = new UserRecord { Id = id, TenantId = TenantId, Name = request.Name.Trim(), DepartmentId = request.DepartmentId, PositionId = NullIfEmpty(request.PositionId), ManagerId = NullIfEmpty(request.ManagerId), CumulativeWorkYears = request.CumulativeWorkYears, Status = "ACTIVE" };
+        var profileResult = ResolveInitialProfile(id, request);
+        if (!profileResult.IsSuccess) return ServiceResult<ManagedUserView>.Failure(profileResult.Error!, profileResult.Code!);
+        var initial = profileResult.Value!;
+
+        var cumulativeWorkYears = initial.CumulativeWorkStartDate is null
+            ? request.CumulativeWorkYears
+            : PersonnelProfileProvisioning.CompletedYears(initial.CumulativeWorkStartDate.Value, BusinessTime.ChinaToday());
+        var user = new UserRecord { Id = id, TenantId = TenantId, Name = request.Name.Trim(), DepartmentId = request.DepartmentId, PositionId = NullIfEmpty(request.PositionId), ManagerId = NullIfEmpty(request.ManagerId), CumulativeWorkYears = cumulativeWorkYears, Status = "ACTIVE" };
         var roles = request.Roles.Distinct().ToList();
         var password = PasswordHasher.Hash(request.Password);
-        db.Users.Add(user);
-        db.UserRoles.AddRange(roles.Select((role, index) => new UserRoleRecord { UserId = id, RoleCode = role, IsPrimary = index == 0 }));
-        db.UserAccounts.Add(new UserAccountRecord { UserId = id, PasswordSalt = password.Salt, PasswordHash = password.Hash, PasswordIterations = password.Iterations });
-        db.SaveChanges();
-        Audit(actor, "USER_CREATED", user.Id, $"创建用户 {user.Name}（{user.Id}）");
+        var profile = PersonnelProfileProvisioning.Create(user, initial.EmployeeNumber, initial.HireDate, initial.EmploymentType, initial.PersonnelStatus, initial.ProbationEndDate, initial.CumulativeWorkStartDate);
+        using var transaction = db.Database.CurrentTransaction is null && db.Database.IsRelational() ? db.Database.BeginTransaction() : null;
+        try
+        {
+            db.Users.Add(user);
+            db.UserRoles.AddRange(roles.Select((role, index) => new UserRoleRecord { UserId = id, RoleCode = role, IsPrimary = index == 0 }));
+            db.UserAccounts.Add(new UserAccountRecord { UserId = id, PasswordSalt = password.Salt, PasswordHash = password.Hash, PasswordIterations = password.Iterations, MustChangePassword = true });
+            db.PersonnelProfiles.Add(profile);
+            db.PersonnelEvents.Add(PersonnelProfileProvisioning.CreateInitialEvent(profile, actor.Id, actor.Name, "创建账号时建立人事档案"));
+            db.AuditLogs.Add(new AuditRecord { TenantId = TenantId, ActorId = actor.Id, Action = "USER_CREATED", ResourceType = "User", ResourceId = user.Id, Summary = $"创建用户 {user.Name}（{user.Id}）并建立人事档案 {profile.EmployeeNumber}" });
+            db.SaveChanges();
+            transaction?.Commit();
+        }
+        catch (DbUpdateException exception) when (IsUserOrEmployeeNumberConflict(exception))
+        {
+            transaction?.Rollback();
+            db.ChangeTracker.Clear();
+            return ServiceResult<ManagedUserView>.Failure(
+                IsEmployeeNumberConflict(exception) ? "员工工号已存在。" : "用户 ID 已存在。",
+                IsEmployeeNumberConflict(exception) ? "PERSONNEL_002" : "DUPLICATE_001");
+        }
+        catch
+        {
+            transaction?.Rollback();
+            db.ChangeTracker.Clear();
+            throw;
+        }
         return ServiceResult<ManagedUserView>.Success(ToView(user));
     }
+
+    private ServiceResult<InitialPersonnelProfile> ResolveInitialProfile(string userId, CreateManagedUserRequest request)
+    {
+        var allowDemoDefaults = configuration?.GetValue("DemoFeatures:AllowDataGeneration", true) ?? true;
+        var employeeNumber = request.EmployeeNumber?.Trim().ToUpperInvariant() ?? string.Empty;
+        var hireDate = request.HireDate;
+        var employmentType = request.EmploymentType?.Trim().ToUpperInvariant() ?? string.Empty;
+        var personnelStatus = request.PersonnelStatus?.Trim().ToUpperInvariant() ?? string.Empty;
+        var cumulativeWorkStartDate = request.CumulativeWorkStartDate;
+        if (allowDemoDefaults)
+        {
+            employeeNumber = string.IsNullOrWhiteSpace(employeeNumber) ? PersonnelProfileProvisioning.GenerateDemoEmployeeNumber(userId) : employeeNumber;
+            hireDate ??= BusinessTime.ChinaToday().AddYears(-Math.Min(request.CumulativeWorkYears, 20));
+            employmentType = string.IsNullOrWhiteSpace(employmentType) ? EmploymentTypes.FullTime : employmentType;
+            personnelStatus = string.IsNullOrWhiteSpace(personnelStatus) ? PersonnelStatuses.Active : personnelStatus;
+            cumulativeWorkStartDate ??= BusinessTime.ChinaToday().AddYears(-request.CumulativeWorkYears);
+        }
+        else if (string.IsNullOrWhiteSpace(employeeNumber) || hireDate is null || string.IsNullOrWhiteSpace(employmentType) || string.IsNullOrWhiteSpace(personnelStatus))
+        {
+            return ServiceResult<InitialPersonnelProfile>.Failure("生产环境创建用户必须填写工号、入职日期、用工类型和人事状态。", "PERSONNEL_001");
+        }
+
+        var today = BusinessTime.ChinaToday();
+        if (employeeNumber.Length is < 2 or > 32 || employeeNumber.Any(character => !char.IsLetterOrDigit(character) && character != '-'))
+            return ServiceResult<InitialPersonnelProfile>.Failure("工号应为 2–32 位字母、数字或横线。", "PERSONNEL_001");
+        if (db.PersonnelProfiles.Any(item => item.TenantId == TenantId && item.EmployeeNumber == employeeNumber))
+            return ServiceResult<InitialPersonnelProfile>.Failure("员工工号已存在。", "PERSONNEL_002");
+        if (hireDate > today.AddDays(90))
+            return ServiceResult<InitialPersonnelProfile>.Failure("入职日期不能晚于当前日期后 90 天。", "PERSONNEL_003");
+        if (!EmploymentTypes.All.Contains(employmentType))
+            return ServiceResult<InitialPersonnelProfile>.Failure("用工类型不合法。", "PERSONNEL_001");
+        if (personnelStatus is not (PersonnelStatuses.Active or PersonnelStatuses.Probation))
+            return ServiceResult<InitialPersonnelProfile>.Failure("新建账号的人事状态仅支持在职或试用。", "PERSONNEL_003");
+        if (personnelStatus == PersonnelStatuses.Probation && request.ProbationEndDate is null)
+            return ServiceResult<InitialPersonnelProfile>.Failure("试用员工必须填写试用期结束日期。", "PERSONNEL_003");
+        if (request.ProbationEndDate < hireDate)
+            return ServiceResult<InitialPersonnelProfile>.Failure("试用期结束日期不能早于入职日期。", "PERSONNEL_003");
+        if (cumulativeWorkStartDate > today)
+            return ServiceResult<InitialPersonnelProfile>.Failure("累计工作起始日期不能晚于当前日期。", "PERSONNEL_003");
+
+        return ServiceResult<InitialPersonnelProfile>.Success(new InitialPersonnelProfile(
+            employeeNumber, hireDate!.Value, employmentType, personnelStatus, request.ProbationEndDate, cumulativeWorkStartDate));
+    }
+
+    private static bool IsUserOrEmployeeNumberConflict(DbUpdateException exception) => exception.InnerException is PostgresException
+    {
+        SqlState: PostgresErrorCodes.UniqueViolation,
+        ConstraintName: "PK_oa_user" or "IX_personnel_profile_TenantId_EmployeeNumber"
+    };
+
+    private static bool IsEmployeeNumberConflict(DbUpdateException exception) => exception.InnerException is PostgresException
+    {
+        ConstraintName: "IX_personnel_profile_TenantId_EmployeeNumber"
+    };
+
+    private sealed record InitialPersonnelProfile(
+        string EmployeeNumber,
+        DateOnly HireDate,
+        string EmploymentType,
+        string PersonnelStatus,
+        DateOnly? ProbationEndDate,
+        DateOnly? CumulativeWorkStartDate);
 
     public ServiceResult<ManagedUserView> Update(Employee actor, string id, UpdateManagedUserRequest request)
     {
@@ -165,7 +257,15 @@ public sealed class IdentityAdministrationService(OaDbContext db, DemoData data)
         db.UserRoles.RemoveRange(existingRoleRecords.Where(item => !orderedRoles.Contains(item.RoleCode)));
         foreach (var existingRole in existingRoleRecords.Where(item => orderedRoles.Contains(item.RoleCode))) existingRole.IsPrimary = orderedRoles.IndexOf(existingRole.RoleCode) == 0;
         db.UserRoles.AddRange(orderedRoles.Where(role => existingRoleRecords.All(item => item.RoleCode != role)).Select((role, index) => new UserRoleRecord { UserId = id, RoleCode = role, IsPrimary = orderedRoles.IndexOf(role) == 0 }));
-        db.SaveChanges();
+        try
+        {
+            db.SaveChanges();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            db.ChangeTracker.Clear();
+            return ServiceResult<ManagedUserView>.Failure("用户已被其他操作更新，请刷新后重试。", "CONCURRENCY_001");
+        }
         var organizationChanged = previousDepartmentId != request.DepartmentId || previousPositionId != NullIfEmpty(request.PositionId) || previousManagerId != NullIfEmpty(request.ManagerId);
         if (previousStatus != request.Status || !previousRoles.SetEquals(nextRoles) || organizationChanged)
         {
@@ -179,7 +279,7 @@ public sealed class IdentityAdministrationService(OaDbContext db, DemoData data)
     public ServiceResult<ManagedUserView> ResetPassword(Employee actor, string id, ResetUserPasswordRequest request)
     {
         if (!CanManage(actor)) return ServiceResult<ManagedUserView>.Failure("无用户管理权限。", "AUTH_002");
-        if (!PasswordHasher.MeetsPolicy(request.Password)) return ServiceResult<ManagedUserView>.Failure("密码须为 8–128 位并同时包含字母和数字。", "VALIDATION_001");
+        if (!PasswordHasher.MeetsProductionPolicy(request.Password)) return ServiceResult<ManagedUserView>.Failure("临时密码须为 12–128 位，并包含大小写字母、数字和特殊字符。", "VALIDATION_001");
         var user = db.Users.AsNoTracking().SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         var account = db.UserAccounts.SingleOrDefault(item => item.UserId == id);
         if (user is null || account is null) return ServiceResult<ManagedUserView>.Failure("用户不存在。", "DATA_001");
@@ -188,11 +288,33 @@ public sealed class IdentityAdministrationService(OaDbContext db, DemoData data)
         account.PasswordHash = password.Hash;
         account.PasswordIterations = password.Iterations;
         account.PasswordChangedAt = DateTimeOffset.UtcNow;
+        account.MustChangePassword = true;
         account.FailedLoginCount = 0;
         account.LockedUntil = null;
+        db.MfaChallenges.Where(item => item.UserId == id).ExecuteDelete();
         db.SaveChanges();
         AuthenticationService.RevokeAllSessions(db, id, "PASSWORD_RESET");
         Audit(actor, "USER_PASSWORD_RESET", user.Id, $"重置用户 {user.Name}（{user.Id}）密码");
+        return ServiceResult<ManagedUserView>.Success(ToView(user));
+    }
+
+    public ServiceResult<ManagedUserView> ResetMfa(Employee actor, string id)
+    {
+        if (!CanManage(actor)) return ServiceResult<ManagedUserView>.Failure("无用户管理权限。", "AUTH_002");
+        if (actor.Id == id) return ServiceResult<ManagedUserView>.Failure("不能在当前会话中重置自己的多因素认证，请由另一名系统管理员处理。", "STATE_001");
+        var user = db.Users.AsNoTracking().SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
+        var account = db.UserAccounts.SingleOrDefault(item => item.UserId == id);
+        if (user is null || account is null) return ServiceResult<ManagedUserView>.Failure("用户不存在。", "DATA_001");
+        account.MfaEnabled = false;
+        account.MfaSecretCiphertext = null;
+        account.RecoveryCodeHashesJson = "[]";
+        account.LastTotpTimeStep = null;
+        account.MfaEnabledAt = null;
+        account.MfaUpdatedAt = DateTimeOffset.UtcNow;
+        db.MfaChallenges.Where(item => item.UserId == id).ExecuteDelete();
+        db.SaveChanges();
+        AuthenticationService.RevokeAllSessions(db, id, "MFA_RESET_BY_ADMIN");
+        Audit(actor, "USER_MFA_RESET", user.Id, $"重置用户 {user.Name}（{user.Id}）多因素认证；敏感权限账号下次登录必须重新绑定");
         return ServiceResult<ManagedUserView>.Success(ToView(user));
     }
 
@@ -219,7 +341,9 @@ public sealed class IdentityAdministrationService(OaDbContext db, DemoData data)
         var department = db.Departments.AsNoTracking().Single(item => item.Id == user.DepartmentId);
         var managerName = user.ManagerId is null ? null : db.Users.AsNoTracking().Where(item => item.Id == user.ManagerId).Select(item => item.Name).SingleOrDefault();
         var positionName = user.PositionId is null ? null : db.Positions.AsNoTracking().Where(item => item.Id == user.PositionId).Select(item => item.Name).SingleOrDefault();
-        return new ManagedUserView(user.Id, user.Name, user.DepartmentId, department.Name, user.ManagerId, managerName, user.CumulativeWorkYears, user.Status, user.Version, roles, PermissionsFor(roles), user.CreatedAt, user.UpdatedAt, user.PositionId, positionName);
+        var authenticationState = db.UserAccounts.AsNoTracking().Where(item => item.UserId == user.Id)
+            .Select(item => new { item.MfaEnabled, item.MustChangePassword }).SingleOrDefault();
+        return new ManagedUserView(user.Id, user.Name, user.DepartmentId, department.Name, user.ManagerId, managerName, user.CumulativeWorkYears, user.Status, user.Version, roles, PermissionsFor(roles), user.CreatedAt, user.UpdatedAt, user.PositionId, positionName, authenticationState?.MfaEnabled ?? false, authenticationState?.MustChangePassword ?? false);
     }
 
     private IReadOnlyList<string> PermissionsFor(IEnumerable<string> roles)
@@ -242,11 +366,13 @@ public sealed class IdentityAdministrationService(OaDbContext db, DemoData data)
         if (dataScopes["Expense"] != OaDataScopes.Self && !assigned.Contains(OaPermissions.ExpenseScopeView) && !assigned.Contains(OaPermissions.ExpenseAllView)) return ServiceResult<bool>.Failure("配置报销跨用户数据范围时必须授予报销范围查看权限。", "VALIDATION_001");
         if (dataScopes["Travel"] != OaDataScopes.Self && !assigned.Contains(OaPermissions.TravelScopeView)) return ServiceResult<bool>.Failure("配置出差跨用户数据范围时必须授予出差范围查看权限。", "VALIDATION_001");
         if (dataScopes["Personnel"] != OaDataScopes.Self && !assigned.Contains(OaPermissions.PersonnelScopeView)) return ServiceResult<bool>.Failure("配置人事档案跨用户数据范围时必须授予人事档案范围查看权限。", "VALIDATION_001");
+        if (assigned.Contains(OaPermissions.PersonnelExport) && !assigned.Contains(OaPermissions.PersonnelScopeView)) return ServiceResult<bool>.Failure("授予员工花名册导出权限时必须同时授予人事档案范围查看权限。", "VALIDATION_001");
         if (assigned.Contains(OaPermissions.PersonnelManage) && !assigned.Contains(OaPermissions.PersonnelScopeView)) return ServiceResult<bool>.Failure("授予人事档案维护权限时必须同时授予人事档案范围查看权限。", "VALIDATION_001");
         if (dataScopes["Attendance"] != OaDataScopes.Self && !assigned.Contains(OaPermissions.AttendanceScopeView)) return ServiceResult<bool>.Failure("配置考勤跨用户数据范围时必须授予考勤范围查看权限。", "VALIDATION_001");
         if (assigned.Contains(OaPermissions.AttendanceManage) && !assigned.Contains(OaPermissions.AttendanceScopeView)) return ServiceResult<bool>.Failure("授予考勤维护权限时必须同时授予考勤范围查看权限。", "VALIDATION_001");
         if (dataScopes["Contract"] != OaDataScopes.Self && !assigned.Contains(OaPermissions.ContractScopeView)) return ServiceResult<bool>.Failure("配置劳动合同跨用户数据范围时必须授予劳动合同范围查看权限。", "VALIDATION_001");
         if (assigned.Contains(OaPermissions.ContractManage) && !assigned.Contains(OaPermissions.ContractScopeView)) return ServiceResult<bool>.Failure("授予劳动合同维护权限时必须同时授予劳动合同范围查看权限。", "VALIDATION_001");
+        if (assigned.Contains(OaPermissions.PurchaseManage) && !assigned.Contains(OaPermissions.PurchaseScopeView)) return ServiceResult<bool>.Failure("授予采购执行权限时必须同时授予采购范围查看权限。", "VALIDATION_001");
         return ServiceResult<bool>.Success(true);
     }
 

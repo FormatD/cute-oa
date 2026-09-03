@@ -1,5 +1,9 @@
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Oa.Api.Domain;
 using Oa.Api.Persistence;
 
@@ -8,7 +12,7 @@ namespace Oa.Api.Services;
 public sealed class AttendanceService(OaDbContext db, DemoData data, IWorkCalendar calendar, NotificationService notifications, FileService files, IConfiguration configuration)
 {
     private const string TenantId = IdentityDefaults.TenantId;
-    private static readonly TimeSpan ChinaOffset = TimeSpan.FromHours(8);
+    private static readonly TimeSpan ChinaOffset = BusinessTime.ChinaOffset;
 
     public IReadOnlyList<AttendanceShiftView> ListShifts(Employee actor)
     {
@@ -35,13 +39,20 @@ public sealed class AttendanceService(OaDbContext db, DemoData data, IWorkCalend
         if (!request.IsDefault && item.IsDefault && !db.AttendanceShifts.Any(candidate => candidate.TenantId == TenantId && candidate.Id != id && candidate.IsDefault && candidate.IsEnabled))
             return ServiceResult<AttendanceShiftView>.Failure("至少需要一个启用的默认班次。", "ATTENDANCE_003");
         if (request.IsDefault)
-            foreach (var other in db.AttendanceShifts.Where(candidate => candidate.TenantId == TenantId && candidate.Id != id && candidate.IsDefault)) other.IsDefault = false;
+            foreach (var other in db.AttendanceShifts.Where(candidate => candidate.TenantId == TenantId && candidate.Id != id && candidate.IsDefault))
+            {
+                other.IsDefault = false;
+                other.Version++;
+                other.UpdatedBy = actor.Id;
+                other.UpdatedAt = DateTimeOffset.UtcNow;
+            }
 
         item.Code = code; item.Name = name; item.WorkStart = request.WorkStart; item.WorkEnd = request.WorkEnd; item.BreakMinutes = request.BreakMinutes;
         item.LateToleranceMinutes = request.LateToleranceMinutes; item.EarlyLeaveToleranceMinutes = request.EarlyLeaveToleranceMinutes;
         item.IsDefault = request.IsDefault; item.IsEnabled = request.IsEnabled; item.Version++; item.UpdatedBy = actor.Id; item.UpdatedAt = DateTimeOffset.UtcNow;
         Audit(actor, "ATTENDANCE_SHIFT_UPDATED", "AttendanceShift", item.Id.ToString(), $"更新班次 {item.Name}");
-        db.SaveChanges();
+        var saveFailure = SaveAttendanceChanges<AttendanceShiftView>();
+        if (saveFailure is not null) return saveFailure;
         return ServiceResult<AttendanceShiftView>.Success(ToShiftView(item));
     }
 
@@ -97,7 +108,8 @@ public sealed class AttendanceService(OaDbContext db, DemoData data, IWorkCalend
             ApplyPunches(record, input.CheckInAt, input.CheckOutAt, shift, request.Source ?? "IMPORT", actor.Id);
         }
         Audit(actor, "ATTENDANCE_IMPORTED", "AttendanceRecord", "batch", $"导入考勤：新增 {created}，更新 {updated}，跳过 {skipped}");
-        db.SaveChanges();
+        var saveFailure = SaveAttendanceChanges<AttendanceImportResult>();
+        if (saveFailure is not null) return saveFailure;
         return ServiceResult<AttendanceImportResult>.Success(new(created, updated, skipped));
     }
 
@@ -107,7 +119,7 @@ public sealed class AttendanceService(OaDbContext db, DemoData data, IWorkCalend
         if (!CanManage(actor)) return ServiceResult<AttendanceImportResult>.Failure("无模拟考勤生成权限。", "AUTH_002");
         var month = NormalizeMonth(requestedMonth);
         if (IsMonthLocked(month)) return ServiceResult<AttendanceImportResult>.Failure($"{month:yyyy-MM} 已封账，不能生成模拟考勤。", "ATTENDANCE_004");
-        var today = DateOnly.FromDateTime(DateTime.Today);
+        var today = BusinessTime.ChinaToday();
         if (month > new DateOnly(today.Year, today.Month, 1) || month < new DateOnly(today.Year, today.Month, 1).AddMonths(-24))
             return ServiceResult<AttendanceImportResult>.Failure("仅可生成当前月及过去 24 个月的模拟考勤。", "ATTENDANCE_001");
         var shift = EnsureDefaultShift();
@@ -126,7 +138,8 @@ public sealed class AttendanceService(OaDbContext db, DemoData data, IWorkCalend
             }
         }
         Audit(actor, "ATTENDANCE_DEMO_GENERATED", "AttendanceRecord", month.ToString("yyyy-MM"), $"生成 {month:yyyy-MM} 模拟考勤 {created} 条，保留已有 {skipped} 条");
-        db.SaveChanges();
+        var saveFailure = SaveAttendanceChanges<AttendanceImportResult>();
+        if (saveFailure is not null) return saveFailure;
         return ServiceResult<AttendanceImportResult>.Success(new(created, 0, skipped));
     }
 
@@ -146,9 +159,10 @@ public sealed class AttendanceService(OaDbContext db, DemoData data, IWorkCalend
         var appeal = new AttendanceAppealRecord { TenantId = TenantId, AttendanceRecordId = recordId, Reason = reason, AttachmentsJson = JsonSerializer.Serialize(attachments), SubmittedBy = actor.Id, SubmittedByName = actor.Name };
         db.AttendanceAppeals.Add(appeal);
         Audit(actor, "ATTENDANCE_APPEAL_SUBMITTED", "AttendanceAppeal", appeal.Id.ToString(), $"提交 {record.WorkDate:yyyy-MM-dd} 考勤申诉");
-        db.SaveChanges();
         foreach (var reviewerId in AttendanceManagers().Where(id => id != actor.Id))
-            notifications.Create(reviewerId, "ATTENDANCE_APPEAL", "有新的考勤申诉", $"{actor.Name} 提交了 {record.WorkDate:yyyy-MM-dd} 的考勤申诉。", "AttendanceRecord", record.Id);
+            notifications.Enqueue(reviewerId, "ATTENDANCE_APPEAL", "有新的考勤申诉", $"{actor.Name} 提交了 {record.WorkDate:yyyy-MM-dd} 的考勤申诉。", "AttendanceRecord", record.Id);
+        var saveFailure = SaveAttendanceChanges<AttendanceAppealView>();
+        if (saveFailure is not null) return saveFailure;
         return ServiceResult<AttendanceAppealView>.Success(ToAppealView(appeal));
     }
 
@@ -173,28 +187,27 @@ public sealed class AttendanceService(OaDbContext db, DemoData data, IWorkCalend
             record.Version++; record.UpdatedBy = actor.Id; record.UpdatedAt = DateTimeOffset.UtcNow;
         }
         Audit(actor, request.Approved ? "ATTENDANCE_APPEAL_APPROVED" : "ATTENDANCE_APPEAL_REJECTED", "AttendanceAppeal", appeal.Id.ToString(), $"{(request.Approved ? "通过" : "驳回")} {record.WorkDate:yyyy-MM-dd} 考勤申诉");
-        db.SaveChanges();
-        notifications.Create(record.UserId, "ATTENDANCE_APPEAL_REVIEWED", request.Approved ? "考勤申诉已通过" : "考勤申诉已驳回", comment, "AttendanceRecord", record.Id);
+        notifications.Enqueue(record.UserId, "ATTENDANCE_APPEAL_REVIEWED", request.Approved ? "考勤申诉已通过" : "考勤申诉已驳回", comment, "AttendanceRecord", record.Id);
+        var saveFailure = SaveAttendanceChanges<AttendanceAppealView>();
+        if (saveFailure is not null) return saveFailure;
         return ServiceResult<AttendanceAppealView>.Success(ToAppealView(appeal));
     }
 
-    public IReadOnlyList<AttendanceMonthlySummaryView> MonthlySummary(Employee actor, DateOnly requestedMonth, string? userId = null)
+    public ServiceResult<IReadOnlyList<AttendanceMonthlySummaryView>> MonthlySummary(Employee actor, DateOnly requestedMonth, string? userId = null)
     {
         var month = NormalizeMonth(requestedMonth);
-        var end = month.AddMonths(1);
-        var visible = VisibleEmployees(actor).Where(item => string.IsNullOrWhiteSpace(userId) || item.Id == userId).ToDictionary(item => item.Id);
-        var records = db.AttendanceRecords.AsNoTracking().Where(item => item.TenantId == TenantId && visible.Keys.Contains(item.UserId) && item.WorkDate >= month && item.WorkDate < end).ToList();
-        var pendingAppeals = db.AttendanceAppeals.AsNoTracking().Where(item => item.TenantId == TenantId && item.Status == AttendanceAppealStatuses.Pending && records.Select(record => record.Id).Contains(item.AttendanceRecordId)).ToList().ToLookup(item => item.AttendanceRecordId);
-        return records.GroupBy(item => item.UserId).Select(group =>
+        var visibleIds = VisibleEmployees(actor).Where(item => string.IsNullOrWhiteSpace(userId) || item.Id == userId).Select(item => item.Id).ToHashSet();
+        if (IsMonthLocked(month))
         {
-            var employee = visible[group.Key];
-            return new AttendanceMonthlySummaryView(group.Key, employee.Name, employee.DepartmentName, month,
-                group.Count(item => item.Status != AttendanceStatuses.RestDay), group.Count(item => item.CheckInAt is not null || item.CheckOutAt is not null),
-                group.Count(item => item.Status == AttendanceStatuses.Normal), group.Count(item => item.Status is AttendanceStatuses.Late or AttendanceStatuses.LateAndEarly),
-                group.Count(item => item.Status is AttendanceStatuses.EarlyLeave or AttendanceStatuses.LateAndEarly), group.Count(item => item.Status == AttendanceStatuses.MissingPunch),
-                group.Count(item => item.Status == AttendanceStatuses.Absent), group.Count(item => item.Status == AttendanceStatuses.Leave), group.Count(item => item.Status == AttendanceStatuses.Corrected),
-                group.Sum(item => pendingAppeals[item.Id].Count()), group.Sum(item => item.WorkedMinutes));
-        }).OrderBy(item => item.DepartmentName).ThenBy(item => item.EmployeeName).ToList();
+            var snapshot = LatestSnapshot(month);
+            if (snapshot is null) return ServiceResult<IReadOnlyList<AttendanceMonthlySummaryView>>.Failure("封账月报快照不存在，请先解封并重新封账。", "ATTENDANCE_SNAPSHOT_001");
+            var snapshotRows = ReadSnapshot(snapshot);
+            if (!snapshotRows.IsSuccess) return ServiceResult<IReadOnlyList<AttendanceMonthlySummaryView>>.Failure(snapshotRows.Error!, snapshotRows.Code!);
+            return ServiceResult<IReadOnlyList<AttendanceMonthlySummaryView>>.Success(snapshotRows.Value!.Where(item => visibleIds.Contains(item.UserId)).ToList());
+        }
+
+        var visible = data.Employees.Where(item => visibleIds.Contains(item.Id)).ToDictionary(item => item.Id);
+        return ServiceResult<IReadOnlyList<AttendanceMonthlySummaryView>>.Success(BuildLiveMonthlySummary(month, visible));
     }
 
     public AttendanceMonthLockView GetMonthLock(Employee actor, DateOnly requestedMonth)
@@ -206,9 +219,9 @@ public sealed class AttendanceService(OaDbContext db, DemoData data, IWorkCalend
 
     public ServiceResult<AttendanceMonthLockView> LockMonth(Employee actor, DateOnly requestedMonth, ChangeAttendanceMonthLockRequest request)
     {
-        if (!CanManage(actor)) return ServiceResult<AttendanceMonthLockView>.Failure("无考勤月度封账权限。", "AUTH_002");
+        if (!CanCloseCompanyMonth(actor)) return ServiceResult<AttendanceMonthLockView>.Failure("仅具备全公司考勤范围的管理员可以封账。", "AUTH_002");
         var month = NormalizeMonth(requestedMonth);
-        var currentMonth = NormalizeMonth(DateOnly.FromDateTime(DateTime.Today));
+        var currentMonth = NormalizeMonth(BusinessTime.ChinaToday());
         if (month > currentMonth) return ServiceResult<AttendanceMonthLockView>.Failure("不能封账未来月份。", "ATTENDANCE_001");
         var reason = request.Reason?.Trim() ?? string.Empty;
         if (reason.Length is < 5 or > 500) return ServiceResult<AttendanceMonthLockView>.Failure("封账说明应为 5–500 个字符。", "ATTENDANCE_001");
@@ -242,14 +255,32 @@ public sealed class AttendanceService(OaDbContext db, DemoData data, IWorkCalend
         item.UnlockedAt = null;
         item.UnlockReason = null;
         item.UpdatedAt = DateTimeOffset.UtcNow;
-        Audit(actor, "ATTENDANCE_MONTH_LOCKED", "AttendanceMonthLock", month.ToString("yyyy-MM"), $"封账 {month:yyyy-MM}：{reason}");
-        db.SaveChanges();
+        var summaries = BuildLiveMonthlySummary(month, data.Employees.ToDictionary(employee => employee.Id));
+        if (summaries.Count == 0) return ServiceResult<AttendanceMonthLockView>.Failure("该月份没有可生成快照的考勤记录。", "ATTENDANCE_003");
+        var snapshotJson = JsonSerializer.Serialize(summaries);
+        var sequence = (db.AttendanceMonthSnapshots.Where(snapshot => snapshot.TenantId == TenantId && snapshot.Month == month).Max(snapshot => (int?)snapshot.Sequence) ?? 0) + 1;
+        var snapshot = new AttendanceMonthSnapshotRecord
+        {
+            TenantId = TenantId,
+            Month = month,
+            Sequence = sequence,
+            SnapshotJson = snapshotJson,
+            SnapshotHash = SnapshotHash(snapshotJson),
+            RowCount = summaries.Count,
+            CreatedBy = actor.Id,
+            CreatedByName = actor.Name,
+            LockReason = reason
+        };
+        db.AttendanceMonthSnapshots.Add(snapshot);
+        Audit(actor, "ATTENDANCE_MONTH_LOCKED", "AttendanceMonthLock", month.ToString("yyyy-MM"), $"封账 {month:yyyy-MM} 并生成第 {sequence} 版月报快照 {snapshot.SnapshotHash[..12]}：{reason}");
+        var saveFailure = SaveAttendanceChanges<AttendanceMonthLockView>();
+        if (saveFailure is not null) return saveFailure;
         return ServiceResult<AttendanceMonthLockView>.Success(ToMonthLockView(item));
     }
 
     public ServiceResult<AttendanceMonthLockView> UnlockMonth(Employee actor, DateOnly requestedMonth, ChangeAttendanceMonthLockRequest request)
     {
-        if (!CanManage(actor)) return ServiceResult<AttendanceMonthLockView>.Failure("无考勤月度解封权限。", "AUTH_002");
+        if (!CanCloseCompanyMonth(actor)) return ServiceResult<AttendanceMonthLockView>.Failure("仅具备全公司考勤范围的管理员可以解封。", "AUTH_002");
         var month = NormalizeMonth(requestedMonth);
         var reason = request.Reason?.Trim() ?? string.Empty;
         if (reason.Length is < 5 or > 500) return ServiceResult<AttendanceMonthLockView>.Failure("解封说明应为 5–500 个字符。", "ATTENDANCE_001");
@@ -265,8 +296,33 @@ public sealed class AttendanceService(OaDbContext db, DemoData data, IWorkCalend
         item.UnlockReason = reason;
         item.UpdatedAt = DateTimeOffset.UtcNow;
         Audit(actor, "ATTENDANCE_MONTH_UNLOCKED", "AttendanceMonthLock", month.ToString("yyyy-MM"), $"解封 {month:yyyy-MM}：{reason}");
-        db.SaveChanges();
+        var saveFailure = SaveAttendanceChanges<AttendanceMonthLockView>();
+        if (saveFailure is not null) return saveFailure;
         return ServiceResult<AttendanceMonthLockView>.Success(ToMonthLockView(item));
+    }
+
+    public ServiceResult<AttendanceMonthSnapshotExport> ExportMonthSnapshot(Employee actor, DateOnly requestedMonth)
+    {
+        if (!CanCloseCompanyMonth(actor)) return ServiceResult<AttendanceMonthSnapshotExport>.Failure("无封账月报下载权限。", "AUTH_002");
+        var month = NormalizeMonth(requestedMonth);
+        if (!IsMonthLocked(month)) return ServiceResult<AttendanceMonthSnapshotExport>.Failure("该月份当前未封账，不能作为正式月报下载。", "ATTENDANCE_003");
+        var snapshot = LatestSnapshot(month);
+        if (snapshot is null) return ServiceResult<AttendanceMonthSnapshotExport>.Failure("封账月报快照不存在，请先解封并重新封账。", "ATTENDANCE_SNAPSHOT_001");
+        var rows = ReadSnapshot(snapshot);
+        if (!rows.IsSuccess) return ServiceResult<AttendanceMonthSnapshotExport>.Failure(rows.Error!, rows.Code!);
+
+        var csv = new StringBuilder();
+        SafeCsv.AppendRow(csv, ["月份", "用户 ID", "员工姓名", "部门", "应出勤天数", "实际打卡天数", "正常", "迟到", "早退", "缺卡", "旷工", "请假", "已修正", "待审申诉", "工作分钟"]);
+        foreach (var row in rows.Value!)
+            SafeCsv.AppendRow(csv,
+            [
+                row.Month.ToString("yyyy-MM"), row.UserId, row.EmployeeName, row.DepartmentName,
+                Number(row.ScheduledDays), Number(row.AttendedDays), Number(row.NormalDays), Number(row.LateDays), Number(row.EarlyLeaveDays),
+                Number(row.MissingPunchDays), Number(row.AbsentDays), Number(row.LeaveDays), Number(row.CorrectedDays), Number(row.PendingAppeals), Number(row.WorkedMinutes)
+            ]);
+        Audit(actor, "ATTENDANCE_MONTH_SNAPSHOT_DOWNLOADED", "AttendanceMonthSnapshot", snapshot.Id.ToString(), $"下载 {month:yyyy-MM} 第 {snapshot.Sequence} 版封账月报，{snapshot.RowCount} 行，SHA-256 {snapshot.SnapshotHash}");
+        db.SaveChanges();
+        return ServiceResult<AttendanceMonthSnapshotExport>.Success(new(SafeCsv.ToUtf8Bom(csv.ToString()), $"attendance-{month:yyyy-MM}-v{snapshot.Sequence}.csv", snapshot.Sequence, snapshot.SnapshotHash, snapshot.RowCount));
     }
 
     private AttendanceShiftRecord EnsureDefaultShift()
@@ -275,9 +331,57 @@ public sealed class AttendanceService(OaDbContext db, DemoData data, IWorkCalend
             ?? db.AttendanceShifts.SingleOrDefault(item => item.TenantId == TenantId && item.Code == "STANDARD");
         if (shift is not null) return shift;
         shift = new AttendanceShiftRecord { TenantId = TenantId, Code = "STANDARD", Name = "标准班次", WorkStart = new TimeOnly(9, 0), WorkEnd = new TimeOnly(18, 0), BreakMinutes = 60, LateToleranceMinutes = 5, EarlyLeaveToleranceMinutes = 5, IsDefault = true, IsEnabled = true, UpdatedBy = "system" };
-        db.AttendanceShifts.Add(shift); db.SaveChanges();
-        return shift;
+        db.AttendanceShifts.Add(shift);
+        try
+        {
+            db.SaveChanges();
+            return shift;
+        }
+        catch (DbUpdateException exception) when (IsConstraint(exception, "IX_attendance_shift_TenantId_Code"))
+        {
+            db.ChangeTracker.Clear();
+            return db.AttendanceShifts.Single(item => item.TenantId == TenantId && item.Code == "STANDARD");
+        }
     }
+
+    private ServiceResult<T>? SaveAttendanceChanges<T>()
+    {
+        try
+        {
+            db.SaveChanges();
+            return null;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            db.ChangeTracker.Clear();
+            return ServiceResult<T>.Failure("考勤数据已被其他操作更新，请刷新后重试。", "CONCURRENCY_001");
+        }
+        catch (DbUpdateException exception) when (IsConstraint(exception, "UX_attendance_appeal_pending_record"))
+        {
+            db.ChangeTracker.Clear();
+            return ServiceResult<T>.Failure("该记录已有待审核申诉。", "ATTENDANCE_002");
+        }
+        catch (DbUpdateException exception) when (IsConstraint(exception, "IX_attendance_shift_TenantId_Code"))
+        {
+            db.ChangeTracker.Clear();
+            return ServiceResult<T>.Failure("班次编码已存在。", "DUPLICATE_001");
+        }
+        catch (DbUpdateException exception) when (
+            IsConstraint(exception, "IX_attendance_record_TenantId_UserId_WorkDate") ||
+            IsConstraint(exception, "IX_attendance_month_lock_TenantId_Month") ||
+            IsConstraint(exception, "IX_attendance_month_snapshot_TenantId_Month_Sequence"))
+        {
+            db.ChangeTracker.Clear();
+            return ServiceResult<T>.Failure("考勤数据已被其他操作更新，请刷新后重试。", "CONCURRENCY_001");
+        }
+    }
+
+    private static bool IsConstraint(DbUpdateException exception, string constraintName) =>
+        exception.InnerException is PostgresException
+        {
+            SqlState: PostgresErrorCodes.UniqueViolation,
+            ConstraintName: var actualConstraint
+        } && actualConstraint == constraintName;
 
     private AttendanceRecordEntity NewRecord(Employee subject, DateOnly date, AttendanceShiftRecord shift, string source, string actorId) => new()
     {
@@ -337,11 +441,51 @@ public sealed class AttendanceService(OaDbContext db, DemoData data, IWorkCalend
 
     private static AttendanceAppealView ToAppealView(AttendanceAppealRecord item) => new(item.Id, item.Status, item.Reason, DeserializeAttachments(item.AttachmentsJson), item.SubmittedBy, item.SubmittedByName, item.SubmittedAt, item.ReviewedBy, item.ReviewedByName, item.ReviewComment, item.ReviewedAt);
     private static AttendanceShiftView ToShiftView(AttendanceShiftRecord item) => new(item.Id, item.Code, item.Name, item.WorkStart, item.WorkEnd, item.BreakMinutes, item.LateToleranceMinutes, item.EarlyLeaveToleranceMinutes, item.IsDefault, item.IsEnabled, item.Version, item.UpdatedAt);
-    private static AttendanceMonthLockView EmptyMonthLock(DateOnly month) => new(month, false, 0, null, null, null, null, null, null, null, null);
-    private static AttendanceMonthLockView ToMonthLockView(AttendanceMonthLockRecord item) => new(item.Month, item.IsLocked, item.Version, item.LockReason, item.LockedBy, item.LockedByName, item.LockedAt, item.UnlockedBy, item.UnlockedByName, item.UnlockedAt, item.UnlockReason);
+    private static AttendanceMonthLockView EmptyMonthLock(DateOnly month) => new(month, false, 0, null, null, null, null, null, null, null, null, null, null, 0, null);
+    private AttendanceMonthLockView ToMonthLockView(AttendanceMonthLockRecord item)
+    {
+        var snapshot = LatestSnapshot(item.Month);
+        return new(item.Month, item.IsLocked, item.Version, item.LockReason, item.LockedBy, item.LockedByName, item.LockedAt, item.UnlockedBy, item.UnlockedByName, item.UnlockedAt, item.UnlockReason, snapshot?.Sequence, snapshot?.SnapshotHash, snapshot?.RowCount ?? 0, snapshot?.CreatedAt);
+    }
+    private IReadOnlyList<AttendanceMonthlySummaryView> BuildLiveMonthlySummary(DateOnly month, IReadOnlyDictionary<string, Employee> employees)
+    {
+        var end = month.AddMonths(1);
+        var records = db.AttendanceRecords.AsNoTracking().Where(item => item.TenantId == TenantId && employees.Keys.Contains(item.UserId) && item.WorkDate >= month && item.WorkDate < end).ToList();
+        var recordIds = records.Select(record => record.Id).ToList();
+        var pendingAppeals = db.AttendanceAppeals.AsNoTracking().Where(item => item.TenantId == TenantId && item.Status == AttendanceAppealStatuses.Pending && recordIds.Contains(item.AttendanceRecordId)).ToList().ToLookup(item => item.AttendanceRecordId);
+        return records.GroupBy(item => item.UserId).Select(group =>
+        {
+            var employee = employees[group.Key];
+            return new AttendanceMonthlySummaryView(group.Key, employee.Name, employee.DepartmentName, month,
+                group.Count(item => item.Status != AttendanceStatuses.RestDay), group.Count(item => item.CheckInAt is not null || item.CheckOutAt is not null),
+                group.Count(item => item.Status == AttendanceStatuses.Normal), group.Count(item => item.Status is AttendanceStatuses.Late or AttendanceStatuses.LateAndEarly),
+                group.Count(item => item.Status is AttendanceStatuses.EarlyLeave or AttendanceStatuses.LateAndEarly), group.Count(item => item.Status == AttendanceStatuses.MissingPunch),
+                group.Count(item => item.Status == AttendanceStatuses.Absent), group.Count(item => item.Status == AttendanceStatuses.Leave), group.Count(item => item.Status == AttendanceStatuses.Corrected),
+                group.Sum(item => pendingAppeals[item.Id].Count()), group.Sum(item => item.WorkedMinutes));
+        }).OrderBy(item => item.DepartmentName).ThenBy(item => item.EmployeeName).ThenBy(item => item.UserId).ToList();
+    }
+    private AttendanceMonthSnapshotRecord? LatestSnapshot(DateOnly month) => db.AttendanceMonthSnapshots.AsNoTracking().Where(item => item.TenantId == TenantId && item.Month == month).OrderByDescending(item => item.Sequence).FirstOrDefault();
+    private static ServiceResult<IReadOnlyList<AttendanceMonthlySummaryView>> ReadSnapshot(AttendanceMonthSnapshotRecord snapshot)
+    {
+        if (!SnapshotHash(snapshot.SnapshotJson).Equals(snapshot.SnapshotHash, StringComparison.Ordinal))
+            return ServiceResult<IReadOnlyList<AttendanceMonthlySummaryView>>.Failure("封账月报快照完整性校验失败，已拒绝读取。", "ATTENDANCE_SNAPSHOT_002");
+        try
+        {
+            var rows = JsonSerializer.Deserialize<List<AttendanceMonthlySummaryView>>(snapshot.SnapshotJson) ?? [];
+            if (rows.Count != snapshot.RowCount) return ServiceResult<IReadOnlyList<AttendanceMonthlySummaryView>>.Failure("封账月报快照行数校验失败，已拒绝读取。", "ATTENDANCE_SNAPSHOT_002");
+            return ServiceResult<IReadOnlyList<AttendanceMonthlySummaryView>>.Success(rows);
+        }
+        catch (JsonException)
+        {
+            return ServiceResult<IReadOnlyList<AttendanceMonthlySummaryView>>.Failure("封账月报快照格式损坏，已拒绝读取。", "ATTENDANCE_SNAPSHOT_002");
+        }
+    }
+    private static string SnapshotHash(string json) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))).ToLowerInvariant();
+    private static string Number(int value) => value.ToString(CultureInfo.InvariantCulture);
     private IReadOnlyList<Employee> VisibleEmployees(Employee actor) => data.Employees.Where(subject => data.CanView(actor, subject, "Attendance")).ToList();
     private IReadOnlyList<string> AttendanceManagers() => db.UserRoles.AsNoTracking().Join(db.RolePermissions.AsNoTracking().Where(item => item.PermissionCode == OaPermissions.AttendanceManage), role => role.RoleCode, permission => permission.RoleCode, (role, _) => role.UserId).Distinct().ToList();
     private bool CanManage(Employee actor) => data.HasPermission(actor, OaPermissions.AttendanceManage);
+    private bool CanCloseCompanyMonth(Employee actor) => CanManage(actor) && data.EffectiveDataScope(actor, "Attendance") == OaDataScopes.Company;
     private bool IsMonthLocked(DateOnly date) { var month = NormalizeMonth(date); return db.AttendanceMonthLocks.AsNoTracking().Any(item => item.TenantId == TenantId && item.Month == month && item.IsLocked); }
     private static DateOnly NormalizeMonth(DateOnly value) => new(value.Year, value.Month, 1);
     private static DateTimeOffset ChinaDateTime(DateOnly date, TimeOnly time) => new(date.ToDateTime(time), ChinaOffset);

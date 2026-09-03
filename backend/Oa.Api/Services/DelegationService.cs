@@ -7,7 +7,7 @@ namespace Oa.Api.Services;
 public sealed class DelegationService(OaDbContext db, DemoData data)
 {
     private const string TenantId = "demo";
-    private static readonly string[] BusinessTypes = ["All", "Leave", "Expense", "Travel"];
+    private static readonly string[] BusinessTypes = ["All", "Leave", "Expense", "Travel", "Purchase"];
 
     public IReadOnlyList<FlowDelegationView> ListMine(Employee actor)
     {
@@ -26,7 +26,7 @@ public sealed class DelegationService(OaDbContext db, DemoData data)
         if (delegateUser is null || delegateUser.Status != "ACTIVE" || delegateUser.Id == actor.Id)
             return ServiceResult<FlowDelegationView>.Failure("代办人不存在、已停用或与委托人相同。", "FLOW_003");
         if (!BusinessTypes.Contains(request.BusinessType))
-            return ServiceResult<FlowDelegationView>.Failure("业务类型仅支持 All、Leave、Expense 或 Travel。");
+            return ServiceResult<FlowDelegationView>.Failure("业务类型仅支持 All、Leave、Expense、Travel 或 Purchase。");
         if (request.EndAt <= request.StartAt || request.EndAt <= DateTimeOffset.UtcNow || request.EndAt - request.StartAt > TimeSpan.FromDays(180))
             return ServiceResult<FlowDelegationView>.Failure("委托结束时间必须晚于开始时间和当前时间，且跨度不超过 180 天。");
         if (string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Trim().Length > 200)

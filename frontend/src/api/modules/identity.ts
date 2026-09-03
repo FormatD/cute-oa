@@ -11,5 +11,6 @@ export const createIdentityApi = ({ request }: HttpClient) => ({
   getUsers: (filters: { keyword: string; status: string; departmentId: string }, page: number, pageSize: number) => request<PagedResponse<ManagedUser>>(`/admin/users${toQuery(filters, page, pageSize)}`),
   createUser: (payload: CreateManagedUser) => request<ManagedUser>('/admin/users', { method: 'POST', body: JSON.stringify(payload) }),
   updateUser: (id: string, payload: UpdateManagedUser) => request<ManagedUser>(`/admin/users/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(payload) }),
-  resetPassword: (id: string, password: string) => request<ManagedUser>(`/admin/users/${encodeURIComponent(id)}/reset-password`, { method: 'POST', body: JSON.stringify({ password }) })
+  resetPassword: (id: string, password: string) => request<ManagedUser>(`/admin/users/${encodeURIComponent(id)}/reset-password`, { method: 'POST', body: JSON.stringify({ password }) }),
+  resetMfa: (id: string) => request<ManagedUser>(`/admin/users/${encodeURIComponent(id)}/reset-mfa`, { method: 'POST' })
 })

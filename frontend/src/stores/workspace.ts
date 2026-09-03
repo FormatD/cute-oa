@@ -1,38 +1,117 @@
-import { computed, ref } from 'vue'
+import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createHttpClient } from '../api/http'
-import { createAuthApi } from '../api/modules/auth'
-import { createSystemApi } from '../api/modules/system'
-import type { Employee, Summary, WorkCalendarEntry } from '../api/types'
+import { useAnnouncementStore } from './announcements'
+import { useAttendanceStore } from './attendance'
 import { useAuthStore } from './auth'
-import { paginate } from './pagination'
+import { useCalendarStore } from './calendar'
+import { useContractStore } from './contracts'
+import { useDashboardStore } from './dashboard'
+import { useDetailStore } from './detail'
+import { useEmployeeDirectoryStore } from './employee-directory'
+import { useExpenseStore } from './expense'
+import { useLeaveStore } from './leave'
+import { useOrganizationStore } from './organization'
+import { usePersonnelCaseStore } from './personnel-cases'
+import { usePersonnelStore } from './personnel'
+import { usePurchaseStore } from './purchase'
+import { useTravelStore } from './travel'
+import { useUiStore } from './ui'
+import { useWorkflowStore } from './workflow'
 
 export const useWorkspaceStore = defineStore('workspace', () => {
   const auth = useAuthStore()
-  const http = createHttpClient(() => auth.accessToken, auth.clearSession, auth.refreshAccessToken)
-  const authApi = createAuthApi(http)
-  const systemApi = createSystemApi(http)
-  const employees = ref<Employee[]>([])
-  const summary = ref<Summary | null>(null)
-  const calendarEntries = ref<WorkCalendarEntry[]>([])
-  const calendarYear = new Date().getFullYear()
-  const calendarPage = ref(1)
-  const pagedCalendarEntries = computed(() => paginate([...calendarEntries.value].sort((a, b) => b.date.localeCompare(a.date)), calendarPage.value))
+  const ui = useUiStore()
+  const calendar = useCalendarStore()
+  const dashboard = useDashboardStore()
+  const employeeDirectory = useEmployeeDirectoryStore()
+  const leave = useLeaveStore()
+  const expense = useExpenseStore()
+  const travel = useTravelStore()
+  const purchase = usePurchaseStore()
+  const workflow = useWorkflowStore()
+  const organization = useOrganizationStore()
+  const personnel = usePersonnelStore()
+  const personnelCases = usePersonnelCaseStore()
+  const attendance = useAttendanceStore()
+  const contracts = useContractStore()
+  const announcements = useAnnouncementStore()
+  const detail = useDetailStore()
 
-  async function loadCommon() {
-    const [users, dashboard] = await Promise.all([authApi.getDemoUsers(), systemApi.getSummary()])
-    employees.value = users
-    summary.value = dashboard
-    auth.sessionUser = dashboard.currentUser
-    auth.currentUserId = dashboard.currentUser.id
-    calendarEntries.value = await systemApi.getWorkCalendar(calendarYear).catch(() => [])
+  const initialized = ref(false)
+  const loading = ref(false)
+  let pendingLoad: Promise<void> | null = null
+
+  async function initialize() {
+    await auth.initializeAuth()
+    if (auth.authenticated && !initialized.value) await load()
+  }
+
+  async function load() {
+    if (!auth.authenticated) return
+    if (pendingLoad) return pendingLoad
+
+    loading.value = true
+    pendingLoad = loadWorkspaceData()
+    try {
+      await pendingLoad
+      initialized.value = true
+    } finally {
+      loading.value = false
+      pendingLoad = null
+    }
+  }
+
+  async function loadWorkspaceData() {
+    ui.error = ''
+    try {
+      await Promise.all([
+        calendar.loadCalendar().catch(() => undefined),
+        dashboard.loadSummary(),
+        employeeDirectory.loadEmployees()
+      ])
+      await refreshBusinessData()
+    } catch (cause) {
+      ui.error = cause instanceof Error ? cause.message : '无法连接 API，请先启动后端服务。'
+    }
+  }
+
+  async function refreshBusinessData() {
+    if (!auth.authenticated) return
+    await Promise.all([
+      dashboard.loadSummary(),
+      leave.loadLeaves(),
+      leave.loadInitiated(auth.currentUserId),
+      expense.loadExpenses(),
+      expense.loadInitiated(auth.currentUserId),
+      travel.loadTravels(),
+      travel.loadInitiated(auth.currentUserId),
+      travel.loadApproved(auth.currentUserId),
+      purchase.loadPurchases(),
+      purchase.loadInitiated(auth.currentUserId),
+      workflow.loadTasks(),
+      workflow.loadNotifications(),
+      workflow.loadCopies()
+    ])
   }
 
   function reset() {
-    employees.value = []
-    summary.value = null
-    calendarEntries.value = []
+    calendar.reset()
+    dashboard.reset()
+    employeeDirectory.reset()
+    leave.reset()
+    expense.reset()
+    travel.reset()
+    purchase.reset()
+    workflow.reset()
+    organization.reset()
+    personnel.reset()
+    personnelCases.reset()
+    attendance.reset()
+    contracts.reset()
+    announcements.reset()
+    detail.reset()
+    initialized.value = false
   }
 
-  return { employees, summary, calendarEntries, calendarYear, calendarPage, pagedCalendarEntries, loadCommon, reset }
+  return { initialized, loading, initialize, load, refreshBusinessData, reset }
 })

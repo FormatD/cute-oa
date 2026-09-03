@@ -14,9 +14,15 @@ public sealed class NotificationService(OaDbContext db)
 
     public void Create(string recipientId, string type, string title, string content, string resourceType, string resourceId)
     {
-        db.Notifications.Add(new NotificationRecord { TenantId = TenantId, RecipientId = recipientId, Type = type, Title = title, Content = content, ResourceType = resourceType, ResourceId = resourceId });
+        Enqueue(recipientId, type, title, content, resourceType, resourceId);
         db.SaveChanges();
     }
+
+    public void Enqueue(string recipientId, string type, string title, string content, string resourceType, Guid resourceId)
+        => Enqueue(recipientId, type, title, content, resourceType, resourceId.ToString());
+
+    public void Enqueue(string recipientId, string type, string title, string content, string resourceType, string resourceId)
+        => db.Notifications.Add(new NotificationRecord { TenantId = TenantId, RecipientId = recipientId, Type = type, Title = title, Content = content, ResourceType = resourceType, ResourceId = resourceId });
 
     public IReadOnlyList<Notification> List(Employee actor) => db.Notifications.Where(item => item.TenantId == TenantId && item.RecipientId == actor.Id)
         .OrderByDescending(item => item.CreatedAt).Select(item => new Notification(item.Id, item.Type, item.Title, item.Content, item.ResourceType, item.ResourceId, item.CreatedAt, item.ReadAt)).ToList();

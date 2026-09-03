@@ -31,7 +31,6 @@ public sealed class DemoData
 
     public DemoData(OaDbContext db)
     {
-        IdentitySeeder.EnsureSeeded(db);
         Departments = db.Departments.AsNoTracking().Where(item => item.TenantId == IdentityDefaults.TenantId)
             .OrderBy(item => item.ParentId).ThenBy(item => item.Name)
             .Select(item => new Department(item.Id, item.Name, item.ParentId)).ToList();
@@ -86,7 +85,7 @@ public sealed class DemoData
 
     public string EffectiveDataScope(Employee actor, string resourceType)
     {
-        var requiredPermission = resourceType switch { "Leave" => OaPermissions.LeaveScopeView, "Travel" => OaPermissions.TravelScopeView, "Personnel" => OaPermissions.PersonnelScopeView, "Attendance" => OaPermissions.AttendanceScopeView, "Contract" => OaPermissions.ContractScopeView, _ => OaPermissions.ExpenseScopeView };
+        var requiredPermission = resourceType switch { "Leave" => OaPermissions.LeaveScopeView, "Travel" => OaPermissions.TravelScopeView, "Personnel" => OaPermissions.PersonnelScopeView, "Attendance" => OaPermissions.AttendanceScopeView, "Contract" => OaPermissions.ContractScopeView, "Purchase" => OaPermissions.PurchaseScopeView, _ => OaPermissions.ExpenseScopeView };
         var roles = actor.Roles ?? [actor.Role];
         var eligibleScopes = roles.Where(role => rolePermissions.GetValueOrDefault(role)?.Contains(requiredPermission) == true || resourceType == "Expense" && rolePermissions.GetValueOrDefault(role)?.Contains(OaPermissions.ExpenseAllView) == true)
             .Select(role => roleDataScopes.GetValueOrDefault(role)?.GetValueOrDefault(resourceType) ?? OaDataScopes.Self);

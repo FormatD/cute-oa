@@ -1,9 +1,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createExpenseApi } from '../api/modules/expense'
-import { createHttpClient } from '../api/http'
+import { useApiClient } from '../api/client'
 import type { ExpenseClaim, ExpenseForm, ListFilters, PaymentInput } from '../api/types'
-import { useAuthStore } from './auth'
 import { blankLeaveFilters } from './leave'
 import { PAGE_SIZE } from './pagination'
 import { useUiStore } from './ui'
@@ -12,9 +10,8 @@ const blankExpenseForm = (): ExpenseForm => ({ category: '交通', amount: '', e
 const blankExpenseFilters = (): ListFilters => ({ ...blankLeaveFilters(), minAmount: '', maxAmount: '' })
 
 export const useExpenseStore = defineStore('expense', () => {
-  const auth = useAuthStore()
   const ui = useUiStore()
-  const api = createExpenseApi(createHttpClient(() => auth.accessToken, auth.clearSession, auth.refreshAccessToken))
+  const api = useApiClient().expense
   const expenses = ref<ExpenseClaim[]>([])
   const initiatedExpenses = ref<ExpenseClaim[]>([])
   const expenseForm = ref<ExpenseForm>(blankExpenseForm())

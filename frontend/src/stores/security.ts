@@ -1,14 +1,12 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createHttpClient } from '../api/http'
-import { createAuthApi } from '../api/modules/auth'
-import type { AuthSession } from '../api/types'
-import { useAuthStore } from './auth'
+import { useApiClient } from '../api/client'
+import type { AuthSession, MfaStatus } from '../api/types'
 
 export const useSecurityStore = defineStore('security', () => {
-  const auth = useAuthStore()
-  const api = createAuthApi(createHttpClient(() => auth.accessToken, auth.clearSession, auth.refreshAccessToken))
+  const api = useApiClient().auth
   const sessions = ref<AuthSession[]>([])
+  const mfaStatus = ref<MfaStatus | null>(null)
   const page = ref(1)
   const pageSize = 10
   const total = ref(0)
@@ -32,6 +30,11 @@ export const useSecurityStore = defineStore('security', () => {
     } finally {
       loading.value = false
     }
+  }
+
+  async function loadMfaStatus() {
+    try { mfaStatus.value = await api.getMfaStatus() }
+    catch (cause) { error.value = cause instanceof Error ? cause.message : '多因素认证状态加载失败。' }
   }
 
   async function revokeSession(id: string) {
@@ -62,5 +65,5 @@ export const useSecurityStore = defineStore('security', () => {
     }
   }
 
-  return { sessions, page, pageSize, total, totalPages, loading, saving, error, message, loadSessions, revokeSession, revokeOthers }
+  return { sessions, mfaStatus, page, pageSize, total, totalPages, loading, saving, error, message, loadSessions, loadMfaStatus, revokeSession, revokeOthers }
 })

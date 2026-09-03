@@ -21,8 +21,12 @@ import AnnouncementDetailPage from '../views/AnnouncementDetailPage.vue'
 import AnnouncementManagementPage from '../views/AnnouncementManagementPage.vue'
 import TravelPage from '../views/TravelPage.vue'
 import TravelDetailPage from '../views/TravelDetailPage.vue'
+import PurchasePage from '../views/PurchasePage.vue'
+import PurchaseDetailPage from '../views/PurchaseDetailPage.vue'
 import PersonnelPage from '../views/PersonnelPage.vue'
 import PersonnelDetailPage from '../views/PersonnelDetailPage.vue'
+import PersonnelCasePage from '../views/PersonnelCasePage.vue'
+import PersonnelCaseDetailPage from '../views/PersonnelCaseDetailPage.vue'
 import AttendancePage from '../views/AttendancePage.vue'
 import AttendanceDetailPage from '../views/AttendanceDetailPage.vue'
 import ContractPage from '../views/ContractPage.vue'
@@ -43,8 +47,12 @@ export const router = createRouter({
     { path: '/expense/:id', component: DetailPage, props: route => ({ module: 'expense', id: route.params.id }) },
     { path: '/travel', component: TravelPage },
     { path: '/travel/:id', component: TravelDetailPage, props: true },
+    { path: '/purchase', component: PurchasePage },
+    { path: '/purchase/:id', component: PurchaseDetailPage, props: true },
     { path: '/hr/employees', component: PersonnelPage },
     { path: '/hr/employees/:id', component: PersonnelDetailPage, props: true },
+    { path: '/hr/personnel-cases', component: PersonnelCasePage },
+    { path: '/hr/personnel-cases/:id', component: PersonnelCaseDetailPage, props: true },
     { path: '/hr/contracts', component: ContractPage },
     { path: '/hr/contracts/:id', component: ContractDetailPage, props: true },
     { path: '/attendance', component: AttendancePage },

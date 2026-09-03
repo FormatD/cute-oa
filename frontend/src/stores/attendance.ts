@@ -1,17 +1,15 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createHttpClient } from '../api/http'
-import { createAttendanceApi, type AttendanceFilters } from '../api/modules/attendance'
+import { useApiClient } from '../api/client'
+import type { AttendanceFilters } from '../api/modules/attendance'
 import type { AttendanceImportItem, AttendanceMonthLock, AttendanceMonthlySummary, AttendanceRecord, AttendanceShift, SaveAttendanceShift } from '../api/types'
-import { useAuthStore } from './auth'
 import { PAGE_SIZE } from './pagination'
 
 const currentMonth = () => `${new Date().toISOString().slice(0, 7)}-01`
 const blankFilters = (): AttendanceFilters => ({ keyword: '', userId: '', departmentId: '', status: '', month: currentMonth() })
 
 export const useAttendanceStore = defineStore('attendance', () => {
-  const auth = useAuthStore()
-  const api = createAttendanceApi(createHttpClient(() => auth.accessToken, auth.clearSession, auth.refreshAccessToken))
+  const api = useApiClient().attendance
   const records = ref<AttendanceRecord[]>([])
   const detail = ref<AttendanceRecord | null>(null)
   const shifts = ref<AttendanceShift[]>([])
@@ -23,6 +21,7 @@ export const useAttendanceStore = defineStore('attendance', () => {
   const totalPages = ref(1)
   const loading = ref(false)
   const saving = ref(false)
+  const downloading = ref(false)
   const error = ref('')
   const message = ref('')
 
@@ -74,6 +73,18 @@ export const useAttendanceStore = defineStore('attendance', () => {
     }, locked ? '考勤封账失败。' : '考勤解封失败。')
   }
 
+  async function downloadMonthSnapshot() {
+    downloading.value = true; error.value = ''; message.value = ''
+    try {
+      await api.downloadMonthSnapshot(filters.value.month)
+      message.value = `${filters.value.month.slice(0, 7)} 封账月报已下载，操作已记录审计。`
+      return true
+    } catch (cause) {
+      error.value = cause instanceof Error ? cause.message : '封账月报下载失败。'
+      return false
+    } finally { downloading.value = false }
+  }
+
   async function submitAppeal(recordId: string, reason: string, attachments: string[]) {
     return mutate(async () => { await api.submitAppeal(recordId, reason, attachments); message.value = '考勤申诉已提交。'; await loadDetail(recordId) }, '考勤申诉提交失败。')
   }
@@ -95,5 +106,5 @@ export const useAttendanceStore = defineStore('attendance', () => {
   function changePage(offset: number) { page.value += offset; void loadRecords() }
   function reset() { records.value = []; detail.value = null; shifts.value = []; summaries.value = []; monthLock.value = null; filters.value = blankFilters(); page.value = 1; total.value = 0; totalPages.value = 1; error.value = ''; message.value = '' }
 
-  return { records, detail, shifts, summaries, monthLock, filters, page, total, totalPages, loading, saving, error, message, loadRecords, loadDetail, generateDemoData, importRecord, updateShift, changeMonthLock, submitAppeal, reviewAppeal, setMonth, search, resetFilters, changePage, reset }
+  return { records, detail, shifts, summaries, monthLock, filters, page, total, totalPages, loading, saving, downloading, error, message, loadRecords, loadDetail, generateDemoData, importRecord, updateShift, changeMonthLock, downloadMonthSnapshot, submitAppeal, reviewAppeal, setMonth, search, resetFilters, changePage, reset }
 })

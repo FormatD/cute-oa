@@ -2,7 +2,11 @@ namespace Oa.Api.Domain;
 
 public static class EmploymentTypes
 {
-    public static IReadOnlyList<string> All { get; } = ["FULL_TIME", "PART_TIME", "INTERN", "CONTRACTOR"];
+    public const string FullTime = "FULL_TIME";
+    public const string PartTime = "PART_TIME";
+    public const string Intern = "INTERN";
+    public const string Contractor = "CONTRACTOR";
+    public static IReadOnlyList<string> All { get; } = [FullTime, PartTime, Intern, Contractor];
 }
 
 public static class PersonnelStatuses

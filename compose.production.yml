@@ -1,0 +1,135 @@
+name: cute-oa-production
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Oa.Api/Dockerfile
+    image: cute-oa-api:${OA_IMAGE_TAG:-local}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:8080
+      Configuration__KeyPerFileDirectory: /run/secrets
+      Persistence__UsePostgreSql: "true"
+      DemoFeatures__AllowDataGeneration: "false"
+      Bootstrap__Enabled: ${OA_BOOTSTRAP_ENABLED:-false}
+      Bootstrap__AdminUserId: ${OA_BOOTSTRAP_ADMIN_USER_ID:-}
+      Bootstrap__AdminName: ${OA_BOOTSTRAP_ADMIN_NAME:-}
+      Bootstrap__DepartmentId: ${OA_BOOTSTRAP_DEPARTMENT_ID:-}
+      Bootstrap__DepartmentName: ${OA_BOOTSTRAP_DEPARTMENT_NAME:-}
+      Bootstrap__AdminEmployeeNumber: ${OA_BOOTSTRAP_ADMIN_EMPLOYEE_NUMBER:-}
+      Bootstrap__AdminHireDate: ${OA_BOOTSTRAP_ADMIN_HIRE_DATE:-}
+      PersonnelCases__CategoryAssignees__HR: ${OA_PERSONNEL_HR_ASSIGNEE_ID:-}
+      PersonnelCases__CategoryAssignees__FINANCE: ${OA_PERSONNEL_FINANCE_ASSIGNEE_ID:-}
+      PersonnelCases__CategoryAssignees__IT: ${OA_PERSONNEL_IT_ASSIGNEE_ID:-}
+      PersonnelCases__CategoryAssignees__ADMIN: ${OA_PERSONNEL_ADMIN_ASSIGNEE_ID:-}
+      PersonnelCaseAlerts__Enabled: "true"
+      PersonnelCaseAlerts__IntervalMinutes: ${OA_PERSONNEL_ALERT_INTERVAL_MINUTES:-60}
+      PersonnelCaseAlerts__DueSoonDays: ${OA_PERSONNEL_ALERT_DUE_SOON_DAYS:-1}
+      PersonnelCaseAlerts__EscalateAfterDays: ${OA_PERSONNEL_ALERT_ESCALATE_DAYS:-3}
+      PersonnelExport__MaxRows: ${OA_PERSONNEL_EXPORT_MAX_ROWS:-10000}
+      Authentication__PasswordChangeChallengeMinutes: ${OA_PASSWORD_CHANGE_CHALLENGE_MINUTES:-10}
+      Cors__AllowedOrigins__0: ${OA_PUBLIC_ORIGIN:?set OA_PUBLIC_ORIGIN}
+      AllowedHosts: ${OA_PUBLIC_HOST:?set OA_PUBLIC_HOST}
+      Storage__Root: /var/lib/cute-oa/files
+      FileScanning__Mode: ClamAv
+      FileScanning__ClamAv__Host: clamav
+      FileScanning__ClamAv__Port: "3310"
+      FileScanning__ClamAv__TimeoutSeconds: "30"
+      LoginProtection__Enabled: "true"
+      ForwardedHeaders__KnownProxies__0: 172.30.0.10
+    secrets:
+      - source: api_signing_key
+        target: Authentication__SigningKey
+      - source: database_connection
+        target: ConnectionStrings__OaDatabase
+      - source: mfa_encryption_key
+        target: Authentication__MultiFactor__EncryptionKey
+      - source: bootstrap_admin_password
+        target: Bootstrap__AdminPassword
+    volumes:
+      - oa_files:/var/lib/cute-oa/files
+    networks:
+      oa_internal:
+        ipv4_address: 172.30.0.20
+    depends_on:
+      clamav:
+        condition: service_healthy
+
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: cute-oa-web:${OA_IMAGE_TAG:-local}
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /var/cache/nginx:size=64m,mode=0755
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    secrets:
+      - source: tls_certificate
+        target: tls_certificate
+      - source: tls_private_key
+        target: tls_private_key
+    ports:
+      - ${OA_HTTP_PORT:-8080}:8080
+      - ${OA_HTTPS_PORT:-8443}:8443
+    networks:
+      oa_internal:
+        ipv4_address: 172.30.0.10
+    depends_on:
+      api:
+        condition: service_healthy
+
+  clamav:
+    image: ${OA_CLAMAV_IMAGE:-clamav/clamav:1.4}
+    platform: ${OA_CLAMAV_PLATFORM:-linux/amd64}
+    restart: unless-stopped
+    mem_limit: ${OA_CLAMAV_MEMORY_LIMIT:-4g}
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD-SHELL, /usr/local/bin/clamdcheck.sh]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5m
+    volumes:
+      - clamav_database:/var/lib/clamav
+    networks:
+      oa_internal:
+        ipv4_address: 172.30.0.30
+
+secrets:
+  api_signing_key:
+    file: ${OA_SIGNING_KEY_FILE:?set OA_SIGNING_KEY_FILE}
+  database_connection:
+    file: ${OA_DATABASE_CONNECTION_FILE:?set OA_DATABASE_CONNECTION_FILE}
+  mfa_encryption_key:
+    file: ${OA_MFA_ENCRYPTION_KEY_FILE:?set OA_MFA_ENCRYPTION_KEY_FILE}
+  bootstrap_admin_password:
+    file: ${OA_BOOTSTRAP_ADMIN_PASSWORD_FILE:?set OA_BOOTSTRAP_ADMIN_PASSWORD_FILE}
+  tls_certificate:
+    file: ${OA_TLS_CERTIFICATE_FILE:?set OA_TLS_CERTIFICATE_FILE}
+  tls_private_key:
+    file: ${OA_TLS_PRIVATE_KEY_FILE:?set OA_TLS_PRIVATE_KEY_FILE}
+
+volumes:
+  oa_files:
+  clamav_database:
+
+networks:
+  oa_internal:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24

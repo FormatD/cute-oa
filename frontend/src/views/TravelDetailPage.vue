@@ -5,20 +5,20 @@ import FlowInstanceTimeline from '../components/FlowInstanceTimeline.vue'
 import { useAppStore } from '../stores/app'
 import { useAuthStore } from '../stores/auth'
 import { useDetailStore } from '../stores/detail'
+import { useEmployeeDirectoryStore } from '../stores/employee-directory'
 import { useFileStore } from '../stores/files'
 import { useTravelStore } from '../stores/travel'
-import { useWorkspaceStore } from '../stores/workspace'
 import { businessStatusLabel } from '../utils/businessLabels'
 
 const props = defineProps<{ id: string }>()
 const app = useAppStore()
 const auth = useAuthStore()
 const detail = useDetailStore()
+const employeeDirectory = useEmployeeDirectoryStore()
 const files = useFileStore()
 const travel = useTravelStore()
-const workspace = useWorkspaceStore()
 const router = useRouter()
-const copyNames = (ids: string[]) => ids.map(id => workspace.employees.find(item => item.id === id)?.name ?? id).join('、') || '无'
+const copyNames = (ids: string[]) => ids.map(id => employeeDirectory.employees.find(item => item.id === id)?.name ?? id).join('、') || '无'
 onMounted(() => { void detail.loadDetail({ module: 'travel', id: props.id }) })
 </script>
 

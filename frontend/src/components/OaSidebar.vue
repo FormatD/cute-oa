@@ -19,11 +19,13 @@ function hasPermission(permission: string) { return props.currentUser?.permissio
       <button :class="{ active: activeNav === 'leave' }" @click="go('leave')"><span>◫</span>请假管理</button>
       <button :class="{ active: activeNav === 'expense' }" @click="go('expense')"><span>¥</span>费用报销</button>
       <button :class="{ active: activeNav === 'travel' }" @click="go('travel')"><span>⌖</span>出差管理</button>
+      <button :class="{ active: activeNav === 'purchase' }" @click="go('purchase')"><span>▦</span>采购管理</button>
       <button :class="{ active: activeNav === 'approval' }" @click="go('approval')"><span>✓</span>审批中心 <b v-if="summary?.pendingTaskCount">{{ summary.pendingTaskCount }}</b></button>
       <button :class="{ active: activeNav === 'copies' }" @click="go('copies')"><span>▤</span>待我阅读 <b v-if="summary?.pendingReadCount">{{ summary.pendingReadCount }}</b></button>
       <button :class="{ active: activeNav === 'delegations' }" @click="go('delegations')"><span>⇄</span>审批委托</button>
       <p class="nav-label">人力资源</p>
       <button :class="{ active: activeNav === 'hr' }" @click="go('hr/employees')"><span>♚</span>人事档案</button>
+      <button :class="{ active: activeNav === 'personnel-cases' }" @click="go('hr/personnel-cases')"><span>☑</span>员工办理</button>
       <button :class="{ active: activeNav === 'contracts' }" @click="go('hr/contracts')"><span>▧</span>劳动合同</button>
       <button :class="{ active: activeNav === 'attendance' }" @click="go('attendance')"><span>◷</span>考勤管理</button>
       <p class="nav-label">组织与设置</p>

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Oa.Api.Domain;
 using Oa.Api.Persistence;
 
@@ -74,7 +75,8 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
         record.OpenEndedReviewRequired = reviewRequired; record.OpenEndedReviewReason = reviewReason;
         AddEvent(record, actor, "UPDATED", $"更新合同草稿 {record.ContractNumber}", request.ChangeReason);
         Audit(actor, "EMPLOYMENT_CONTRACT_UPDATED", record, $"更新 {record.EmployeeName} 的劳动合同草稿");
-        db.SaveChanges();
+        var failure = SaveContractChanges<EmploymentContractView>();
+        if (failure is not null) return failure;
         return ServiceResult<EmploymentContractView>.Success(MapRecords([record]).Single());
     }
 
@@ -87,14 +89,15 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
         if (record.Version != request.Version) return ServiceResult<EmploymentContractView>.Failure("合同已被更新，请刷新后重试。", "CONCURRENCY_001");
         if (string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Trim().Length > 500) return ServiceResult<EmploymentContractView>.Failure("激活原因应为 1–500 个字符。", "CONTRACT_001");
         var attachments = Deserialize(record.AttachmentsJson);
-        if (record.SignedDate is null || record.SignedDate > DateOnly.FromDateTime(DateTime.Today) || attachments.Count == 0 || !FilesExist(attachments))
+        if (record.SignedDate is null || record.SignedDate > BusinessTime.ChinaToday() || attachments.Count == 0 || !FilesExist(attachments))
             return ServiceResult<EmploymentContractView>.Failure("激活前必须填写有效签订日期并关联至少一份签署附件。", "CONTRACT_005");
         if (OverlapsActive(record.UserId, record.StartDate, record.EndDate, record.Id)) return ServiceResult<EmploymentContractView>.Failure("该员工存在日期重叠的有效合同。", "CONTRACT_002");
         record.Status = EmploymentContractStatuses.Active; record.Version++; record.UpdatedBy = actor.Id; record.UpdatedAt = DateTimeOffset.UtcNow;
         AddEvent(record, actor, "ACTIVATED", $"激活合同 {record.ContractNumber}", request.Reason.Trim());
         Audit(actor, "EMPLOYMENT_CONTRACT_ACTIVATED", record, $"激活 {record.EmployeeName} 的劳动合同");
-        db.SaveChanges();
-        notifications.Create(record.UserId, "EMPLOYMENT_CONTRACT", "劳动合同已归档", $"劳动合同 {record.ContractNumber} 已生效并归档。", "EmploymentContract", record.Id);
+        notifications.Enqueue(record.UserId, "EMPLOYMENT_CONTRACT", "劳动合同已归档", $"劳动合同 {record.ContractNumber} 已生效并归档。", "EmploymentContract", record.Id);
+        var failure = SaveContractChanges<EmploymentContractView>();
+        if (failure is not null) return failure;
         return ServiceResult<EmploymentContractView>.Success(MapRecords([record]).Single());
     }
 
@@ -105,7 +108,9 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
         var subject = data.FindEmployee(source.UserId);
         if (!CanManage(actor, subject)) return ServiceResult<EmploymentContractView>.Failure("无劳动合同续签权限。", "AUTH_002");
         if (source.Status != EmploymentContractStatuses.Active) return ServiceResult<EmploymentContractView>.Failure("仅有效或已到期展示状态的合同可以续签。", "CONTRACT_004");
-        if (request.UserId != source.UserId || request.SignedDate is null || request.SignedDate > DateOnly.FromDateTime(DateTime.Today)) return ServiceResult<EmploymentContractView>.Failure("续签员工或签订日期不合法。", "CONTRACT_001");
+        if (source.Version != request.Version) return ServiceResult<EmploymentContractView>.Failure("原合同已被更新，请刷新后重试。", "CONCURRENCY_001");
+        if (source.EndDate is null) return ServiceResult<EmploymentContractView>.Failure("无明确结束日期的合同不能续签，请按合同变更或终止流程处理。", "CONTRACT_004");
+        if (request.UserId != source.UserId || request.SignedDate is null || request.SignedDate > BusinessTime.ChinaToday()) return ServiceResult<EmploymentContractView>.Failure("续签员工或签订日期不合法。", "CONTRACT_001");
         if (source.EndDate is not null && request.StartDate <= source.EndDate) return ServiceResult<EmploymentContractView>.Failure("续签合同开始日期必须晚于原合同结束日期。", "CONTRACT_002");
         var validation = Validate(actor, request, null, true);
         if (!validation.IsSuccess) return ServiceResult<EmploymentContractView>.Failure(validation.Error!, validation.Code!);
@@ -126,8 +131,9 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
         AddEvent(source, actor, "SUPERSEDED", $"合同由续签版本 {renewed.ContractNumber} 取代", request.ChangeReason);
         AddEvent(renewed, actor, "RENEWED_FROM", $"由合同 {source.ContractNumber} 续签", request.ChangeReason);
         Audit(actor, "EMPLOYMENT_CONTRACT_RENEWED", renewed, $"续签 {renewed.EmployeeName} 的劳动合同");
-        db.SaveChanges();
-        notifications.Create(renewed.UserId, "EMPLOYMENT_CONTRACT", "劳动合同已续签", $"新合同 {renewed.ContractNumber} 已归档。", "EmploymentContract", renewed.Id);
+        notifications.Enqueue(renewed.UserId, "EMPLOYMENT_CONTRACT", "劳动合同已续签", $"新合同 {renewed.ContractNumber} 已归档。", "EmploymentContract", renewed.Id);
+        var failure = SaveContractChanges<EmploymentContractView>();
+        if (failure is not null) return failure;
         return ServiceResult<EmploymentContractView>.Success(MapRecords([renewed]).Single());
     }
 
@@ -139,14 +145,15 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
         if (record.Status != EmploymentContractStatuses.Active) return ServiceResult<EmploymentContractView>.Failure("仅有效合同可以登记终止。", "CONTRACT_004");
         if (record.Version != request.Version) return ServiceResult<EmploymentContractView>.Failure("合同已被更新，请刷新后重试。", "CONCURRENCY_001");
         var reason = request.Reason?.Trim() ?? string.Empty;
-        if (reason.Length is < 5 or > 500 || request.TerminationDate < record.StartDate || request.TerminationDate > DateOnly.FromDateTime(DateTime.Today))
+        if (reason.Length is < 5 or > 500 || request.TerminationDate < record.StartDate || request.TerminationDate > BusinessTime.ChinaToday())
             return ServiceResult<EmploymentContractView>.Failure("终止日期或原因不符合要求。", "CONTRACT_001");
         record.Status = EmploymentContractStatuses.Terminated; record.TerminationDate = request.TerminationDate; record.TerminationReason = reason;
         record.Version++; record.UpdatedBy = actor.Id; record.UpdatedAt = DateTimeOffset.UtcNow;
         AddEvent(record, actor, "TERMINATED", $"登记终止合同 {record.ContractNumber}", reason);
         Audit(actor, "EMPLOYMENT_CONTRACT_TERMINATED", record, $"终止 {record.EmployeeName} 的劳动合同");
-        db.SaveChanges();
-        notifications.Create(record.UserId, "EMPLOYMENT_CONTRACT", "劳动合同状态已更新", $"合同 {record.ContractNumber} 已登记终止。", "EmploymentContract", record.Id);
+        notifications.Enqueue(record.UserId, "EMPLOYMENT_CONTRACT", "劳动合同状态已更新", $"合同 {record.ContractNumber} 已登记终止。", "EmploymentContract", record.Id);
+        var failure = SaveContractChanges<EmploymentContractView>();
+        if (failure is not null) return failure;
         return ServiceResult<EmploymentContractView>.Success(MapRecords([record]).Single());
     }
 
@@ -174,7 +181,7 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
     {
         var visible = VisibleEmployees(actor).ToList();
         var visibleIds = visible.Select(item => item.Id).ToHashSet();
-        var today = DateOnly.FromDateTime(DateTime.Today);
+        var today = BusinessTime.ChinaToday();
         var contracts = db.EmploymentContracts.AsNoTracking().Where(item => item.TenantId == TenantId && visibleIds.Contains(item.UserId)).ToList();
         var active = contracts.Where(item => item.Status == EmploymentContractStatuses.Active && item.EndDate is not null).ToList();
         var currentAcks = db.ContractAlertAcknowledgements.AsNoTracking().Where(item => active.Select(contract => contract.Id).Contains(item.ContractId)).ToList();
@@ -211,7 +218,7 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
     {
         if (!configuration.GetValue<bool>("DemoFeatures:AllowDataGeneration")) return ServiceResult<GenerateContractDemoResult>.Failure("当前环境已关闭模拟数据生成功能。", "DEMO_DISABLED");
         if (!data.HasPermission(actor, OaPermissions.ContractManage)) return ServiceResult<GenerateContractDemoResult>.Failure("无模拟合同生成权限。", "AUTH_002");
-        var today = DateOnly.FromDateTime(DateTime.Today);
+        var today = BusinessTime.ChinaToday();
         var employees = VisibleEmployees(actor).Where(item => item.Status == "ACTIVE").OrderBy(item => item.Id).ToList();
         var expiryOffsets = new[] { 7, 28, 55, 82, 180, 270, 365 };
         var created = 0; var skipped = 0;
@@ -247,7 +254,7 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
         var location = request.WorkLocation?.Trim() ?? string.Empty; var position = request.PositionName?.Trim() ?? string.Empty; var reason = request.ChangeReason?.Trim() ?? string.Empty;
         if (location.Length is < 1 or > 100 || position.Length is < 1 or > 100 || reason.Length is < 5 or > 500 || request.Notes?.Trim().Length > 1000)
             return ServiceResult<bool>.Failure("工作地点、岗位、备注或变更说明不符合要求。", "CONTRACT_001");
-        if (request.SignedDate > DateOnly.FromDateTime(DateTime.Today)) return ServiceResult<bool>.Failure("签订日期不能晚于今天。", "CONTRACT_001");
+        if (request.SignedDate > BusinessTime.ChinaToday()) return ServiceResult<bool>.Failure("签订日期不能晚于今天。", "CONTRACT_001");
         if (request.ContractType == EmploymentContractTypes.FixedTerm && (request.EndDate is null || request.EndDate <= request.StartDate)) return ServiceResult<bool>.Failure("固定期限合同必须填写晚于开始日期的结束日期。", "CONTRACT_001");
         if (request.ContractType == EmploymentContractTypes.OpenEnded && request.EndDate is not null) return ServiceResult<bool>.Failure("无固定期限合同不能填写结束日期。", "CONTRACT_001");
         if (request.ContractType == EmploymentContractTypes.ProjectBased && (request.ProjectDescription?.Trim().Length is not (>= 5 and <= 500))) return ServiceResult<bool>.Failure("项目期限合同必须填写 5–500 字任务说明。", "CONTRACT_001");
@@ -297,7 +304,7 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
         var acks = db.ContractAlertAcknowledgements.AsNoTracking().Where(item => ids.Contains(item.ContractId)).OrderByDescending(item => item.AcknowledgedAt).ToList().ToLookup(item => item.ContractId);
         var renewalIds = records.Where(item => item.RenewalOfId is not null).Select(item => item.RenewalOfId!.Value).Distinct().ToList();
         var renewalNumbers = db.EmploymentContracts.AsNoTracking().Where(item => renewalIds.Contains(item.Id)).ToDictionary(item => item.Id, item => item.ContractNumber);
-        var today = DateOnly.FromDateTime(DateTime.Today);
+        var today = BusinessTime.ChinaToday();
         return records.Select(item =>
         {
             int? days = item.EndDate is null ? null : item.EndDate.Value.DayNumber - today.DayNumber;
@@ -321,6 +328,32 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
         };
     }
     private bool CanManage(Employee actor, Employee? subject) => subject is not null && data.HasPermission(actor, OaPermissions.ContractManage) && CanView(actor, subject);
+    private ServiceResult<T>? SaveContractChanges<T>()
+    {
+        try
+        {
+            db.SaveChanges();
+            return null;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            db.ChangeTracker.Clear();
+            return ServiceResult<T>.Failure("劳动合同已被其他操作更新，请刷新后重试。", "CONCURRENCY_001");
+        }
+        catch (DbUpdateException exception) when (IsActivePeriodConflict(exception))
+        {
+            db.ChangeTracker.Clear();
+            return ServiceResult<T>.Failure("该员工存在日期重叠的有效合同。", "CONTRACT_002");
+        }
+    }
+
+    private static bool IsActivePeriodConflict(DbUpdateException exception) =>
+        exception.InnerException is PostgresException
+        {
+            SqlState: PostgresErrorCodes.ExclusionViolation,
+            ConstraintName: "EX_employment_contract_active_period"
+        };
+
     private bool FilesExist(IReadOnlyList<string> ids) { var parsed = ids.Select(value => Guid.TryParse(value, out var id) ? id : Guid.Empty).ToList(); return parsed.All(id => id != Guid.Empty) && db.Files.Count(item => item.TenantId == TenantId && parsed.Contains(item.Id)) == parsed.Count; }
     private bool AttachmentsCanBeAssigned(Employee actor, IReadOnlyList<string> ids, Guid? currentId)
     {
@@ -338,7 +371,7 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
     private (bool Required, string? Reason) OpenEndedReview(Employee subject, bool includeNextFixedTerm = false)
     {
         var reasons = new List<string>();
-        if (HireDate(subject.Id) <= DateOnly.FromDateTime(DateTime.Today).AddYears(-10)) reasons.Add("在本单位连续工作已达到 10 年，请进行无固定期限合同法务评估");
+        if (HireDate(subject.Id) <= BusinessTime.ChinaToday().AddYears(-10)) reasons.Add("在本单位连续工作已达到 10 年，请进行无固定期限合同法务评估");
         var fixedTerms = db.EmploymentContracts.AsNoTracking().Count(item => item.TenantId == TenantId && item.UserId == subject.Id && item.ContractType == EmploymentContractTypes.FixedTerm && item.Status != EmploymentContractStatuses.Draft);
         if (fixedTerms + (includeNextFixedTerm ? 1 : 0) >= 2) reasons.Add("连续固定期限合同记录达到二次，请进行续订条件法务评估");
         return (reasons.Count > 0, reasons.Count > 0 ? string.Join("；", reasons) : null);
@@ -350,8 +383,8 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
         var createdAt = db.Users.AsNoTracking().Where(item => item.Id == userId).Select(item => item.CreatedAt).Single();
         return DateOnly.FromDateTime(createdAt.LocalDateTime);
     }
-    private int? CurrentThreshold(EmploymentContractRecord item) { if (item.Status != EmploymentContractStatuses.Active || item.EndDate is null) return null; var days = item.EndDate.Value.DayNumber - DateOnly.FromDateTime(DateTime.Today).DayNumber; if (days < 0) return null; return days <= 7 ? 7 : days <= 30 ? 30 : days <= 60 ? 60 : days <= 90 ? 90 : null; }
-    private string GenerateNumber() { string number; do number = $"LC-{DateTime.Today:yyyyMMdd}-{Random.Shared.Next(0, 1_000_000):D6}"; while (db.EmploymentContracts.Any(item => item.TenantId == TenantId && item.ContractNumber == number)); return number; }
+    private int? CurrentThreshold(EmploymentContractRecord item) { if (item.Status != EmploymentContractStatuses.Active || item.EndDate is null) return null; var days = item.EndDate.Value.DayNumber - BusinessTime.ChinaToday().DayNumber; if (days < 0) return null; return days <= 7 ? 7 : days <= 30 ? 30 : days <= 60 ? 60 : days <= 90 ? 90 : null; }
+    private string GenerateNumber() { string number; do number = $"LC-{BusinessTime.ChinaToday():yyyyMMdd}-{Random.Shared.Next(0, 1_000_000):D6}"; while (db.EmploymentContracts.Any(item => item.TenantId == TenantId && item.ContractNumber == number)); return number; }
     private void AddEvent(EmploymentContractRecord contract, Employee actor, string type, string summary, string reason) => db.EmploymentContractEvents.Add(new EmploymentContractEventRecord { TenantId = TenantId, ContractId = contract.Id, EventType = type, Summary = summary, Reason = reason, ChangedBy = actor.Id, ChangedByName = actor.Name, SnapshotJson = JsonSerializer.Serialize(new { contract.ContractNumber, contract.UserId, contract.ContractType, contract.Status, contract.SignedDate, contract.StartDate, contract.EndDate, contract.ProbationStartDate, contract.ProbationEndDate, contract.RenewalOfId, contract.TerminationDate, contract.Version }) });
     private void Audit(Employee actor, string action, EmploymentContractRecord contract, string summary) => db.AuditLogs.Add(new AuditRecord { TenantId = TenantId, ActorId = actor.Id, Action = action, ResourceType = "EmploymentContract", ResourceId = contract.Id.ToString(), Summary = summary });
     private static EmploymentContractEventView ToEvent(EmploymentContractEventRecord item) => new(item.Id, item.EventType, item.Summary, item.Reason, item.ChangedBy, item.ChangedByName, item.CreatedAt);

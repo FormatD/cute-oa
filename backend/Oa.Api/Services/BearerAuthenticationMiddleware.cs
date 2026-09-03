@@ -11,6 +11,9 @@ public sealed class BearerAuthenticationMiddleware(RequestDelegate next)
         "/health",
         "/health/ready",
         "/api/v1/auth/login",
+        "/api/v1/auth/mfa/setup/start",
+        "/api/v1/auth/mfa/setup/confirm",
+        "/api/v1/auth/mfa/verify",
         "/api/v1/auth/refresh",
         "/api/v1/auth/logout",
         "/api/v1/auth/demo-accounts"

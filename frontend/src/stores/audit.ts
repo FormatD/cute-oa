@@ -1,16 +1,13 @@
 import { reactive, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createHttpClient } from '../api/http'
-import { createSystemApi } from '../api/modules/system'
+import { useApiClient } from '../api/client'
 import type { AuditLog } from '../api/types'
-import { useAuthStore } from './auth'
 import { PAGE_SIZE } from './pagination'
 
 const blankFilters = () => ({ keyword: '', actorId: '', resourceType: '', startDate: '', endDate: '' })
 
 export const useAuditStore = defineStore('audit', () => {
-  const auth = useAuthStore()
-  const api = createSystemApi(createHttpClient(() => auth.accessToken, auth.clearSession, auth.refreshAccessToken))
+  const api = useApiClient().system
   const filters = reactive(blankFilters())
   const items = ref<AuditLog[]>([])
   const page = ref(1)

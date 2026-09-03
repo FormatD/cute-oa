@@ -1,9 +1,7 @@
 import { computed, reactive, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { createHttpClient } from '../api/http'
-import { createWorkflowApi } from '../api/modules/workflow'
+import { useApiClient } from '../api/client'
 import type { FlowDelegation } from '../api/types'
-import { useAuthStore } from './auth'
 import { paginate } from './pagination'
 
 function localDateTime(date: Date) {
@@ -20,8 +18,7 @@ const blankForm = () => ({
 })
 
 export const useDelegationStore = defineStore('delegation', () => {
-  const auth = useAuthStore()
-  const api = createWorkflowApi(createHttpClient(() => auth.accessToken, auth.clearSession, auth.refreshAccessToken))
+  const api = useApiClient().workflow
   const items = ref<FlowDelegation[]>([])
   const loading = ref(false)
   const saving = ref(false)
