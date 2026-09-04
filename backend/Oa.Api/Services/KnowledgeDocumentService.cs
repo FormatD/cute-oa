@@ -85,6 +85,35 @@ public sealed class KnowledgeDocumentService
         var name = request.Name.Trim();
         var desc = string.IsNullOrWhiteSpace(request.Description) ? null : request.Description.Trim();
 
+        if (request.ParentId.HasValue && request.ParentId.Value != Guid.Empty)
+        {
+            if (id.HasValue && request.ParentId.Value == id.Value)
+                return ServiceResult<DocumentCategoryView>.Failure("上级分类不能选择自身。", "CAT_003");
+
+            var parent = _db.DocumentCategories.AsNoTracking().SingleOrDefault(c => c.TenantId == TenantId && c.Id == request.ParentId.Value);
+            if (parent is null)
+                return ServiceResult<DocumentCategoryView>.Failure("指定的上级分类不存在。", "DOC_002");
+            if (parent.DepartmentId != deptId)
+                return ServiceResult<DocumentCategoryView>.Failure("上级分类的部门归属必须与当前分类一致。", "DOC_001");
+
+            if (id.HasValue && id.Value != Guid.Empty)
+            {
+                var ancestorId = parent.Id;
+                var visited = new HashSet<Guid> { id.Value };
+                while (ancestorId != Guid.Empty)
+                {
+                    if (ancestorId == id.Value)
+                        return ServiceResult<DocumentCategoryView>.Failure("上级分类不能形成循环层级依赖。", "CAT_003");
+                    if (!visited.Add(ancestorId))
+                        break;
+                    var ancestor = _db.DocumentCategories.AsNoTracking().SingleOrDefault(c => c.TenantId == TenantId && c.Id == ancestorId);
+                    if (ancestor?.ParentId is null)
+                        break;
+                    ancestorId = ancestor.ParentId.Value;
+                }
+            }
+        }
+
         DocumentCategoryRecord record;
         if (id.HasValue && id.Value != Guid.Empty)
         {
@@ -295,7 +324,7 @@ public sealed class KnowledgeDocumentService
     public ServiceResult<KnowledgeDocumentView> CreateDraft(Employee actor, SaveDocumentRequest request)
     {
         var deptId = string.IsNullOrWhiteSpace(request.DepartmentId) ? null : request.DepartmentId.Trim();
-        if (!_data.CanManageDepartmentDocument(actor, deptId))
+        if (!_data.CanEditDepartmentDocument(actor, deptId))
             return ServiceResult<KnowledgeDocumentView>.Failure(
                 deptId is null ? "仅全公司管理员可编制公司级通用制度。" : "无权为其他部门编制制度文档。", "AUTH_002");
 
@@ -351,7 +380,7 @@ public sealed class KnowledgeDocumentService
             return ServiceResult<KnowledgeDocumentView>.Failure("仅草稿状态文档可直接编辑，已发布文档请执行修订新版本。", "DOC_004");
 
         var newDeptId = string.IsNullOrWhiteSpace(request.DepartmentId) ? null : request.DepartmentId.Trim();
-        if (!_data.CanManageDepartmentDocument(actor, record.DepartmentId) || !_data.CanManageDepartmentDocument(actor, newDeptId))
+        if (!_data.CanEditDepartmentDocument(actor, record.DepartmentId) || !_data.CanEditDepartmentDocument(actor, newDeptId))
             return ServiceResult<KnowledgeDocumentView>.Failure("无权维护该部门的文档。", "AUTH_002");
 
         var validation = ValidateInput(request);
@@ -385,21 +414,30 @@ public sealed class KnowledgeDocumentService
         return ServiceResult<KnowledgeDocumentView>.Success(ToView(record, category.Name, false, null));
     }
 
-    public ServiceResult<bool> DeleteDraft(Employee actor, Guid id)
+    public ServiceResult<bool> DeleteDocument(Employee actor, Guid id)
     {
         var record = _db.KnowledgeDocuments.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null) return ServiceResult<bool>.Failure("文档不存在。", "DOC_003");
-        if (record.Status != (int)DocumentStatus.Draft)
-            return ServiceResult<bool>.Failure("仅草稿状态文档可删除。", "DOC_004");
 
-        if (!_data.CanManageDepartmentDocument(actor, record.DepartmentId))
-            return ServiceResult<bool>.Failure("无权删除该部门的文档。", "AUTH_002");
+        var canManage = _data.CanManageDepartmentDocument(actor, record.DepartmentId);
+        var isOwnDraft = record.Status == (int)DocumentStatus.Draft && record.CreatedBy == actor.Id;
+
+        if (!canManage && !isOwnDraft)
+            return ServiceResult<bool>.Failure("无权删除该文档。", "AUTH_002");
+
+        var acks = _db.DocumentAcknowledgements.Where(a => a.TenantId == TenantId && a.DocumentId == id);
+        _db.DocumentAcknowledgements.RemoveRange(acks);
+
+        var versions = _db.DocumentVersions.Where(v => v.TenantId == TenantId && v.DocumentId == id);
+        _db.DocumentVersions.RemoveRange(versions);
 
         _db.KnowledgeDocuments.Remove(record);
         _db.SaveChanges();
-        Audit(actor, "DOCUMENT_DELETED", id, $"删除制度草稿：{record.Title}（{record.Number}）");
+        Audit(actor, "DOCUMENT_DELETED", id, $"删除制度文档：{record.Title}（{record.Number}）");
         return ServiceResult<bool>.Success(true);
     }
+
+    public ServiceResult<bool> DeleteDraft(Employee actor, Guid id) => DeleteDocument(actor, id);
 
     public ServiceResult<KnowledgeDocumentView> PublishDocument(Employee actor, Guid id)
     {
@@ -464,7 +502,7 @@ public sealed class KnowledgeDocumentService
         if (record.Version != request.Version)
             return ServiceResult<KnowledgeDocumentView>.Failure("文档已被其他人更新，请刷新重试。", "CONCURRENCY_001");
 
-        if (!_data.CanManageDepartmentDocument(actor, record.DepartmentId))
+        if (!_data.CanEditDepartmentDocument(actor, record.DepartmentId))
             return ServiceResult<KnowledgeDocumentView>.Failure("无权修订该部门的文档。", "AUTH_002");
 
         if (string.IsNullOrWhiteSpace(request.Title) || request.Title.Trim().Length > 100)
@@ -660,6 +698,195 @@ public sealed class KnowledgeDocumentService
         )).ToList();
 
         return ServiceResult<IReadOnlyList<DocumentVersionView>>.Success(views);
+    }
+
+    public ServiceResult<DocumentDiffView> CompareVersions(Employee actor, Guid id, int v1, int v2)
+    {
+        var record = _db.KnowledgeDocuments.AsNoTracking().SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
+        if (record is null) return ServiceResult<DocumentDiffView>.Failure("文档不存在。", "DOC_003");
+
+        if (!_data.CanAccessDepartmentDocument(actor, record.DepartmentId))
+            return ServiceResult<DocumentDiffView>.Failure("无权查阅该文档版本对比。", "AUTH_002");
+
+        if (v1 == v2)
+            return ServiceResult<DocumentDiffView>.Failure("请选择两个不同的版本进行对比。", "VALIDATION_001");
+
+        var sourceVer = Math.Min(v1, v2);
+        var targetVer = Math.Max(v1, v2);
+
+        var sourceSnapshot = _db.DocumentVersions.AsNoTracking()
+            .SingleOrDefault(v => v.TenantId == TenantId && v.DocumentId == id && v.Version == sourceVer);
+        if (sourceSnapshot is null)
+            return ServiceResult<DocumentDiffView>.Failure($"源版本 v{sourceVer} 不存在。", "DOC_003");
+
+        var targetSnapshot = _db.DocumentVersions.AsNoTracking()
+            .SingleOrDefault(v => v.TenantId == TenantId && v.DocumentId == id && v.Version == targetVer);
+        if (targetSnapshot is null)
+            return ServiceResult<DocumentDiffView>.Failure($"目标版本 v{targetVer} 不存在。", "DOC_003");
+
+        var sourceAttachments = DeserializeList(sourceSnapshot.AttachmentsJson);
+        var targetAttachments = DeserializeList(targetSnapshot.AttachmentsJson);
+
+        var titleChanged = sourceSnapshot.Title != targetSnapshot.Title;
+        var summaryChanged = sourceSnapshot.Summary != targetSnapshot.Summary;
+        var attachmentsChanged = !sourceAttachments.SequenceEqual(targetAttachments);
+
+        var sourceLines = sourceSnapshot.Content.Replace("\r\n", "\n").Split('\n');
+        var targetLines = targetSnapshot.Content.Replace("\r\n", "\n").Split('\n');
+
+        var diffLines = ComputeLineDiff(sourceLines, targetLines);
+        var added = diffLines.Count(l => l.Type == "added");
+        var removed = diffLines.Count(l => l.Type == "removed");
+        var unchanged = diffLines.Count(l => l.Type == "unchanged");
+
+        var view = new DocumentDiffView(
+            record.Id,
+            sourceVer,
+            targetVer,
+            sourceSnapshot.Title,
+            targetSnapshot.Title,
+            titleChanged,
+            sourceSnapshot.Summary,
+            targetSnapshot.Summary,
+            summaryChanged,
+            sourceAttachments,
+            targetAttachments,
+            attachmentsChanged,
+            targetSnapshot.ChangeNotes,
+            sourceSnapshot.PublishedAt,
+            sourceSnapshot.PublishedByName,
+            targetSnapshot.PublishedAt,
+            targetSnapshot.PublishedByName,
+            added,
+            removed,
+            unchanged,
+            diffLines
+        );
+
+        return ServiceResult<DocumentDiffView>.Success(view);
+    }
+
+    private static List<DiffLine> ComputeLineDiff(string[] a, string[] b)
+    {
+        int n = a.Length;
+        int m = b.Length;
+        int[,] dp = new int[n + 1, m + 1];
+
+        for (int i = 0; i < n; i++)
+        {
+            for (int j = 0; j < m; j++)
+            {
+                if (a[i] == b[j])
+                    dp[i + 1, j + 1] = dp[i, j] + 1;
+                else
+                    dp[i + 1, j + 1] = Math.Max(dp[i + 1, j], dp[i, j + 1]);
+            }
+        }
+
+        var reverse = new List<DiffLine>();
+        int curA = n, curB = m;
+
+        while (curA > 0 || curB > 0)
+        {
+            if (curA > 0 && curB > 0 && a[curA - 1] == b[curB - 1])
+            {
+                reverse.Add(new DiffLine("unchanged", curA, curB, a[curA - 1]));
+                curA--;
+                curB--;
+            }
+            else if (curB > 0 && (curA == 0 || dp[curA, curB - 1] >= dp[curA - 1, curB]))
+            {
+                reverse.Add(new DiffLine("added", null, curB, b[curB - 1]));
+                curB--;
+            }
+            else if (curA > 0 && (curB == 0 || dp[curA, curB - 1] < dp[curA - 1, curB]))
+            {
+                reverse.Add(new DiffLine("removed", curA, null, a[curA - 1]));
+                curA--;
+            }
+        }
+
+        reverse.Reverse();
+        return reverse;
+    }
+
+    public ServiceResult<KnowledgeDocumentView> RollbackDocument(Employee actor, Guid id, RollbackDocumentRequest request)
+    {
+        var record = _db.KnowledgeDocuments.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
+        if (record is null) return ServiceResult<KnowledgeDocumentView>.Failure("文档不存在。", "DOC_003");
+        if (record.Status != (int)DocumentStatus.Published && record.Status != (int)DocumentStatus.Archived)
+            return ServiceResult<KnowledgeDocumentView>.Failure("仅已发布或已归档文档支持版本回退。", "DOC_004");
+        if (record.Version != request.CurrentVersion)
+            return ServiceResult<KnowledgeDocumentView>.Failure("文档已被其他人更新，请刷新重试。", "CONCURRENCY_001");
+
+        if (!_data.CanEditDepartmentDocument(actor, record.DepartmentId))
+            return ServiceResult<KnowledgeDocumentView>.Failure("无权回退该部门的文档。", "AUTH_002");
+
+        var targetVersionRecord = _db.DocumentVersions.AsNoTracking()
+            .SingleOrDefault(v => v.TenantId == TenantId && v.DocumentId == id && v.Version == request.TargetVersion);
+        if (targetVersionRecord is null)
+            return ServiceResult<KnowledgeDocumentView>.Failure($"目标回退版本 v{request.TargetVersion} 不存在。", "DOC_003");
+
+        var now = DateTimeOffset.UtcNow;
+        var nextVersion = record.Version + 1;
+        var changeNotes = string.IsNullOrWhiteSpace(request.Reason)
+            ? $"回退至历史版本 v{request.TargetVersion}.0"
+            : $"回退至历史版本 v{request.TargetVersion}.0：{request.Reason.Trim()}";
+
+        record.Version = nextVersion;
+        record.Title = targetVersionRecord.Title;
+        record.Summary = targetVersionRecord.Summary;
+        record.Content = targetVersionRecord.Content;
+        record.AttachmentsJson = targetVersionRecord.AttachmentsJson;
+        record.Status = (int)DocumentStatus.Published;
+        record.PublishedAt = now;
+        record.PublishedBy = actor.Id;
+        record.PublishedByName = actor.Name;
+        record.UpdatedAt = now;
+
+        _db.DocumentVersions.Add(new DocumentVersionRecord
+        {
+            TenantId = TenantId,
+            DocumentId = record.Id,
+            Version = nextVersion,
+            Title = record.Title,
+            Summary = record.Summary,
+            Content = record.Content,
+            ChangeNotes = changeNotes,
+            AttachmentsJson = record.AttachmentsJson,
+            PublishedAt = now,
+            PublishedBy = actor.Id,
+            PublishedByName = actor.Name,
+            CreatedAt = now
+        });
+
+        _db.SaveChanges();
+        Audit(actor, "DOCUMENT_ROLLBACK", record.Id, $"制度文档版本回退：{record.Title}（从 v{request.CurrentVersion} 回退至 v{request.TargetVersion}，生成新版本 v{nextVersion}）");
+
+        var categoryName = _db.DocumentCategories.AsNoTracking().Where(c => c.Id == record.CategoryId).Select(c => c.Name).FirstOrDefault() ?? "未分类";
+        return ServiceResult<KnowledgeDocumentView>.Success(ToView(record, categoryName, false, null));
+    }
+
+    public ServiceResult<KnowledgeDocumentView> MoveDocumentCategory(Employee actor, Guid id, Guid newCategoryId)
+    {
+        var record = _db.KnowledgeDocuments.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
+        if (record is null) return ServiceResult<KnowledgeDocumentView>.Failure("文档不存在。", "DOC_003");
+
+        if (!_data.CanManageDepartmentDocument(actor, record.DepartmentId))
+            return ServiceResult<KnowledgeDocumentView>.Failure("无权调整该文档所属分类组织结构。", "AUTH_002");
+
+        var newCategory = _db.DocumentCategories.SingleOrDefault(c => c.TenantId == TenantId && c.Id == newCategoryId);
+        if (newCategory is null) return ServiceResult<KnowledgeDocumentView>.Failure("目标分类不存在。", "DOC_002");
+
+        if (newCategory.DepartmentId != null && newCategory.DepartmentId != record.DepartmentId)
+            return ServiceResult<KnowledgeDocumentView>.Failure("不能将文档移动到其他部门的分类中。", "DOC_001");
+
+        record.CategoryId = newCategoryId;
+        record.UpdatedAt = DateTimeOffset.UtcNow;
+        _db.SaveChanges();
+        Audit(actor, "DOCUMENT_CATEGORY_MOVED", record.Id, $"调整制度文档分类组织结构：{record.Title}（移动至 {newCategory.Name}）");
+
+        return ServiceResult<KnowledgeDocumentView>.Success(ToView(record, newCategory.Name, false, null));
     }
 
     // -------------------------------------------------------------

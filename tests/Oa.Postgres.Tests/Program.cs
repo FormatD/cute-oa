@@ -1809,6 +1809,89 @@ await using (var writeDb = new OaDbContext(options))
     if (!globalStats.IsSuccess)
         throw new InvalidOperationException("全局管理员查看部门制度签收看板失败：" + globalStats.Error);
 
+    // 12. Document Category Hierarchy & Circular Check
+    var subCatResult = docService.SaveCategory(engManager, new SaveCategoryRequest("TECH_BE_PG", "后端架构与规范", "研发二级子类", engCatId, "engineering", 21));
+    if (!subCatResult.IsSuccess)
+        throw new InvalidOperationException("研发负责人创建子分类失败：" + subCatResult.Error);
+    var subCatId = subCatResult.Value!.Id;
+
+    var circularCat = docService.SaveCategory(engManager, new SaveCategoryRequest("TECH_GUIDE_PG", "研发专属技术规范", "试图形成自循环层级", subCatId, "engineering", 20), engCatId);
+    if (circularCat.Code != "CAT_003")
+        throw new InvalidOperationException("分类层级自循环检测未拦截。");
+
+    // 13. Ordinary Employee Creates & Edits Department Document
+    var empDraftResult = docService.CreateDraft(employee, new SaveDocumentRequest(
+        "前端开发代码风格规范", subCatId, "规范前端Vue组件开发与TypeScript书写规范。",
+        "### 规范1\n采用 Composition API 编写组件。\n\n### 规范2\n所有 API 必须强类型定义。",
+        ["前端", "代码规范"], false, "engineering", today, null, []));
+    if (!empDraftResult.IsSuccess || empDraftResult.Value!.Status != DocumentStatus.Draft)
+        throw new InvalidOperationException("研发普通员工编制部门制度草稿失败：" + empDraftResult.Error);
+    var empDocId = empDraftResult.Value.Id;
+
+    var crossEmpDraft = docService.CreateDraft(finEmployee, new SaveDocumentRequest(
+        "越权编制研发规范", subCatId, "试图跨部门编制", "正文", [], false, "engineering", today, null, []));
+    if (crossEmpDraft.Code != "AUTH_002")
+        throw new InvalidOperationException("财务员工跨部门编制研发草稿未被拦截。");
+
+    var updateEmpDraft = docService.UpdateDraft(employee, empDocId, new SaveDocumentRequest(
+        "前端开发代码风格规范（更新草稿）", subCatId, "更新摘要内容",
+        "### 规范1\n采用 Composition API 编写组件。\n\n### 规范2\n所有 API 必须强类型定义与接口注解。",
+        ["前端", "代码规范"], false, "engineering", today, null, []));
+    if (!updateEmpDraft.IsSuccess)
+        throw new InvalidOperationException("研发员工更新本部门草稿失败：" + updateEmpDraft.Error);
+
+    // Publish employee's draft by manager
+    var pubEmpDoc = docService.PublishDocument(engManager, empDocId);
+    if (!pubEmpDoc.IsSuccess || pubEmpDoc.Value!.Version != 1)
+        throw new InvalidOperationException("部门主管发布员工草稿失败：" + pubEmpDoc.Error);
+
+    // 14. Ordinary Employee Revises Published Department Document
+    var empRevise = docService.ReviseDocument(employee, empDocId, new ReviseDocumentRequest(
+        1, "前端开发代码风格规范（v2.0）", "新增Pinia状态管理与规范细则",
+        "### 规范1\n采用 Composition API 编写组件。\n\n### 规范2\n所有 API 必须强类型定义与接口注解。\n\n### 规范3\n状态管理全面使用 Pinia Store。",
+        "升级至v2.0增加Pinia指引", []));
+    if (!empRevise.IsSuccess || empRevise.Value!.Version != 2)
+        throw new InvalidOperationException("研发普通员工修订发布新版本失败：" + empRevise.Error);
+
+    // 15. Version Compare & Diff
+    var diffResult = docService.CompareVersions(employee, empDocId, 1, 2);
+    if (!diffResult.IsSuccess || diffResult.Value!.SourceVersion != 1 || diffResult.Value.TargetVersion != 2)
+        throw new InvalidOperationException("版本差异对比失败：" + diffResult.Error);
+    if (diffResult.Value.AddedLines == 0)
+        throw new InvalidOperationException("版本差异分析未检测到新增行。");
+    if (!diffResult.Value.ContentDiff.Any(d => d.Type == "added" && d.Text.Contains("规范3")))
+        throw new InvalidOperationException("版本差异未包含新增的规范3行。");
+
+    // 16. Version Rollback
+    var rollbackResult = docService.RollbackDocument(employee, empDocId, new RollbackDocumentRequest(
+        1, 2, "回退至v1.0：暂缓引入Pinia规范要求"));
+    if (!rollbackResult.IsSuccess || rollbackResult.Value!.Version != 3)
+        throw new InvalidOperationException("版本回退生成递增版本失败：" + rollbackResult.Error);
+    if (!rollbackResult.Value.Content.Contains("规范2") || rollbackResult.Value.Content.Contains("规范3"))
+        throw new InvalidOperationException("回退生成的版本正文快照不符合目标版本v1.0。");
+
+    // 17. Manager Moves Document Category (Reorganize Structure)
+    var moveResult = docService.MoveDocumentCategory(engManager, empDocId, engCatId);
+    if (!moveResult.IsSuccess || moveResult.Value!.CategoryId != engCatId)
+        throw new InvalidOperationException("部门主管调整文档所属分类失败：" + moveResult.Error);
+
+    var empMove = docService.MoveDocumentCategory(employee, empDocId, subCatId);
+    if (empMove.Code != "AUTH_002")
+        throw new InvalidOperationException("普通员工越权调整文档组织结构分类未被拦截。");
+
+    // 18. Document Deletion by Manager vs Employee
+    var empDelete = docService.DeleteDocument(employee, empDocId);
+    if (empDelete.Code != "AUTH_002")
+        throw new InvalidOperationException("普通员工越权删除已发布的部门制度未被拦截。");
+
+    var mgrDelete = docService.DeleteDocument(engManager, empDocId);
+    if (!mgrDelete.IsSuccess)
+        throw new InvalidOperationException("部门主管删除本部门制度失败：" + mgrDelete.Error);
+
+    var getDeleted = docService.GetDocument(engManager, empDocId);
+    if (getDeleted.Code != "DOC_003")
+        throw new InvalidOperationException("已删除的制度仍可被查询到。");
+
     var idempotency = new IdempotencyService(writeDb);
     idempotency.Store(employee.Id, "POST:/api/v1/leave-requests", idempotencyKey, 201, "{\"id\":\"cached\"}");
     if (idempotency.Find(employee.Id, "POST:/api/v1/leave-requests", idempotencyKey) is not { StatusCode: 201 })

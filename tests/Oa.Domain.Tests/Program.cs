@@ -383,6 +383,12 @@ True(data.CanManageDepartmentDocument(hr, null), "全公司文档管理员可管
 True(data.CanManageDepartmentDocument(hr, "engineering"), "全公司文档管理员可管理各部门专属制度");
 True(!data.CanManageDepartmentDocument(employee, "engineering"), "普通员工无权管理所属部门制度");
 
+True(data.CanEditDepartmentDocument(employee, "engineering"), "研发普通员工有权创建和编辑本部门文档");
+True(!data.CanEditDepartmentDocument(employee, "finance"), "研发普通员工无权创建和编辑其他部门文档");
+True(!data.CanEditDepartmentDocument(employee, null), "研发普通员工无权创建和编辑全公司通用文档");
+True(data.CanEditDepartmentDocument(manager, "engineering"), "研发主管有权创建和编辑本部门文档");
+True(data.CanEditDepartmentDocument(hr, "finance"), "全公司文档管理员有权创建和编辑各部门文档");
+
 if (failures.Count > 0)
 {
     Console.Error.WriteLine(string.Join(Environment.NewLine, failures));

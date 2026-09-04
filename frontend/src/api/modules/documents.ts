@@ -8,6 +8,9 @@ import type {
   DocumentVersion,
   DocumentAcknowledgement,
   DocumentAcknowledgementStats,
+  RollbackDocument,
+  MoveDocumentCategory,
+  DocumentDiffView,
   PagedResponse
 } from '../types'
 
@@ -56,11 +59,20 @@ export const createDocumentApi = ({ request }: HttpClient) => ({
   deleteDraft: (id: string): Promise<boolean> =>
     request(`/documents/${id}`, { method: 'DELETE' }),
 
+  deleteDocument: (id: string): Promise<boolean> =>
+    request(`/documents/${id}`, { method: 'DELETE' }),
+
   publishDocument: (id: string): Promise<KnowledgeDocument> =>
     request(`/documents/${id}/publish`, { method: 'POST' }),
 
   reviseDocument: (id: string, payload: ReviseDocument): Promise<KnowledgeDocument> =>
     request(`/documents/${id}/revise`, { method: 'POST', body: JSON.stringify(payload) }),
+
+  rollbackDocument: (id: string, payload: RollbackDocument): Promise<KnowledgeDocument> =>
+    request(`/documents/${id}/rollback`, { method: 'POST', body: JSON.stringify(payload) }),
+
+  moveDocumentCategory: (id: string, payload: MoveDocumentCategory): Promise<KnowledgeDocument> =>
+    request(`/documents/${id}/move-category`, { method: 'POST', body: JSON.stringify(payload) }),
 
   archiveDocument: (id: string): Promise<boolean> =>
     request(`/documents/${id}/archive`, { method: 'POST' }),
@@ -73,6 +85,9 @@ export const createDocumentApi = ({ request }: HttpClient) => ({
 
   listVersions: (id: string): Promise<DocumentVersion[]> =>
     request(`/documents/${id}/versions`),
+
+  compareVersions: (id: string, v1: number, v2: number): Promise<DocumentDiffView> =>
+    request(`/documents/${id}/compare?v1=${v1}&v2=${v2}`),
 
   generateDemoData: (): Promise<{ created: number; skipped: number }> =>
     request('/documents/demo-data', { method: 'POST' })

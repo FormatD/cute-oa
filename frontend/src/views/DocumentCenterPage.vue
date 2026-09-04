@@ -30,6 +30,30 @@ function canManageDoc(doc: KnowledgeDocument) {
   return false
 }
 
+function canEditDoc(doc: KnowledgeDocument) {
+  if (doc.status !== 'Draft') return false
+  if (isGlobalManager.value) return true
+  if (isDeptManager.value && doc.departmentId === auth.currentUser?.departmentId) return true
+  if (doc.departmentId && doc.departmentId === auth.currentUser?.departmentId) return true
+  if (doc.createdBy === auth.currentUser?.id) return true
+  return false
+}
+
+function canDeleteDoc(doc: KnowledgeDocument) {
+  if (isGlobalManager.value) return true
+  // Department manager can delete ANY document in their department (draft, published, archived)
+  if (isDeptManager.value && doc.departmentId === auth.currentUser?.departmentId) return true
+  // Ordinary employee can only delete their own drafts
+  if (doc.status === 'Draft' && doc.createdBy === auth.currentUser?.id) return true
+  return false
+}
+
+function canManageCategory(cat: DocumentCategory) {
+  if (isGlobalManager.value) return true
+  if (isDeptManager.value && cat.departmentId === auth.currentUser?.departmentId) return true
+  return false
+}
+
 // Dialogs
 const documentEditorOpen = ref(false)
 const editingDocId = ref<string | null>(null)
@@ -65,14 +89,57 @@ const catForm = reactive<{
   code: string
   name: string
   description: string
+  parentId: string
   departmentId: string
   sortOrder: number
 }>({
   code: '',
   name: '',
   description: '',
+  parentId: '',
   departmentId: '',
   sortOrder: 10
+})
+
+const availableParentCategories = computed(() => {
+  return docStore.categories.filter(c => {
+    if (editingCatId.value && c.id === editingCatId.value) return false
+    if (!isGlobalManager.value && isDeptManager.value) {
+      return !c.departmentId || c.departmentId === auth.currentUser?.departmentId
+    }
+    return true
+  })
+})
+
+function getParentCategoryName(parentId?: string | null) {
+  if (!parentId) return '一级分类'
+  const parent = docStore.categories.find(c => c.id === parentId)
+  return parent ? parent.name : '—'
+}
+
+const hierarchicalCategories = computed(() => {
+  const result: DocumentCategory[] = []
+  const roots = docStore.categories.filter(c => !c.parentId)
+  const childrenMap = new Map<string, DocumentCategory[]>()
+  for (const c of docStore.categories) {
+    if (c.parentId) {
+      if (!childrenMap.has(c.parentId)) childrenMap.set(c.parentId, [])
+      childrenMap.get(c.parentId)!.push(c)
+    }
+  }
+  for (const root of roots) {
+    result.push(root)
+    const children = childrenMap.get(root.id)
+    if (children) {
+      result.push(...children)
+    }
+  }
+  for (const c of docStore.categories) {
+    if (!result.some(r => r.id === c.id)) {
+      result.push(c)
+    }
+  }
+  return result
 })
 
 onMounted(async () => {
@@ -229,9 +296,13 @@ async function publishDraft(doc: KnowledgeDocument) {
   await docStore.publishDocument(doc.id)
 }
 
-async function deleteDraft(doc: KnowledgeDocument) {
-  if (confirm(`确认删除制度草稿《${doc.title}》吗？`)) {
-    await docStore.deleteDraft(doc.id)
+async function handleDeleteDocument(doc: KnowledgeDocument) {
+  const isDraft = doc.status === 'Draft'
+  const prompt = isDraft
+    ? `确认删除制度草稿《${doc.title}》吗？`
+    : `确认删除制度文档《${doc.title}》（v${doc.version}.0）吗？\n\n警告：删除后该文档的所有历史版本及员工签收记录将被全部永久删除！`
+  if (confirm(prompt)) {
+    await docStore.deleteDocument(doc.id)
   }
 }
 
@@ -245,6 +316,7 @@ function openCreateCategory() {
   catForm.code = ''
   catForm.name = ''
   catForm.description = ''
+  catForm.parentId = ''
   catForm.departmentId = isGlobalManager.value ? '' : (auth.currentUser?.departmentId ?? '')
   catForm.sortOrder = 10
   categoryEditorOpen.value = true
@@ -255,6 +327,7 @@ function openEditCategory(cat: DocumentCategory) {
   catForm.code = cat.code
   catForm.name = cat.name
   catForm.description = cat.description || ''
+  catForm.parentId = cat.parentId || ''
   catForm.departmentId = cat.departmentId || ''
   catForm.sortOrder = cat.sortOrder
   categoryEditorOpen.value = true
@@ -274,6 +347,7 @@ async function submitCategory() {
     code: catForm.code.trim().toUpperCase(),
     name: catForm.name.trim(),
     description: catForm.description.trim() || null,
+    parentId: catForm.parentId.trim() || null,
     departmentId: catForm.departmentId.trim() || null,
     sortOrder: Number(catForm.sortOrder) || 10
   }
@@ -309,7 +383,7 @@ async function deleteCategory(cat: DocumentCategory) {
       <button v-if="isManager" class="secondary" @click="openCategoryManager">
         目录分类管理
       </button>
-      <button v-if="isManager" @click="openCreateDocument">
+      <button @click="openCreateDocument">
         <span>＋</span> 编制制度/文档
       </button>
     </div>
@@ -386,12 +460,13 @@ async function deleteCategory(cat: DocumentCategory) {
         </div>
         <ul class="category-tree">
           <li
-            v-for="cat in docStore.categories"
+            v-for="cat in hierarchicalCategories"
             :key="cat.id"
-            :class="{ active: docStore.selectedCategoryId === cat.id }"
+            :class="{ active: docStore.selectedCategoryId === cat.id, 'sub-category': !!cat.parentId }"
             @click="selectCategory(cat.id)"
           >
             <span class="cat-name">
+              <span v-if="cat.parentId" class="tree-prefix">↳</span>
               📁 {{ cat.name }}
               <small v-if="cat.departmentId" class="dept-tag">[{{ getDepartmentName(cat.departmentId) }}]</small>
             </span>
@@ -496,7 +571,7 @@ async function deleteCategory(cat: DocumentCategory) {
 
             <div class="doc-actions">
               <button
-                v-if="doc.status === 'Draft' && canManageDoc(doc)"
+                v-if="doc.status === 'Draft' && canEditDoc(doc)"
                 class="secondary small-btn"
                 @click="openEditDocument(doc)"
               >
@@ -510,9 +585,9 @@ async function deleteCategory(cat: DocumentCategory) {
                 正式发布
               </button>
               <button
-                v-if="doc.status === 'Draft' && canManageDoc(doc)"
+                v-if="canDeleteDoc(doc)"
                 class="danger-outline small-btn"
-                @click="deleteDraft(doc)"
+                @click="handleDeleteDocument(doc)"
               >
                 删除
               </button>
@@ -583,14 +658,14 @@ async function deleteCategory(cat: DocumentCategory) {
 
       <label class="dialog-field">
         适用部门
-        <select v-model="docForm.departmentId" :disabled="!isGlobalManager && isDeptManager">
+        <select v-model="docForm.departmentId" :disabled="!isGlobalManager">
           <option value="">全公司通用（全体在职员工）</option>
           <option v-for="dept in organization.departments" :key="dept.id" :value="dept.id">
             仅限 {{ dept.name }}
           </option>
         </select>
-        <small v-if="!isGlobalManager && isDeptManager" class="hint-text">
-          您是部门文档管理员，编制的规章制度将归属于 {{ getDepartmentName(auth.currentUser?.departmentId) }}。
+        <small v-if="!isGlobalManager" class="hint-text">
+          编制的规章制度将归属于您的所属部门「{{ getDepartmentName(auth.currentUser?.departmentId) }}」。
         </small>
       </label>
     </div>
@@ -634,7 +709,7 @@ async function deleteCategory(cat: DocumentCategory) {
   <OaDialog
     :open="categoryManagerOpen"
     title="目录分类管理"
-    description="管理企业知识库的一级目录与可见性设置。"
+    description="管理企业知识库的组织结构层级与部门分类设置。"
     submit-label="关闭"
     @close="categoryManagerOpen = false"
     @submit="categoryManagerOpen = false"
@@ -648,6 +723,7 @@ async function deleteCategory(cat: DocumentCategory) {
         <tr>
           <th>分类名称</th>
           <th>编码</th>
+          <th>组织层级</th>
           <th>适用部门</th>
           <th>排序号</th>
           <th>文档数</th>
@@ -658,13 +734,14 @@ async function deleteCategory(cat: DocumentCategory) {
         <tr v-for="cat in docStore.categories" :key="cat.id">
           <td><strong>{{ cat.name }}</strong></td>
           <td><code>{{ cat.code }}</code></td>
+          <td>{{ getParentCategoryName(cat.parentId) }}</td>
           <td>{{ getDepartmentName(cat.departmentId) }}</td>
           <td>{{ cat.sortOrder }}</td>
           <td>{{ cat.documentCount }}</td>
           <td class="task-actions">
-            <button class="secondary small-btn" @click="openEditCategory(cat)">编辑</button>
+            <button v-if="canManageCategory(cat)" class="secondary small-btn" @click="openEditCategory(cat)">编辑</button>
             <button
-              v-if="cat.documentCount === 0"
+              v-if="canManageCategory(cat) && cat.documentCount === 0"
               class="danger-outline small-btn"
               @click="deleteCategory(cat)"
             >
@@ -679,8 +756,8 @@ async function deleteCategory(cat: DocumentCategory) {
   <!-- Category Edit Dialog -->
   <OaDialog
     :open="categoryEditorOpen"
-    :title="editingCatId ? '编辑分类' : '新增分类'"
-    description="设置分类名称、编码及适用部门。"
+    :title="editingCatId ? '编辑分类组织结构' : '新增分类'"
+    description="设置分类名称、编码、上级分类及适用部门。"
     submit-label="保存分类"
     @close="categoryEditorOpen = false"
     @submit="submitCategory"
@@ -701,15 +778,30 @@ async function deleteCategory(cat: DocumentCategory) {
     </label>
 
     <label class="dialog-field">
+      上级分类（组织结构层级）
+      <select v-model="catForm.parentId">
+        <option value="">无（作为一级顶级分类）</option>
+        <option
+          v-for="parent in availableParentCategories"
+          :key="parent.id"
+          :value="parent.id"
+        >
+          📁 {{ parent.name }} ({{ parent.code }})
+        </option>
+      </select>
+      <small class="hint-text">通过设置上级分类，可构建多层级的部门制度知识树与组织结构分类。</small>
+    </label>
+
+    <label class="dialog-field">
       适用部门
-      <select v-model="catForm.departmentId" :disabled="!isGlobalManager && isDeptManager">
+      <select v-model="catForm.departmentId" :disabled="!isGlobalManager">
         <option value="">全公司通用</option>
         <option v-for="dept in organization.departments" :key="dept.id" :value="dept.id">
           仅限 {{ dept.name }}
         </option>
       </select>
-      <small v-if="!isGlobalManager && isDeptManager" class="hint-text">
-        您是部门文档管理员，创建的分类将归属于 {{ getDepartmentName(auth.currentUser?.departmentId) }}。
+      <small v-if="!isGlobalManager" class="hint-text">
+        您是部门管理员，创建的分类将归属于 {{ getDepartmentName(auth.currentUser?.departmentId) }}。
       </small>
     </label>
 
@@ -891,6 +983,16 @@ async function deleteCategory(cat: DocumentCategory) {
   background: #e6f7ff;
   color: #1890ff;
   font-weight: 600;
+}
+
+.category-tree li.sub-category {
+  padding-left: 26px;
+}
+
+.tree-prefix {
+  color: #8c8c8c;
+  margin-right: 4px;
+  font-weight: bold;
 }
 
 .cat-count {

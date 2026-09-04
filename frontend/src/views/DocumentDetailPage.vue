@@ -6,7 +6,7 @@ import { useDocumentStore } from '../stores/documents'
 import { useOrganizationStore } from '../stores/organization'
 import { useUiStore } from '../stores/ui'
 import OaDialog from '../components/OaDialog.vue'
-import type { ReviseDocument } from '../api/types'
+import type { DocumentDiffView, ReviseDocument } from '../api/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -29,6 +29,14 @@ const canManageThisDoc = computed(() => {
   return false
 })
 
+const canEditThisDoc = computed(() => {
+  if (!doc.value) return false
+  if (isGlobalManager.value) return true
+  // Department ordinary employees can edit/revise their department's documents
+  if (doc.value.departmentId && doc.value.departmentId === auth.currentUser?.departmentId) return true
+  return false
+})
+
 function getDepartmentName(deptId?: string | null) {
   if (!deptId) return '全公司'
   const d = organization.departments.find(item => item.id === deptId)
@@ -46,14 +54,37 @@ const reviseForm = reactive<ReviseDocument>({
   attachments: []
 })
 
+// Move Category Dialog
+const moveCategoryDialogOpen = ref(false)
+const targetCategoryId = ref('')
+
+// Rollback Dialog
+const rollbackDialogOpen = ref(false)
+const targetRollbackVersion = ref(1)
+const rollbackReason = ref('')
+
+// Version Diff Dialog
+const diffDialogOpen = ref(false)
+const diffLoading = ref(false)
+const diffResult = ref<DocumentDiffView | null>(null)
+const selectedCompareV1 = ref<number>(1)
+const selectedCompareV2 = ref<number>(1)
+
 // Stats tabs
 const statsTab = ref<'acknowledged' | 'pending'>('pending')
 
 onMounted(async () => {
-  await organization.loadOrganization()
+  await Promise.all([
+    organization.loadOrganization(),
+    docStore.loadCategories()
+  ])
   const loaded = await docStore.loadDocumentDetail(docId.value)
   if (loaded && loaded.isMustRead && canManageThisDoc.value) {
     void docStore.loadStats(docId.value)
+  }
+  if (versions.value.length > 1) {
+    selectedCompareV1.value = versions.value[versions.value.length - 1]?.version || 1
+    selectedCompareV2.value = loaded?.version || 1
   }
 })
 
@@ -102,6 +133,65 @@ async function submitRevision() {
   }
 }
 
+function openMoveCategoryDialog() {
+  if (!doc.value) return
+  targetCategoryId.value = doc.value.categoryId
+  moveCategoryDialogOpen.value = true
+}
+
+async function submitMoveCategory() {
+  if (!doc.value || !targetCategoryId.value) return
+  if (targetCategoryId.value === doc.value.categoryId) {
+    moveCategoryDialogOpen.value = false
+    return
+  }
+  const updated = await docStore.moveDocumentCategory(doc.value.id, targetCategoryId.value)
+  if (updated) {
+    moveCategoryDialogOpen.value = false
+  }
+}
+
+function openRollbackModal(v: { version: number }) {
+  targetRollbackVersion.value = v.version
+  rollbackReason.value = `回退至历史版本 v${v.version}.0：恢复原标准规范`
+  rollbackDialogOpen.value = true
+}
+
+async function submitRollback() {
+  if (!doc.value) return
+  if (!rollbackReason.value.trim()) {
+    ui.showToast('请输入回退原因说明', 'error')
+    return
+  }
+  const updated = await docStore.rollbackDocument(doc.value.id, {
+    targetVersion: targetRollbackVersion.value,
+    currentVersion: doc.value.version,
+    reason: rollbackReason.value.trim()
+  })
+  if (updated) {
+    rollbackDialogOpen.value = false
+    void docStore.loadStats(doc.value.id)
+  }
+}
+
+async function openDiffModal(v1: number, v2: number) {
+  if (!doc.value) return
+  diffLoading.value = true
+  diffDialogOpen.value = true
+  diffResult.value = await docStore.compareVersions(doc.value.id, v1, v2)
+  diffLoading.value = false
+}
+
+async function handleDeleteDocument() {
+  if (!doc.value) return
+  if (confirm(`确认彻底删除制度文档《${doc.value.title}》（v${doc.value.version}.0）吗？\n\n警告：删除后该文档的所有历史版本及员工签收记录将被全部永久删除！`)) {
+    const ok = await docStore.deleteDocument(doc.value.id)
+    if (ok) {
+      router.push('/documents')
+    }
+  }
+}
+
 async function archiveDocument() {
   if (confirm(`确认归档下线制度《${doc.value?.title}》吗？归档后普通员工将无法继续查阅。`)) {
     await docStore.archiveDocument(docId.value)
@@ -125,7 +215,14 @@ async function archiveDocument() {
         ← 返回知识库
       </button>
       <button
-        v-if="canManageThisDoc && doc?.status === 'Published'"
+        v-if="canManageThisDoc"
+        class="secondary"
+        @click="openMoveCategoryDialog"
+      >
+        调整分类
+      </button>
+      <button
+        v-if="canEditThisDoc && doc?.status === 'Published'"
         class="secondary"
         @click="openReviseDialog"
       >
@@ -133,10 +230,17 @@ async function archiveDocument() {
       </button>
       <button
         v-if="canManageThisDoc && doc?.status === 'Published'"
-        class="danger-outline"
+        class="secondary"
         @click="archiveDocument"
       >
         归档下线
+      </button>
+      <button
+        v-if="canManageThisDoc"
+        class="danger-outline"
+        @click="handleDeleteDocument"
+      >
+        删除制度
       </button>
     </div>
   </div>
@@ -308,17 +412,69 @@ async function archiveDocument() {
 
     <!-- Version History -->
     <section v-if="versions.length" class="panel version-history-panel">
-      <h3>版本沿革与修订历史</h3>
+      <div class="version-header-row">
+        <div>
+          <h3>版本沿革与修订历史</h3>
+          <p class="section-subtitle">文档全生命周期修订快照自动保留，支持任意历史版本逐行差异对比与安全回退。</p>
+        </div>
+        <div v-if="versions.length > 1" class="compare-quick-bar">
+          <label class="compare-label">快速对比：</label>
+          <select v-model.number="selectedCompareV1">
+            <option v-for="v in versions" :key="'v1-'+v.version" :value="v.version">
+              v{{ v.version }}.0
+            </option>
+          </select>
+          <span class="compare-vs">对比</span>
+          <select v-model.number="selectedCompareV2">
+            <option v-for="v in versions" :key="'v2-'+v.version" :value="v.version">
+              v{{ v.version }}.0
+            </option>
+          </select>
+          <button
+            class="secondary small-btn"
+            :disabled="selectedCompareV1 === selectedCompareV2"
+            @click="openDiffModal(selectedCompareV1, selectedCompareV2)"
+          >
+            对比差异
+          </button>
+        </div>
+      </div>
+
       <div class="timeline">
-        <div v-for="v in versions" :key="v.id" class="timeline-item">
-          <div class="timeline-dot"></div>
+        <div v-for="(v, index) in versions" :key="v.id" class="timeline-item">
+          <div class="timeline-dot" :class="{ current: v.version === doc.version }"></div>
           <div class="timeline-content">
             <div class="timeline-title">
               <strong>v{{ v.version }}.0</strong>
+              <span v-if="v.version === doc.version" class="current-tag">当前生效版本</span>
               <span>{{ new Date(v.publishedAt).toLocaleString('zh-CN') }}</span>
-              <small>修订人：{{ v.publishedByName }}</small>
+              <small>修订发布人：{{ v.publishedByName }}</small>
             </div>
             <p class="timeline-notes">{{ v.changeNotes || '日常版本维护' }}</p>
+
+            <div class="timeline-actions">
+              <button
+                v-if="index < versions.length - 1"
+                class="secondary small-btn"
+                @click="openDiffModal(versions[index + 1].version, v.version)"
+              >
+                与上一版本 (v{{ versions[index + 1].version }}.0) 对比
+              </button>
+              <button
+                v-if="v.version !== doc.version"
+                class="secondary small-btn"
+                @click="openDiffModal(v.version, doc.version)"
+              >
+                与当前版本 (v{{ doc.version }}.0) 对比
+              </button>
+              <button
+                v-if="v.version < doc.version && canEditThisDoc"
+                class="warning-btn small-btn"
+                @click="openRollbackModal(v)"
+              >
+                ↺ 回退至此版本
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -354,6 +510,128 @@ async function archiveDocument() {
       新版本正文内容（Markdown）
       <textarea v-model="reviseForm.content" rows="12" maxlength="20000"></textarea>
     </label>
+  </OaDialog>
+
+  <!-- Move Category Dialog -->
+  <OaDialog
+    :open="moveCategoryDialogOpen"
+    title="调整文档所属分类"
+    description="将当前制度文档组织分类调整到指定分类目录中。"
+    submit-label="确认调整分类"
+    :busy="docStore.loading"
+    @close="moveCategoryDialogOpen = false"
+    @submit="submitMoveCategory"
+  >
+    <label class="dialog-field">
+      选择目标分类目录
+      <select v-model="targetCategoryId">
+        <option v-for="cat in docStore.categories" :key="cat.id" :value="cat.id">
+          📁 {{ cat.name }} ({{ cat.code }})
+        </option>
+      </select>
+    </label>
+  </OaDialog>
+
+  <!-- Rollback Dialog -->
+  <OaDialog
+    :open="rollbackDialogOpen"
+    :title="`回退制度至历史版本 v${targetRollbackVersion}.0`"
+    description="系统将基于目标历史版本的快照内容递增发布新版本，原有的全部修订历史将安全保留，并完整记录版本回退审计链条。"
+    submit-label="确认回退并递增发布"
+    :busy="docStore.loading"
+    @close="rollbackDialogOpen = false"
+    @submit="submitRollback"
+  >
+    <div class="rollback-info-alert">
+      <div class="rollback-step">
+        <span class="step-label">目标内容基线：</span>
+        <strong>历史版本 v{{ targetRollbackVersion }}.0</strong>
+      </div>
+      <div class="rollback-step">
+        <span class="step-label">当前生效版本：</span>
+        <strong>v{{ doc?.version }}.0</strong>
+      </div>
+      <div class="rollback-step">
+        <span class="step-label">回退后新版本：</span>
+        <strong class="green-text">v{{ (doc?.version || 1) + 1 }}.0</strong>
+      </div>
+    </div>
+
+    <label class="dialog-field">
+      回退原因与修订说明（必填）
+      <input
+        v-model="rollbackReason"
+        maxlength="300"
+        placeholder="例如：紧急回退至 v1.0 恢复原审批标准"
+      />
+    </label>
+  </OaDialog>
+
+  <!-- Version Diff Dialog -->
+  <OaDialog
+    :open="diffDialogOpen"
+    :title="diffResult ? `版本差异对比：v${diffResult.sourceVersion}.0 → v${diffResult.targetVersion}.0` : '版本差异对比'"
+    description="对比两版本之间的元数据与正文逐行变动。"
+    submit-label="关闭"
+    @close="diffDialogOpen = false"
+    @submit="diffDialogOpen = false"
+  >
+    <div v-if="diffLoading" class="panel empty">
+      正在分析版本差异逐行对比…
+    </div>
+
+    <div v-else-if="diffResult" class="diff-container">
+      <!-- Diff Summary Badges -->
+      <div class="diff-summary-row">
+        <span class="diff-pill added">新增 +{{ diffResult.addedLines }} 行</span>
+        <span class="diff-pill removed">删除 -{{ diffResult.removedLines }} 行</span>
+        <span class="diff-pill unchanged">未变动 {{ diffResult.unchangedLines }} 行</span>
+      </div>
+
+      <!-- Metadata Changes -->
+      <div v-if="diffResult.titleChanged || diffResult.summaryChanged || diffResult.attachmentsChanged" class="diff-meta-box">
+        <div v-if="diffResult.titleChanged" class="meta-diff-item">
+          <strong>标题变更：</strong>
+          <span class="line-del">{{ diffResult.sourceTitle }}</span>
+          <span class="diff-arrow">→</span>
+          <span class="line-ins">{{ diffResult.targetTitle }}</span>
+        </div>
+        <div v-if="diffResult.summaryChanged" class="meta-diff-item">
+          <strong>摘要变更：</strong>
+          <p class="line-del">{{ diffResult.sourceSummary }}</p>
+          <p class="line-ins">{{ diffResult.targetSummary }}</p>
+        </div>
+        <div v-if="diffResult.attachmentsChanged" class="meta-diff-item">
+          <strong>附件变动：</strong>
+          <span class="line-del">原附件 {{ diffResult.sourceAttachments.length }} 个</span>
+          <span class="diff-arrow">→</span>
+          <span class="line-ins">现附件 {{ diffResult.targetAttachments.length }} 个</span>
+        </div>
+      </div>
+
+      <!-- Content Diff Lines -->
+      <div class="diff-lines-wrapper">
+        <div class="diff-lines-header">正文逐行差异（LCS 分析）</div>
+        <div class="diff-lines-body">
+          <div
+            v-for="(line, idx) in diffResult.contentDiff"
+            :key="idx"
+            class="diff-line"
+            :class="line.type"
+          >
+            <span class="line-no old">{{ line.oldLineNumber || '' }}</span>
+            <span class="line-no new">{{ line.newLineNumber || '' }}</span>
+            <span class="line-marker">
+              {{ line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' ' }}
+            </span>
+            <span class="line-text">{{ line.text || ' ' }}</span>
+          </div>
+          <div v-if="!diffResult.contentDiff.length" class="empty-text">
+            正文内容完全一致，未检测到行级差异。
+          </div>
+        </div>
+      </div>
+    </div>
   </OaDialog>
 </template>
 
@@ -734,5 +1012,244 @@ async function archiveDocument() {
   background: #e6f7ff;
   color: #096dd9;
   border: 1px solid #91d5ff;
+}
+
+.version-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.section-subtitle {
+  margin: 4px 0 0;
+  color: #8c8c8c;
+  font-size: 13px;
+}
+
+.compare-quick-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #f5f5f5;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.compare-label {
+  color: #595959;
+  font-weight: 500;
+}
+
+.compare-vs {
+  color: #8c8c8c;
+  font-weight: 500;
+}
+
+.current-tag {
+  background: #e6f7ff;
+  color: #1890ff;
+  border: 1px solid #91d5ff;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 8px;
+  font-weight: normal;
+}
+
+.timeline-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.warning-btn {
+  background: #fa8c16;
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.warning-btn:hover {
+  background: #d46b08;
+}
+
+.rollback-info-alert {
+  background: #f0f5ff;
+  border: 1px solid #adc6ff;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.rollback-step {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.rollback-step .step-label {
+  color: #595959;
+}
+
+.rollback-step .green-text {
+  color: #52c41a;
+  font-size: 16px;
+}
+
+.diff-container {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.diff-summary-row {
+  display: flex;
+  gap: 10px;
+}
+
+.diff-pill {
+  padding: 4px 12px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.diff-pill.added {
+  background: #e6ffed;
+  color: #2da44e;
+  border: 1px solid #acf2bd;
+}
+
+.diff-pill.removed {
+  background: #ffeef0;
+  color: #cf222e;
+  border: 1px solid #ffccd3;
+}
+
+.diff-pill.unchanged {
+  background: #f6f8fa;
+  color: #57606a;
+  border: 1px solid #d0d7de;
+}
+
+.diff-meta-box {
+  background: #fafafa;
+  border: 1px solid #eaecef;
+  border-radius: 6px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.meta-diff-item strong {
+  color: #262626;
+  margin-right: 6px;
+}
+
+.line-del {
+  background: #ffeef0;
+  color: #b31d28;
+  text-decoration: line-through;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.line-ins {
+  background: #e6ffed;
+  color: #22863a;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.diff-arrow {
+  margin: 0 6px;
+  color: #8c8c8c;
+}
+
+.diff-lines-wrapper {
+  border: 1px solid #d0d7de;
+  border-radius: 6px;
+  overflow: hidden;
+  max-height: 480px;
+  display: flex;
+  flex-direction: column;
+}
+
+.diff-lines-header {
+  background: #f6f8fa;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #57606a;
+  border-bottom: 1px solid #d0d7de;
+}
+
+.diff-lines-body {
+  overflow-y: auto;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, Courier, monospace;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.diff-line {
+  display: flex;
+  align-items: stretch;
+}
+
+.diff-line.added {
+  background: #e6ffed;
+  color: #1a7f37;
+}
+
+.diff-line.removed {
+  background: #ffeef0;
+  color: #cf222e;
+}
+
+.diff-line.unchanged {
+  background: #ffffff;
+  color: #24292f;
+}
+
+.diff-line:hover {
+  filter: brightness(0.97);
+}
+
+.line-no {
+  width: 40px;
+  padding: 0 6px;
+  text-align: right;
+  color: #8c8c8c;
+  user-select: none;
+  background: rgba(0, 0, 0, 0.02);
+  border-right: 1px solid #f0f0f0;
+  flex-shrink: 0;
+}
+
+.line-marker {
+  width: 22px;
+  text-align: center;
+  font-weight: bold;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.line-text {
+  padding: 0 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  flex: 1;
 }
 </style>

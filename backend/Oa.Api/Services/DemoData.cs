@@ -147,6 +147,15 @@ public sealed class DemoData
         };
     }
 
+    public bool CanEditDepartmentDocument(Employee actor, string? docDepartmentId)
+    {
+        if (CanManageDepartmentDocument(actor, docDepartmentId)) return true;
+        // Ordinary employees can create and edit documents belonging to their own department
+        if (!string.IsNullOrWhiteSpace(docDepartmentId) && actor.DepartmentId == docDepartmentId)
+            return true;
+        return false;
+    }
+
     private bool IsManagerOf(string managerId, Employee employee)
     {
         var cursor = employee;

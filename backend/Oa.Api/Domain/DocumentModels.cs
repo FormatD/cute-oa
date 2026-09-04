@@ -196,3 +196,44 @@ public sealed record DocumentAcknowledgementStats(
     IReadOnlyList<DocumentAcknowledgementView> AcknowledgedList,
     IReadOnlyList<EmployeeSummary> PendingList
 );
+
+public sealed record RollbackDocumentRequest(
+    int TargetVersion,
+    int CurrentVersion,
+    string? Reason
+);
+
+public sealed record MoveDocumentCategoryRequest(
+    Guid NewCategoryId
+);
+
+public sealed record DiffLine(
+    string Type, // "unchanged", "added", "removed"
+    int? OldLineNumber,
+    int? NewLineNumber,
+    string Text
+);
+
+public sealed record DocumentDiffView(
+    Guid DocumentId,
+    int SourceVersion,
+    int TargetVersion,
+    string SourceTitle,
+    string TargetTitle,
+    bool TitleChanged,
+    string SourceSummary,
+    string TargetSummary,
+    bool SummaryChanged,
+    IReadOnlyList<string> SourceAttachments,
+    IReadOnlyList<string> TargetAttachments,
+    bool AttachmentsChanged,
+    string? TargetChangeNotes,
+    DateTimeOffset SourcePublishedAt,
+    string SourcePublishedByName,
+    DateTimeOffset TargetPublishedAt,
+    string TargetPublishedByName,
+    int AddedLines,
+    int RemovedLines,
+    int UnchangedLines,
+    IReadOnlyList<DiffLine> ContentDiff
+);

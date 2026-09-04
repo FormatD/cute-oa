@@ -219,3 +219,45 @@ export type DocumentAcknowledgementStats = {
   acknowledgedList: DocumentAcknowledgement[]
   pendingList: { id: string; name: string; departmentName: string; managerName: string | null }[]
 }
+
+export type RollbackDocument = {
+  targetVersion: number
+  currentVersion: number
+  reason?: string | null
+}
+
+export type MoveDocumentCategory = {
+  newCategoryId: string
+}
+
+export type DiffLine = {
+  type: 'unchanged' | 'added' | 'removed'
+  oldLineNumber: number | null
+  newLineNumber: number | null
+  text: string
+}
+
+export type DocumentDiffView = {
+  documentId: string
+  sourceVersion: number
+  targetVersion: number
+  sourceTitle: string
+  targetTitle: string
+  titleChanged: boolean
+  sourceSummary: string
+  targetSummary: string
+  summaryChanged: boolean
+  sourceAttachments: string[]
+  targetAttachments: string[]
+  attachmentsChanged: boolean
+  targetChangeNotes: string | null
+  sourcePublishedAt: string
+  sourcePublishedByName: string
+  targetPublishedAt: string
+  targetPublishedByName: string
+  addedLines: number
+  removedLines: number
+  unchangedLines: number
+  contentDiff: DiffLine[]
+}
+

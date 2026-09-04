@@ -717,7 +717,7 @@ app.MapPut("/api/v1/documents/{id:guid}", (Guid id, SaveDocumentRequest body, Ht
 app.MapDelete("/api/v1/documents/{id:guid}", (Guid id, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency) =>
 {
     var actor = Actor(request, auth);
-    return Write(request, actor, idempotency, () => service.DeleteDraft(actor, id), atomic: true, fingerprintPayload: new { id });
+    return Write(request, actor, idempotency, () => service.DeleteDocument(actor, id), atomic: true, fingerprintPayload: new { id });
 });
 
 app.MapPost("/api/v1/documents/{id:guid}/publish", (Guid id, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency) =>
@@ -730,6 +730,18 @@ app.MapPost("/api/v1/documents/{id:guid}/revise", (Guid id, ReviseDocumentReques
 {
     var actor = Actor(request, auth);
     return Write(request, actor, idempotency, () => service.ReviseDocument(actor, id, body), atomic: true, fingerprintPayload: new { id, body });
+});
+
+app.MapPost("/api/v1/documents/{id:guid}/rollback", (Guid id, RollbackDocumentRequest body, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.RollbackDocument(actor, id, body), atomic: true, fingerprintPayload: new { id, body });
+});
+
+app.MapPost("/api/v1/documents/{id:guid}/move-category", (Guid id, MoveDocumentCategoryRequest body, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.MoveDocumentCategory(actor, id, body.NewCategoryId), atomic: true, fingerprintPayload: new { id, body });
 });
 
 app.MapPost("/api/v1/documents/{id:guid}/archive", (Guid id, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service, IdempotencyService idempotency) =>
@@ -756,6 +768,13 @@ app.MapGet("/api/v1/documents/{id:guid}/versions", (Guid id, HttpRequest request
 {
     var actor = Actor(request, auth);
     var result = service.ListVersions(actor, id);
+    return result.IsSuccess ? Results.Ok(result.Value) : Results.BadRequest(new { code = result.Code, message = result.Error });
+});
+
+app.MapGet("/api/v1/documents/{id:guid}/compare", (Guid id, int v1, int v2, HttpRequest request, DemoAuthService auth, KnowledgeDocumentService service) =>
+{
+    var actor = Actor(request, auth);
+    var result = service.CompareVersions(actor, id, v1, v2);
     return result.IsSuccess ? Results.Ok(result.Value) : Results.BadRequest(new { code = result.Code, message = result.Error });
 });
 

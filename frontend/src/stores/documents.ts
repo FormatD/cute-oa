@@ -8,7 +8,10 @@ import type {
   SaveDocument,
   ReviseDocument,
   DocumentVersion,
-  DocumentAcknowledgementStats
+  DocumentAcknowledgementStats,
+  RollbackDocument,
+  DocumentDiffView,
+  MoveDocumentCategory
 } from '../api/types'
 import { useUiStore } from './ui'
 
@@ -156,16 +159,20 @@ export const useDocumentStore = defineStore('documents', () => {
     }
   }
 
-  async function deleteDraft(id: string) {
+  async function deleteDocument(id: string) {
     try {
-      await api.documents.deleteDraft(id)
-      ui.showToast('草稿删除成功', 'success')
+      await api.documents.deleteDocument(id)
+      ui.showToast('文档删除成功', 'success')
       await loadDocuments()
       return true
     } catch (err: any) {
-      ui.showToast(err.message || '删除草稿失败', 'error')
+      ui.showToast(err.message || '删除文档失败', 'error')
       return false
     }
+  }
+
+  async function deleteDraft(id: string) {
+    return deleteDocument(id)
   }
 
   async function publishDocument(id: string) {
@@ -184,12 +191,47 @@ export const useDocumentStore = defineStore('documents', () => {
   async function reviseDocument(id: string, payload: ReviseDocument) {
     try {
       const doc = await api.documents.reviseDocument(id, payload)
-      ui.showToast(`新版本 v${doc.version} 修订发布成功`, 'success')
+      ui.showToast(`新版本 v${doc.version}.0 修订发布成功`, 'success')
       await loadDocumentDetail(id)
       await loadDocuments()
       return doc
     } catch (err: any) {
       ui.showToast(err.message || '修订发布失败', 'error')
+      return null
+    }
+  }
+
+  async function rollbackDocument(id: string, payload: RollbackDocument) {
+    try {
+      const doc = await api.documents.rollbackDocument(id, payload)
+      ui.showToast(`已成功回退至版本 v${payload.targetVersion}.0（新生成版本为 v${doc.version}.0）`, 'success')
+      await loadDocumentDetail(id)
+      await loadDocuments()
+      return doc
+    } catch (err: any) {
+      ui.showToast(err.message || '回退文档版本失败', 'error')
+      return null
+    }
+  }
+
+  async function compareVersions(id: string, v1: number, v2: number): Promise<DocumentDiffView | null> {
+    try {
+      return await api.documents.compareVersions(id, v1, v2)
+    } catch (err: any) {
+      ui.showToast(err.message || '获取版本差异对比失败', 'error')
+      return null
+    }
+  }
+
+  async function moveDocumentCategory(id: string, newCategoryId: string) {
+    try {
+      const doc = await api.documents.moveDocumentCategory(id, { newCategoryId })
+      ui.showToast('文档分类调整成功', 'success')
+      await loadDocumentDetail(id)
+      await loadDocuments()
+      return doc
+    } catch (err: any) {
+      ui.showToast(err.message || '调整分类失败', 'error')
       return null
     }
   }
@@ -285,8 +327,12 @@ export const useDocumentStore = defineStore('documents', () => {
     createDraft,
     updateDraft,
     deleteDraft,
+    deleteDocument,
     publishDocument,
     reviseDocument,
+    rollbackDocument,
+    compareVersions,
+    moveDocumentCategory,
     archiveDocument,
     acknowledgeDocument,
     downloadAttachment,
