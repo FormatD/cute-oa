@@ -371,6 +371,18 @@ var deletableExpense = expenseService.CreateDraft(employee, new CreateExpenseCla
 True(expenseService.Delete(employee, deletableExpense.Value!.Id).IsSuccess, "申请人可删除报销草稿");
 True(!expenseService.Get(employee, deletableExpense.Value.Id).IsSuccess, "删除后无法查询报销草稿");
 
+True(data.CanAccessDepartmentDocument(employee, null), "研发员工可查阅全公司通用文档");
+True(data.CanAccessDepartmentDocument(employee, "engineering"), "研发员工可查阅研发部专属文档");
+True(!data.CanAccessDepartmentDocument(employee, "finance"), "研发员工不可查阅财务部专属保密文档");
+True(data.CanAccessDepartmentDocument(hr, "finance"), "全公司文档管理员可查阅任意部门文档");
+
+True(data.CanManageDepartmentDocument(manager, "engineering"), "研发主管可管理研发部专属规章制度");
+True(!data.CanManageDepartmentDocument(manager, "finance"), "研发主管不可管理财务部专属规章制度");
+True(!data.CanManageDepartmentDocument(manager, null), "研发主管不可管理全公司通用制度");
+True(data.CanManageDepartmentDocument(hr, null), "全公司文档管理员可管理公司通用制度");
+True(data.CanManageDepartmentDocument(hr, "engineering"), "全公司文档管理员可管理各部门专属制度");
+True(!data.CanManageDepartmentDocument(employee, "engineering"), "普通员工无权管理所属部门制度");
+
 if (failures.Count > 0)
 {
     Console.Error.WriteLine(string.Join(Environment.NewLine, failures));

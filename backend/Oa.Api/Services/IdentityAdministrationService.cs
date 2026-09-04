@@ -373,6 +373,10 @@ public sealed class IdentityAdministrationService(OaDbContext db, DemoData data,
         if (dataScopes["Contract"] != OaDataScopes.Self && !assigned.Contains(OaPermissions.ContractScopeView)) return ServiceResult<bool>.Failure("配置劳动合同跨用户数据范围时必须授予劳动合同范围查看权限。", "VALIDATION_001");
         if (assigned.Contains(OaPermissions.ContractManage) && !assigned.Contains(OaPermissions.ContractScopeView)) return ServiceResult<bool>.Failure("授予劳动合同维护权限时必须同时授予劳动合同范围查看权限。", "VALIDATION_001");
         if (assigned.Contains(OaPermissions.PurchaseManage) && !assigned.Contains(OaPermissions.PurchaseScopeView)) return ServiceResult<bool>.Failure("授予采购执行权限时必须同时授予采购范围查看权限。", "VALIDATION_001");
+        if (dataScopes.TryGetValue("Seal", out var sealScope) && sealScope != OaDataScopes.Self && !assigned.Contains(OaPermissions.SealScopeView)) return ServiceResult<bool>.Failure("配置用章跨用户数据范围时必须授予用章范围查看权限。", "VALIDATION_001");
+        if (assigned.Contains(OaPermissions.SealManage) && !assigned.Contains(OaPermissions.SealScopeView)) return ServiceResult<bool>.Failure("授予印章管理权限时必须同时授予用章范围查看权限。", "VALIDATION_001");
+        if (dataScopes.TryGetValue("Document", out var docScope) && docScope != OaDataScopes.Self && !assigned.Contains(OaPermissions.DocumentScopeView) && !assigned.Contains(OaPermissions.DocumentManage)) return ServiceResult<bool>.Failure("配置知识库跨用户数据范围时必须授予知识库查看或管理权限。", "VALIDATION_001");
+        if (assigned.Contains(OaPermissions.DocumentDeptManage) && !assigned.Contains(OaPermissions.DocumentScopeView) && !assigned.Contains(OaPermissions.DocumentManage)) return ServiceResult<bool>.Failure("授予部门文档管理权限时必须同时授予知识库范围查看权限。", "VALIDATION_001");
         return ServiceResult<bool>.Success(true);
     }
 

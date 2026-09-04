@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useDocumentStore } from '../stores/documents'
+import { useOrganizationStore } from '../stores/organization'
 import { useUiStore } from '../stores/ui'
 import OaDialog from '../components/OaDialog.vue'
 import type { ReviseDocument } from '../api/types'
@@ -11,6 +12,7 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const docStore = useDocumentStore()
+const organization = useOrganizationStore()
 const ui = useUiStore()
 
 const docId = computed(() => String(route.params.id))
@@ -18,7 +20,20 @@ const doc = computed(() => docStore.currentDocument)
 const versions = computed(() => docStore.currentVersions)
 const stats = computed(() => docStore.currentStats)
 
-const isManager = computed(() => auth.currentUser?.permissions?.includes('DOCUMENT_MANAGE') === true)
+const isGlobalManager = computed(() => auth.currentUser?.permissions?.includes('DOCUMENT_MANAGE') === true)
+const isDeptManager = computed(() => auth.currentUser?.permissions?.includes('DOCUMENT_DEPT_MANAGE') === true)
+const canManageThisDoc = computed(() => {
+  if (!doc.value) return false
+  if (isGlobalManager.value) return true
+  if (isDeptManager.value && doc.value.departmentId === auth.currentUser?.departmentId) return true
+  return false
+})
+
+function getDepartmentName(deptId?: string | null) {
+  if (!deptId) return '全公司'
+  const d = organization.departments.find(item => item.id === deptId)
+  return d ? d.name : deptId
+}
 
 // Revise Dialog
 const reviseDialogOpen = ref(false)
@@ -35,8 +50,9 @@ const reviseForm = reactive<ReviseDocument>({
 const statsTab = ref<'acknowledged' | 'pending'>('pending')
 
 onMounted(async () => {
+  await organization.loadOrganization()
   const loaded = await docStore.loadDocumentDetail(docId.value)
-  if (loaded && loaded.isMustRead) {
+  if (loaded && loaded.isMustRead && canManageThisDoc.value) {
     void docStore.loadStats(docId.value)
   }
 })
@@ -98,21 +114,25 @@ async function archiveDocument() {
     <div>
       <p class="eyebrow">DOCUMENT DETAIL</p>
       <h1>{{ doc?.title || '制度文档详情' }}</h1>
-      <p>文号：<code>{{ doc?.number }}</code> · 版本：v{{ doc?.version }}.0 · 分类：{{ doc?.categoryName }}</p>
+      <p>
+        文号：<code>{{ doc?.number }}</code> · 版本：v{{ doc?.version }}.0 · 分类：{{ doc?.categoryName }} ·
+        <span v-if="doc?.departmentId" class="scope-chip dept">适用范围：{{ getDepartmentName(doc.departmentId) }}专属</span>
+        <span v-else class="scope-chip public">适用范围：全公司通用</span>
+      </p>
     </div>
     <div class="actions">
       <button class="secondary" @click="router.push('/documents')">
         ← 返回知识库
       </button>
       <button
-        v-if="isManager && doc?.status === 'Published'"
+        v-if="canManageThisDoc && doc?.status === 'Published'"
         class="secondary"
         @click="openReviseDialog"
       >
         修订新版本
       </button>
       <button
-        v-if="isManager && doc?.status === 'Published'"
+        v-if="canManageThisDoc && doc?.status === 'Published'"
         class="danger-outline"
         @click="archiveDocument"
       >
@@ -160,11 +180,11 @@ async function archiveDocument() {
     </section>
 
     <!-- Admin Acknowledgement Stats Panel -->
-    <section v-if="isManager && doc.isMustRead && stats" class="panel stats-panel">
+    <section v-if="canManageThisDoc && doc.isMustRead && stats" class="panel stats-panel">
       <div class="stats-header">
         <div>
-          <h3>全员签署进度看板</h3>
-          <p>应签人员范围：{{ doc.departmentId ? '所属部门在职人员' : '全公司全体在职员工' }}</p>
+          <h3>{{ doc.departmentId ? `${getDepartmentName(doc.departmentId)}签署进度看板` : '全员签署进度看板' }}</h3>
+          <p>应签人员范围：{{ doc.departmentId ? `${getDepartmentName(doc.departmentId)}全体在职人员` : '全公司全体在职员工' }}</p>
         </div>
         <div class="stats-counter">
           <div class="stat-box">
@@ -251,6 +271,7 @@ async function archiveDocument() {
       <div class="doc-meta-bar">
         <span>发布人：{{ doc.publishedByName || doc.createdByName }}</span>
         <span>发布时间：{{ (doc.publishedAt || doc.createdAt).slice(0, 10) }}</span>
+        <span>适用范围：{{ doc.departmentId ? `${getDepartmentName(doc.departmentId)}专属` : '全公司公开' }}</span>
         <span>生效日期：{{ doc.effectiveDate }}</span>
         <span>失效日期：{{ doc.expiryDate || '长期有效' }}</span>
         <span>阅读次数：{{ doc.viewCount }} 次</span>
@@ -695,5 +716,23 @@ async function archiveDocument() {
 .small-btn {
   padding: 4px 12px;
   font-size: 12px;
+}
+
+.scope-chip {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.scope-chip.dept {
+  background: #fff7e6;
+  color: #d46b08;
+  border: 1px solid #ffd591;
+}
+
+.scope-chip.public {
+  background: #e6f7ff;
+  color: #096dd9;
+  border: 1px solid #91d5ff;
 }
 </style>

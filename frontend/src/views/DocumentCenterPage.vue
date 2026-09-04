@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useDocumentStore } from '../stores/documents'
+import { useOrganizationStore } from '../stores/organization'
 import { useUiStore } from '../stores/ui'
 import OaDialog from '../components/OaDialog.vue'
 import type { DocumentCategory, KnowledgeDocument, SaveDocument, SaveDocumentCategory } from '../api/types'
@@ -10,9 +11,24 @@ import type { DocumentCategory, KnowledgeDocument, SaveDocument, SaveDocumentCat
 const router = useRouter()
 const auth = useAuthStore()
 const docStore = useDocumentStore()
+const organization = useOrganizationStore()
 const ui = useUiStore()
 
-const isManager = computed(() => auth.currentUser?.permissions?.includes('DOCUMENT_MANAGE') === true)
+const isGlobalManager = computed(() => auth.currentUser?.permissions?.includes('DOCUMENT_MANAGE') === true)
+const isDeptManager = computed(() => auth.currentUser?.permissions?.includes('DOCUMENT_DEPT_MANAGE') === true)
+const isManager = computed(() => isGlobalManager.value || isDeptManager.value)
+
+function getDepartmentName(deptId?: string | null) {
+  if (!deptId) return '全公司'
+  const d = organization.departments.find(item => item.id === deptId)
+  return d ? d.name : deptId
+}
+
+function canManageDoc(doc: KnowledgeDocument) {
+  if (isGlobalManager.value) return true
+  if (isDeptManager.value && doc.departmentId === auth.currentUser?.departmentId) return true
+  return false
+}
 
 // Dialogs
 const documentEditorOpen = ref(false)
@@ -62,7 +78,8 @@ const catForm = reactive<{
 onMounted(async () => {
   await Promise.all([
     docStore.loadCategories(),
-    docStore.loadDocuments()
+    docStore.loadDocuments(),
+    organization.loadOrganization()
   ])
 })
 
@@ -138,7 +155,7 @@ function openCreateDocument() {
   editingDocId.value = null
   docForm.title = ''
   docForm.categoryId = docStore.categories[0]?.id ?? ''
-  docForm.departmentId = ''
+  docForm.departmentId = isGlobalManager.value ? '' : (auth.currentUser?.departmentId ?? '')
   docForm.summary = ''
   docForm.content = ''
   docForm.tagsInput = ''
@@ -228,7 +245,7 @@ function openCreateCategory() {
   catForm.code = ''
   catForm.name = ''
   catForm.description = ''
-  catForm.departmentId = ''
+  catForm.departmentId = isGlobalManager.value ? '' : (auth.currentUser?.departmentId ?? '')
   catForm.sortOrder = 10
   categoryEditorOpen.value = true
 }
@@ -374,7 +391,10 @@ async function deleteCategory(cat: DocumentCategory) {
             :class="{ active: docStore.selectedCategoryId === cat.id }"
             @click="selectCategory(cat.id)"
           >
-            <span class="cat-name">📁 {{ cat.name }}</span>
+            <span class="cat-name">
+              📁 {{ cat.name }}
+              <small v-if="cat.departmentId" class="dept-tag">[{{ getDepartmentName(cat.departmentId) }}]</small>
+            </span>
             <span class="cat-count">{{ cat.documentCount }}</span>
           </li>
           <li v-if="!docStore.categories.length" class="empty-text">暂无分类</li>
@@ -432,6 +452,12 @@ async function deleteCategory(cat: DocumentCategory) {
           <div class="doc-card-header">
             <span class="cat-badge">{{ doc.categoryName }}</span>
             <span class="version-chip">v{{ doc.version }}.0</span>
+            <span v-if="doc.departmentId" class="scope-chip dept">
+              👥 {{ getDepartmentName(doc.departmentId) }}
+            </span>
+            <span v-else class="scope-chip public">
+              🏢 全公司
+            </span>
             <span v-if="doc.status === 'Draft'" class="status-badge draft">草稿</span>
             <span v-else-if="doc.status === 'Archived'" class="status-badge archived">已归档</span>
             <span v-if="doc.isMustRead && !doc.hasAcknowledged" class="ack-badge pending">
@@ -464,26 +490,27 @@ async function deleteCategory(cat: DocumentCategory) {
             <div class="doc-meta">
               <span class="doc-number">{{ doc.number }}</span>
               <span>发布于 {{ (doc.publishedAt || doc.createdAt).slice(0, 10) }}</span>
-              <span v-if="doc.departmentId" class="dept-scope">仅限指定部门</span>
+              <span v-if="doc.departmentId" class="dept-scope">适用范围：{{ getDepartmentName(doc.departmentId) }}专属</span>
+              <span v-else class="public-scope">适用范围：全公司通用</span>
             </div>
 
             <div class="doc-actions">
               <button
-                v-if="doc.status === 'Draft' && isManager"
+                v-if="doc.status === 'Draft' && canManageDoc(doc)"
                 class="secondary small-btn"
                 @click="openEditDocument(doc)"
               >
                 编辑草稿
               </button>
               <button
-                v-if="doc.status === 'Draft' && isManager"
+                v-if="doc.status === 'Draft' && canManageDoc(doc)"
                 class="small-btn"
                 @click="publishDraft(doc)"
               >
                 正式发布
               </button>
               <button
-                v-if="doc.status === 'Draft' && isManager"
+                v-if="doc.status === 'Draft' && canManageDoc(doc)"
                 class="danger-outline small-btn"
                 @click="deleteDraft(doc)"
               >
@@ -556,13 +583,15 @@ async function deleteCategory(cat: DocumentCategory) {
 
       <label class="dialog-field">
         适用部门
-        <select v-model="docForm.departmentId">
-          <option value="">全公司公开</option>
-          <option value="engineering">研发部</option>
-          <option value="finance">财务部</option>
-          <option value="hr">行政人事部</option>
-          <option value="sales">销售部</option>
+        <select v-model="docForm.departmentId" :disabled="!isGlobalManager && isDeptManager">
+          <option value="">全公司通用（全体在职员工）</option>
+          <option v-for="dept in organization.departments" :key="dept.id" :value="dept.id">
+            仅限 {{ dept.name }}
+          </option>
         </select>
+        <small v-if="!isGlobalManager && isDeptManager" class="hint-text">
+          您是部门文档管理员，编制的规章制度将归属于 {{ getDepartmentName(auth.currentUser?.departmentId) }}。
+        </small>
       </label>
     </div>
 
@@ -629,7 +658,7 @@ async function deleteCategory(cat: DocumentCategory) {
         <tr v-for="cat in docStore.categories" :key="cat.id">
           <td><strong>{{ cat.name }}</strong></td>
           <td><code>{{ cat.code }}</code></td>
-          <td>{{ cat.departmentId || '全公司' }}</td>
+          <td>{{ getDepartmentName(cat.departmentId) }}</td>
           <td>{{ cat.sortOrder }}</td>
           <td>{{ cat.documentCount }}</td>
           <td class="task-actions">
@@ -673,13 +702,15 @@ async function deleteCategory(cat: DocumentCategory) {
 
     <label class="dialog-field">
       适用部门
-      <select v-model="catForm.departmentId">
-        <option value="">全公司公开</option>
-        <option value="engineering">研发部</option>
-        <option value="finance">财务部</option>
-        <option value="hr">行政人事部</option>
-        <option value="sales">销售部</option>
+      <select v-model="catForm.departmentId" :disabled="!isGlobalManager && isDeptManager">
+        <option value="">全公司通用</option>
+        <option v-for="dept in organization.departments" :key="dept.id" :value="dept.id">
+          仅限 {{ dept.name }}
+        </option>
       </select>
+      <small v-if="!isGlobalManager && isDeptManager" class="hint-text">
+        您是部门文档管理员，创建的分类将归属于 {{ getDepartmentName(auth.currentUser?.departmentId) }}。
+      </small>
     </label>
 
     <label class="dialog-field">
@@ -1064,5 +1095,39 @@ async function deleteCategory(cat: DocumentCategory) {
   margin-bottom: 12px;
   display: flex;
   justify-content: flex-end;
+}
+
+.dept-tag {
+  color: #fa8c16;
+  font-size: 11px;
+  margin-left: 4px;
+}
+
+.scope-chip {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.scope-chip.dept {
+  background: #fff7e6;
+  color: #d46b08;
+  border: 1px solid #ffd591;
+}
+
+.scope-chip.public {
+  background: #e6f7ff;
+  color: #096dd9;
+  border: 1px solid #91d5ff;
+}
+
+.public-scope {
+  color: #1890ff;
+}
+
+.hint-text {
+  color: #8c8c8c;
+  font-size: 12px;
+  margin-top: 4px;
 }
 </style>

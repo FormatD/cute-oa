@@ -1,4 +1,4 @@
-export type Employee = { id: string; name: string; role: string; departmentName: string; roles?: string[]; permissions?: string[]; positionId?: string | null; positionName?: string | null }
+export type Employee = { id: string; name: string; role: string; departmentId?: string; departmentName: string; roles?: string[]; permissions?: string[]; positionId?: string | null; positionName?: string | null }
 export type LoginSession = { accessToken: string; expiresAt: string; user: Employee }
 export type LoginChallengeState = 'PASSWORD_CHANGE_REQUIRED' | 'MFA_REQUIRED' | 'MFA_SETUP_REQUIRED'
 export type LoginResult = { status: 'AUTHENTICATED'; session: LoginSession } | { status: LoginChallengeState; challengeToken: string; challengeExpiresAt: string }

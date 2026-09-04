@@ -1715,6 +1715,100 @@ await using (var writeDb = new OaDbContext(options))
     if (!tempDraft.IsSuccess || !docService.DeleteDraft(hr, tempDraft.Value!.Id).IsSuccess)
         throw new InvalidOperationException("临时草稿删除失败。");
 
+    // 11. Department Isolation Tests
+    var engManager = data.GetEmployee("u-li");
+    var finEmployee = data.GetEmployee("u-chen");
+    var finManager = data.GetEmployee("u-lin");
+
+    // 11.1 Department Category isolation
+    var engCatResult = docService.SaveCategory(engManager, new SaveCategoryRequest("TECH_GUIDE_PG", "研发专属技术规范", "研发部内部技术规范", null, "engineering", 20));
+    if (!engCatResult.IsSuccess) throw new InvalidOperationException("研发部负责人创建部门分类失败：" + engCatResult.Error);
+    var engCatId = engCatResult.Value!.Id;
+
+    var crossDeptCat = docService.SaveCategory(engManager, new SaveCategoryRequest("FIN_GUIDE_PG", "财务专属规范", "试图为财务创建", null, "finance", 20));
+    if (crossDeptCat.Code != "AUTH_002") throw new InvalidOperationException("部门负责人跨部门创建分类未被拒绝。");
+
+    var globalCatByDept = docService.SaveCategory(engManager, new SaveCategoryRequest("CORP_SYS_PG", "公司级通用分类", "试图创建公司级分类", null, null, 20));
+    if (globalCatByDept.Code != "AUTH_002") throw new InvalidOperationException("部门负责人越权创建公司级全局分类未被拒绝。");
+
+    // Finance employee should not see engineering category
+    var finCatList = docService.ListCategories(finEmployee);
+    if (finCatList.Value!.Any(c => c.Id == engCatId))
+        throw new InvalidOperationException("财务员工看到了研发部专属保密分类。");
+
+    // Engineering employee should see engineering category
+    var engCatList = docService.ListCategories(employee);
+    if (!engCatList.Value!.Any(c => c.Id == engCatId))
+        throw new InvalidOperationException("研发员工未能看到研发部专属分类。");
+
+    // 11.2 Department Document creation isolation
+    var engDocResult = docService.CreateDraft(engManager, new SaveDocumentRequest(
+        "研发部核心代码安全与密钥管理规范", engCatId, "规范研发部核心代码、生产环境私钥与证书保管规则。",
+        "### 第一条 密钥红线\n生产私钥严禁提交至公共仓库。\n\n### 第二条 访问控制\n核心仓库仅研发部成员可读写。",
+        ["研发", "密钥", "机密"], true, "engineering", today, null, []));
+    if (!engDocResult.IsSuccess || engDocResult.Value!.Status != DocumentStatus.Draft)
+        throw new InvalidOperationException("研发负责人编制部门制度草稿失败：" + engDocResult.Error);
+    var engDocId = engDocResult.Value!.Id;
+
+    var crossDeptDoc = docService.CreateDraft(engManager, new SaveDocumentRequest(
+        "财务凭证审计指引", engCatId, "试图为财务编制", "正文", [], false, "finance", today, null, []));
+    if (crossDeptDoc.Code != "AUTH_002") throw new InvalidOperationException("部门负责人跨部门编制草稿未被拒绝。");
+
+    var corpDocByDept = docService.CreateDraft(engManager, new SaveDocumentRequest(
+        "公司级考勤规范", engCatId, "试图编制全公司规范", "正文", [], false, null, today, null, []));
+    if (corpDocByDept.Code != "AUTH_002") throw new InvalidOperationException("部门负责人越权编制公司通用制度未被拒绝。");
+
+    // Publish engineering department document
+    var publishEngDoc = docService.PublishDocument(engManager, engDocId);
+    if (!publishEngDoc.IsSuccess || publishEngDoc.Value!.Status != DocumentStatus.Published)
+        throw new InvalidOperationException("研发负责人发布本部门制度失败：" + publishEngDoc.Error);
+
+    // 11.3 Cross-department viewing & access isolation
+    var crossViewDoc = docService.GetDocument(finEmployee, engDocId);
+    if (crossViewDoc.Code != "DOC_003")
+        throw new InvalidOperationException("财务员工越权查阅了研发部专属保密制度。");
+
+    var finDocList = docService.ListDocuments(finEmployee, keyword: "核心代码安全");
+    if (finDocList.Value!.Items.Any(d => d.Id == engDocId))
+        throw new InvalidOperationException("财务员工列表检索到了研发部专属保密制度。");
+
+    var crossRevise = docService.ReviseDocument(finManager, engDocId, new ReviseDocumentRequest(1, "篡改研发标题", "摘要", "正文", "越权修改", []));
+    if (crossRevise.Code != "AUTH_002")
+        throw new InvalidOperationException("财务经理跨部门修订研发制度未被拒绝。");
+
+    var crossArchive = docService.ArchiveDocument(finManager, engDocId);
+    if (crossArchive.Code != "AUTH_002")
+        throw new InvalidOperationException("财务经理跨部门归档研发制度未被拒绝。");
+
+    // 11.4 Department must-read & acknowledgement isolation
+    var finPendingList = docService.ListDocuments(finEmployee, mustReadOnly: true, pendingAckOnly: true);
+    if (finPendingList.Value!.Items.Any(d => d.Id == engDocId))
+        throw new InvalidOperationException("研发部专属必读制度错误出现在财务员工待签署列表中。");
+
+    var crossAck = docService.AcknowledgeDocument(finEmployee, engDocId, "192.168.2.1");
+    if (crossAck.Code != "AUTH_002")
+        throw new InvalidOperationException("非本部门员工签署部门专属制度未被拒绝。");
+
+    var engPendingList = docService.ListDocuments(employee, mustReadOnly: true, pendingAckOnly: true);
+    if (!engPendingList.Value!.Items.Any(d => d.Id == engDocId))
+        throw new InvalidOperationException("研发部员工待签署列表中未包含本部门专属必读制度。");
+
+    var engAck = docService.AcknowledgeDocument(employee, engDocId, "192.168.1.100");
+    if (!engAck.IsSuccess || engAck.Value!.UserId != employee.Id)
+        throw new InvalidOperationException("研发员工签署本部门必读制度失败：" + engAck.Error);
+
+    var engStats = docService.GetAcknowledgementStats(engManager, engDocId);
+    if (!engStats.IsSuccess)
+        throw new InvalidOperationException("研发负责人查看本部门制度签收看板失败：" + engStats.Error);
+
+    var crossStats = docService.GetAcknowledgementStats(finManager, engDocId);
+    if (crossStats.Code != "AUTH_002")
+        throw new InvalidOperationException("财务经理跨部门查看研发部制度签收看板未被拒绝。");
+
+    var globalStats = docService.GetAcknowledgementStats(hr, engDocId);
+    if (!globalStats.IsSuccess)
+        throw new InvalidOperationException("全局管理员查看部门制度签收看板失败：" + globalStats.Error);
+
     var idempotency = new IdempotencyService(writeDb);
     idempotency.Store(employee.Id, "POST:/api/v1/leave-requests", idempotencyKey, 201, "{\"id\":\"cached\"}");
     if (idempotency.Find(employee.Id, "POST:/api/v1/leave-requests", idempotencyKey) is not { StatusCode: 201 })

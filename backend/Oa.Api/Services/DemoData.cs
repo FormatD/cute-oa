@@ -5,7 +5,7 @@ namespace Oa.Api.Services;
 
 public sealed record Department(string Id, string Name, string? ParentId);
 public sealed record Employee(string Id, string Name, string Role, string DepartmentId, string DepartmentName, string? ManagerId, int CumulativeWorkYears, string Status, IReadOnlyList<string>? Roles = null, IReadOnlyList<string>? Permissions = null, string? PositionId = null, string? PositionName = null);
-public sealed record UserProfile(string Id, string Name, string Role, string DepartmentName, IReadOnlyList<string>? Roles = null, IReadOnlyList<string>? Permissions = null);
+public sealed record UserProfile(string Id, string Name, string Role, string DepartmentName, IReadOnlyList<string>? Roles = null, IReadOnlyList<string>? Permissions = null, string? DepartmentId = null);
 public sealed record DirectoryEmployee(string Id, string Name, string Role, string DepartmentId, string DepartmentName, string? ManagerName, string? PositionId = null, string? PositionName = null);
 
 public sealed class DemoData
@@ -68,7 +68,7 @@ public sealed class DemoData
         return false;
     }
 
-    public UserProfile ToProfile(Employee employee) => new(employee.Id, employee.Name, employee.Role, employee.DepartmentName, employee.Roles ?? [employee.Role], employee.Permissions ?? []);
+    public UserProfile ToProfile(Employee employee) => new(employee.Id, employee.Name, employee.Role, employee.DepartmentName, employee.Roles ?? [employee.Role], employee.Permissions ?? [], employee.DepartmentId);
     public IReadOnlyList<DirectoryEmployee> DirectoryEmployees => ActiveEmployees.Select(item => new DirectoryEmployee(item.Id, item.Name, item.Role, item.DepartmentId, item.DepartmentName, item.ManagerId is null ? null : FindEmployee(item.ManagerId)?.Name, item.PositionId, item.PositionName)).ToList();
     public bool CanView(Employee actor, Employee subject, string resourceType)
     {
@@ -85,11 +85,66 @@ public sealed class DemoData
 
     public string EffectiveDataScope(Employee actor, string resourceType)
     {
-        var requiredPermission = resourceType switch { "Leave" => OaPermissions.LeaveScopeView, "Travel" => OaPermissions.TravelScopeView, "Personnel" => OaPermissions.PersonnelScopeView, "Attendance" => OaPermissions.AttendanceScopeView, "Contract" => OaPermissions.ContractScopeView, "Purchase" => OaPermissions.PurchaseScopeView, "Seal" => OaPermissions.SealScopeView, _ => OaPermissions.ExpenseScopeView };
+        var requiredPermission = resourceType switch
+        {
+            "Leave" => OaPermissions.LeaveScopeView,
+            "Travel" => OaPermissions.TravelScopeView,
+            "Personnel" => OaPermissions.PersonnelScopeView,
+            "Attendance" => OaPermissions.AttendanceScopeView,
+            "Contract" => OaPermissions.ContractScopeView,
+            "Purchase" => OaPermissions.PurchaseScopeView,
+            "Seal" => OaPermissions.SealScopeView,
+            "Document" => OaPermissions.DocumentScopeView,
+            _ => OaPermissions.ExpenseScopeView
+        };
         var roles = actor.Roles ?? [actor.Role];
-        var eligibleScopes = roles.Where(role => rolePermissions.GetValueOrDefault(role)?.Contains(requiredPermission) == true || resourceType == "Expense" && rolePermissions.GetValueOrDefault(role)?.Contains(OaPermissions.ExpenseAllView) == true)
+        var eligibleScopes = roles.Where(role =>
+            rolePermissions.GetValueOrDefault(role)?.Contains(requiredPermission) == true
+            || resourceType == "Expense" && rolePermissions.GetValueOrDefault(role)?.Contains(OaPermissions.ExpenseAllView) == true
+            || resourceType == "Document" && (rolePermissions.GetValueOrDefault(role)?.Contains(OaPermissions.DocumentManage) == true || rolePermissions.GetValueOrDefault(role)?.Contains(OaPermissions.DocumentDeptManage) == true))
             .Select(role => roleDataScopes.GetValueOrDefault(role)?.GetValueOrDefault(resourceType) ?? OaDataScopes.Self);
         return eligibleScopes.OrderByDescending(ScopeRank).FirstOrDefault() ?? OaDataScopes.Self;
+    }
+
+    public bool CanAccessDepartmentDocument(Employee actor, string? docDepartmentId)
+    {
+        if (string.IsNullOrWhiteSpace(docDepartmentId)) return true;
+        if (HasPermission(actor, OaPermissions.DocumentManage))
+        {
+            var scope = EffectiveDataScope(actor, "Document");
+            if (scope == OaDataScopes.Company) return true;
+        }
+        if (actor.DepartmentId == docDepartmentId) return true;
+        var effectiveScope = EffectiveDataScope(actor, "Document");
+        return effectiveScope switch
+        {
+            OaDataScopes.Company => true,
+            OaDataScopes.Department => actor.DepartmentId == docDepartmentId,
+            OaDataScopes.DepartmentAndChildren => IsDepartmentWithin(docDepartmentId, actor.DepartmentId),
+            _ => actor.DepartmentId == docDepartmentId
+        };
+    }
+
+    public bool CanManageDepartmentDocument(Employee actor, string? docDepartmentId)
+    {
+        var hasGlobalManage = HasPermission(actor, OaPermissions.DocumentManage);
+        var hasDeptManage = HasPermission(actor, OaPermissions.DocumentDeptManage);
+        if (!hasGlobalManage && !hasDeptManage) return false;
+
+        var scope = EffectiveDataScope(actor, "Document");
+        if (scope == OaDataScopes.Company || (hasGlobalManage && string.IsNullOrWhiteSpace(docDepartmentId)))
+            return true;
+
+        if (string.IsNullOrWhiteSpace(docDepartmentId))
+            return false;
+
+        return scope switch
+        {
+            OaDataScopes.Company => true,
+            OaDataScopes.Department => actor.DepartmentId == docDepartmentId,
+            OaDataScopes.DepartmentAndChildren => IsDepartmentWithin(docDepartmentId, actor.DepartmentId),
+            _ => hasDeptManage && actor.DepartmentId == docDepartmentId
+        };
     }
 
     private bool IsManagerOf(string managerId, Employee employee)

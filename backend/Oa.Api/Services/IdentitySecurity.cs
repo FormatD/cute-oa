@@ -29,9 +29,11 @@ public static class OaPermissions
     public const string PurchaseManage = "PURCHASE_MANAGE";
     public const string SealScopeView = "SEAL_SCOPE_VIEW";
     public const string SealManage = "SEAL_MANAGE";
+    public const string DocumentScopeView = "DOCUMENT_SCOPE_VIEW";
+    public const string DocumentDeptManage = "DOCUMENT_DEPT_MANAGE";
     public const string DocumentManage = "DOCUMENT_MANAGE";
 
-    public static IReadOnlyList<string> All { get; } = [UserManage, ProcessManage, AuditView, CalendarManage, ExpensePay, ExpenseAllView, LeaveScopeView, ExpenseScopeView, OrgManage, AnnouncementManage, TravelScopeView, PersonnelScopeView, PersonnelExport, PersonnelManage, AttendanceScopeView, AttendanceManage, ContractScopeView, ContractManage, PurchaseScopeView, PurchaseManage, SealScopeView, SealManage, DocumentManage];
+    public static IReadOnlyList<string> All { get; } = [UserManage, ProcessManage, AuditView, CalendarManage, ExpensePay, ExpenseAllView, LeaveScopeView, ExpenseScopeView, OrgManage, AnnouncementManage, TravelScopeView, PersonnelScopeView, PersonnelExport, PersonnelManage, AttendanceScopeView, AttendanceManage, ContractScopeView, ContractManage, PurchaseScopeView, PurchaseManage, SealScopeView, SealManage, DocumentScopeView, DocumentDeptManage, DocumentManage];
     public static IReadOnlyList<PermissionView> Definitions { get; } =
     [
         new(UserManage, "用户管理", "维护用户、账号、角色和权限配置"),
@@ -56,7 +58,9 @@ public static class OaPermissions
         new(PurchaseManage, "采购执行", "登记采购下单并代为验收"),
         new(SealScopeView, "用章范围查看", "按角色配置的数据范围查看他人用章申请"),
         new(SealManage, "印章管理", "执行在司用印登记、外借出库与归还核验"),
-        new(DocumentManage, "知识库管理", "维护目录分类、发布制度、修订版本、归档文档与查看全员签收看板")
+        new(DocumentScopeView, "知识库范围查看", "按角色配置的数据范围查看跨部门文档及签收记录"),
+        new(DocumentDeptManage, "部门文档管理", "维护所属部门目录、编制发布部门专属规章制度、修订部门文档及查看部门签收进度"),
+        new(DocumentManage, "知识库全局管理", "维护全公司与各部门目录分类、发布/修订/归档文档与查看全员签收看板")
     ];
 }
 
@@ -67,7 +71,7 @@ public static class OaDataScopes
     public const string DepartmentAndChildren = "DEPARTMENT_AND_CHILDREN";
     public const string Company = "COMPANY";
     public static IReadOnlyList<string> All { get; } = [Self, Department, DepartmentAndChildren, Company];
-    public static IReadOnlyList<string> ResourceTypes { get; } = ["Leave", "Expense", "Travel", "Personnel", "Attendance", "Contract", "Purchase", "Seal"];
+    public static IReadOnlyList<string> ResourceTypes { get; } = ["Leave", "Expense", "Travel", "Personnel", "Attendance", "Contract", "Purchase", "Seal", "Document"];
 }
 
 public static class IdentityDefaults
@@ -125,11 +129,11 @@ public static class IdentityDefaults
     public static IReadOnlyDictionary<string, IReadOnlyList<string>> RolePermissions { get; } = new Dictionary<string, IReadOnlyList<string>>
     {
         ["员工"] = [],
-        ["部门负责人"] = [],
+        ["部门负责人"] = [OaPermissions.DocumentDeptManage, OaPermissions.DocumentScopeView],
         ["总经理"] = [],
         ["财务专员"] = [OaPermissions.ExpensePay, OaPermissions.ExpenseAllView, OaPermissions.ExpenseScopeView],
-        ["财务经理"] = [OaPermissions.ExpensePay, OaPermissions.ExpenseAllView, OaPermissions.ExpenseScopeView],
-        ["HR/行政"] = [OaPermissions.CalendarManage, OaPermissions.AnnouncementManage, OaPermissions.PersonnelScopeView, OaPermissions.PersonnelExport, OaPermissions.PersonnelManage, OaPermissions.AttendanceScopeView, OaPermissions.AttendanceManage, OaPermissions.ContractScopeView, OaPermissions.ContractManage, OaPermissions.SealScopeView, OaPermissions.SealManage, OaPermissions.DocumentManage],
+        ["财务经理"] = [OaPermissions.ExpensePay, OaPermissions.ExpenseAllView, OaPermissions.ExpenseScopeView, OaPermissions.DocumentDeptManage, OaPermissions.DocumentScopeView],
+        ["HR/行政"] = [OaPermissions.CalendarManage, OaPermissions.AnnouncementManage, OaPermissions.PersonnelScopeView, OaPermissions.PersonnelExport, OaPermissions.PersonnelManage, OaPermissions.AttendanceScopeView, OaPermissions.AttendanceManage, OaPermissions.ContractScopeView, OaPermissions.ContractManage, OaPermissions.SealScopeView, OaPermissions.SealManage, OaPermissions.DocumentScopeView, OaPermissions.DocumentDeptManage, OaPermissions.DocumentManage],
         ["系统管理员"] = OaPermissions.All
     };
 
@@ -144,7 +148,8 @@ public static class IdentityDefaults
             ["Attendance"] = role is "HR/行政" or "系统管理员" ? OaDataScopes.Company : OaDataScopes.Self,
             ["Contract"] = role is "HR/行政" or "系统管理员" ? OaDataScopes.Company : OaDataScopes.Self,
             ["Purchase"] = role == "系统管理员" ? OaDataScopes.Company : OaDataScopes.Self,
-            ["Seal"] = role is "HR/行政" or "系统管理员" ? OaDataScopes.Company : OaDataScopes.Self
+            ["Seal"] = role is "HR/行政" or "系统管理员" ? OaDataScopes.Company : OaDataScopes.Self,
+            ["Document"] = role == "系统管理员" || role == "HR/行政" ? OaDataScopes.Company : role is "部门负责人" or "财务经理" ? OaDataScopes.Department : OaDataScopes.Self
         });
 }
 

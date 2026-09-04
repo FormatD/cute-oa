@@ -32,16 +32,26 @@ public sealed class KnowledgeDocumentService
 
     public ServiceResult<IReadOnlyList<DocumentCategoryView>> ListCategories(Employee actor)
     {
-        var isManager = _data.HasPermission(actor, OaPermissions.DocumentManage);
+        var hasGlobalManage = _data.HasPermission(actor, OaPermissions.DocumentManage) && _data.EffectiveDataScope(actor, "Document") == OaDataScopes.Company;
         var categories = _db.DocumentCategories.AsNoTracking()
             .Where(item => item.TenantId == TenantId)
             .OrderBy(item => item.SortOrder)
             .ThenBy(item => item.Name)
             .ToList();
 
-        var visible = categories.Where(c => isManager || c.DepartmentId == null || c.DepartmentId == actor.DepartmentId).ToList();
-        var counts = _db.KnowledgeDocuments.AsNoTracking()
-            .Where(item => item.TenantId == TenantId && (isManager || item.Status == (int)DocumentStatus.Published))
+        var visible = categories.Where(c => hasGlobalManage || _data.CanAccessDepartmentDocument(actor, c.DepartmentId)).ToList();
+        var allDocs = _db.KnowledgeDocuments.AsNoTracking()
+            .Where(item => item.TenantId == TenantId)
+            .ToList();
+
+        var authorizedDocs = allDocs.Where(d =>
+        {
+            if (!_data.CanAccessDepartmentDocument(actor, d.DepartmentId)) return false;
+            if (d.Status == (int)DocumentStatus.Published) return true;
+            return _data.CanManageDepartmentDocument(actor, d.DepartmentId);
+        });
+
+        var counts = authorizedDocs
             .GroupBy(item => item.CategoryId)
             .Select(g => new { CategoryId = g.Key, Count = g.Count() })
             .ToDictionary(k => k.CategoryId, v => v.Count);
@@ -62,8 +72,9 @@ public sealed class KnowledgeDocumentService
 
     public ServiceResult<DocumentCategoryView> SaveCategory(Employee actor, SaveCategoryRequest request, Guid? id = null)
     {
-        if (!_data.HasPermission(actor, OaPermissions.DocumentManage))
-            return ServiceResult<DocumentCategoryView>.Failure("无知识库管理权限。", "AUTH_002");
+        var deptId = string.IsNullOrWhiteSpace(request.DepartmentId) ? null : request.DepartmentId.Trim();
+        if (!_data.CanManageDepartmentDocument(actor, deptId))
+            return ServiceResult<DocumentCategoryView>.Failure(deptId is null ? "仅全公司管理员可创建公司通用分类。" : "无权为其他部门创建分类。", "AUTH_002");
 
         if (string.IsNullOrWhiteSpace(request.Code) || request.Code.Trim().Length > 64)
             return ServiceResult<DocumentCategoryView>.Failure("分类编码应为 1–64 个字符。", "DOC_001");
@@ -73,13 +84,15 @@ public sealed class KnowledgeDocumentService
         var code = request.Code.Trim().ToUpperInvariant();
         var name = request.Name.Trim();
         var desc = string.IsNullOrWhiteSpace(request.Description) ? null : request.Description.Trim();
-        var deptId = string.IsNullOrWhiteSpace(request.DepartmentId) ? null : request.DepartmentId.Trim();
 
         DocumentCategoryRecord record;
         if (id.HasValue && id.Value != Guid.Empty)
         {
             record = _db.DocumentCategories.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id.Value)!;
             if (record is null) return ServiceResult<DocumentCategoryView>.Failure("分类不存在。", "DOC_002");
+            if (!_data.CanManageDepartmentDocument(actor, record.DepartmentId) || !_data.CanManageDepartmentDocument(actor, deptId))
+                return ServiceResult<DocumentCategoryView>.Failure("无权维护该分类所属部门。", "AUTH_002");
+
             record.Name = name;
             record.Description = desc;
             record.ParentId = request.ParentId;
@@ -121,11 +134,11 @@ public sealed class KnowledgeDocumentService
 
     public ServiceResult<bool> DeleteCategory(Employee actor, Guid id)
     {
-        if (!_data.HasPermission(actor, OaPermissions.DocumentManage))
-            return ServiceResult<bool>.Failure("无知识库管理权限。", "AUTH_002");
-
         var record = _db.DocumentCategories.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null) return ServiceResult<bool>.Failure("分类不存在。", "DOC_002");
+
+        if (!_data.CanManageDepartmentDocument(actor, record.DepartmentId))
+            return ServiceResult<bool>.Failure("无权删除该部门分类。", "AUTH_002");
 
         if (_db.KnowledgeDocuments.Any(item => item.TenantId == TenantId && item.CategoryId == id))
             return ServiceResult<bool>.Failure("该分类下存在文档，不能删除。", "DOC_002");
@@ -151,13 +164,33 @@ public sealed class KnowledgeDocumentService
         int page = 1,
         int pageSize = 20)
     {
-        var isManager = _data.HasPermission(actor, OaPermissions.DocumentManage);
+        var hasGlobalManage = _data.HasPermission(actor, OaPermissions.DocumentManage) && _data.EffectiveDataScope(actor, "Document") == OaDataScopes.Company;
         var query = _db.KnowledgeDocuments.AsNoTracking().Where(item => item.TenantId == TenantId);
 
-        if (!isManager)
+        if (!hasGlobalManage)
         {
-            query = query.Where(item => item.Status == (int)DocumentStatus.Published
-                && (item.DepartmentId == null || item.DepartmentId == actor.DepartmentId));
+            var actorDept = actor.DepartmentId;
+            var canManageOwnDept = _data.CanManageDepartmentDocument(actor, actorDept);
+            if (canManageOwnDept)
+            {
+                if (status.HasValue)
+                {
+                    query = query.Where(item =>
+                        (item.DepartmentId == actorDept && item.Status == (int)status.Value) ||
+                        (item.DepartmentId == null && item.Status == (int)DocumentStatus.Published && (int)status.Value == (int)DocumentStatus.Published));
+                }
+                else
+                {
+                    query = query.Where(item =>
+                        item.DepartmentId == actorDept ||
+                        (item.DepartmentId == null && item.Status == (int)DocumentStatus.Published));
+                }
+            }
+            else
+            {
+                query = query.Where(item => item.Status == (int)DocumentStatus.Published
+                    && (item.DepartmentId == null || item.DepartmentId == actorDept));
+            }
         }
         else if (status.HasValue)
         {
@@ -196,7 +229,11 @@ public sealed class KnowledgeDocumentService
                 .Where(a => a.TenantId == TenantId && a.UserId == actor.Id)
                 .Select(a => a.DocumentId)
                 .ToHashSet();
-            query = query.Where(item => item.IsMustRead && !acknowledgedDocIds.Contains(item.Id));
+            query = query.Where(item => item.IsMustRead && item.Status == (int)DocumentStatus.Published && !acknowledgedDocIds.Contains(item.Id));
+            if (!hasGlobalManage)
+            {
+                query = query.Where(item => item.DepartmentId == null || item.DepartmentId == actor.DepartmentId);
+            }
         }
 
         var total = query.Count();
@@ -234,14 +271,13 @@ public sealed class KnowledgeDocumentService
         var doc = _db.KnowledgeDocuments.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (doc is null) return ServiceResult<KnowledgeDocumentView>.Failure("文档不存在。", "DOC_003");
 
-        var isManager = _data.HasPermission(actor, OaPermissions.DocumentManage);
-        if (!isManager)
-        {
-            if (doc.Status != (int)DocumentStatus.Published)
-                return ServiceResult<KnowledgeDocumentView>.Failure("文档未发布或已归档。", "DOC_003");
-            if (doc.DepartmentId != null && doc.DepartmentId != actor.DepartmentId)
-                return ServiceResult<KnowledgeDocumentView>.Failure("文档仅限指定部门查阅。", "DOC_003");
-        }
+        var canAccess = _data.CanAccessDepartmentDocument(actor, doc.DepartmentId);
+        if (!canAccess)
+            return ServiceResult<KnowledgeDocumentView>.Failure("文档仅限指定部门查阅。", "DOC_003");
+
+        var canManage = _data.CanManageDepartmentDocument(actor, doc.DepartmentId);
+        if (!canManage && doc.Status != (int)DocumentStatus.Published)
+            return ServiceResult<KnowledgeDocumentView>.Failure("文档未发布或已归档。", "DOC_003");
 
         // Increment view count
         doc.ViewCount++;
@@ -258,14 +294,18 @@ public sealed class KnowledgeDocumentService
 
     public ServiceResult<KnowledgeDocumentView> CreateDraft(Employee actor, SaveDocumentRequest request)
     {
-        if (!_data.HasPermission(actor, OaPermissions.DocumentManage))
-            return ServiceResult<KnowledgeDocumentView>.Failure("无知识库管理权限。", "AUTH_002");
+        var deptId = string.IsNullOrWhiteSpace(request.DepartmentId) ? null : request.DepartmentId.Trim();
+        if (!_data.CanManageDepartmentDocument(actor, deptId))
+            return ServiceResult<KnowledgeDocumentView>.Failure(
+                deptId is null ? "仅全公司管理员可编制公司级通用制度。" : "无权为其他部门编制制度文档。", "AUTH_002");
 
         var validation = ValidateInput(request);
         if (!validation.IsSuccess) return ServiceResult<KnowledgeDocumentView>.Failure(validation.Error!, validation.Code ?? "DOC_001");
 
         var category = _db.DocumentCategories.SingleOrDefault(c => c.TenantId == TenantId && c.Id == request.CategoryId);
         if (category is null) return ServiceResult<KnowledgeDocumentView>.Failure("指定分类不存在。", "DOC_002");
+        if (category.DepartmentId != null && category.DepartmentId != deptId)
+            return ServiceResult<KnowledgeDocumentView>.Failure("文档所属部门必须与分类部门一致。", "DOC_001");
 
         var attachments = NormalizeAttachments(actor, request.Attachments);
         if (attachments is null) return ServiceResult<KnowledgeDocumentView>.Failure("包含无效或越权附件。", "FILE_005");
@@ -286,7 +326,7 @@ public sealed class KnowledgeDocumentService
             Version = 1,
             Status = (int)DocumentStatus.Draft,
             IsMustRead = request.IsMustRead,
-            DepartmentId = string.IsNullOrWhiteSpace(request.DepartmentId) ? null : request.DepartmentId.Trim(),
+            DepartmentId = deptId,
             EffectiveDate = request.EffectiveDate,
             ExpiryDate = request.ExpiryDate,
             AttachmentsJson = JsonSerializer.Serialize(attachments),
@@ -305,19 +345,22 @@ public sealed class KnowledgeDocumentService
 
     public ServiceResult<KnowledgeDocumentView> UpdateDraft(Employee actor, Guid id, SaveDocumentRequest request)
     {
-        if (!_data.HasPermission(actor, OaPermissions.DocumentManage))
-            return ServiceResult<KnowledgeDocumentView>.Failure("无知识库管理权限。", "AUTH_002");
-
         var record = _db.KnowledgeDocuments.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null) return ServiceResult<KnowledgeDocumentView>.Failure("文档不存在。", "DOC_003");
         if (record.Status != (int)DocumentStatus.Draft)
             return ServiceResult<KnowledgeDocumentView>.Failure("仅草稿状态文档可直接编辑，已发布文档请执行修订新版本。", "DOC_004");
+
+        var newDeptId = string.IsNullOrWhiteSpace(request.DepartmentId) ? null : request.DepartmentId.Trim();
+        if (!_data.CanManageDepartmentDocument(actor, record.DepartmentId) || !_data.CanManageDepartmentDocument(actor, newDeptId))
+            return ServiceResult<KnowledgeDocumentView>.Failure("无权维护该部门的文档。", "AUTH_002");
 
         var validation = ValidateInput(request);
         if (!validation.IsSuccess) return ServiceResult<KnowledgeDocumentView>.Failure(validation.Error!, validation.Code ?? "DOC_001");
 
         var category = _db.DocumentCategories.SingleOrDefault(c => c.TenantId == TenantId && c.Id == request.CategoryId);
         if (category is null) return ServiceResult<KnowledgeDocumentView>.Failure("指定分类不存在。", "DOC_002");
+        if (category.DepartmentId != null && category.DepartmentId != newDeptId)
+            return ServiceResult<KnowledgeDocumentView>.Failure("文档所属部门必须与分类部门一致。", "DOC_001");
 
         var attachments = NormalizeAttachments(actor, request.Attachments);
         if (attachments is null) return ServiceResult<KnowledgeDocumentView>.Failure("包含无效或越权附件。", "FILE_005");
@@ -330,7 +373,7 @@ public sealed class KnowledgeDocumentService
         record.Content = request.Content.Trim();
         record.TagsJson = JsonSerializer.Serialize(tags);
         record.IsMustRead = request.IsMustRead;
-        record.DepartmentId = string.IsNullOrWhiteSpace(request.DepartmentId) ? null : request.DepartmentId.Trim();
+        record.DepartmentId = newDeptId;
         record.EffectiveDate = request.EffectiveDate;
         record.ExpiryDate = request.ExpiryDate;
         record.AttachmentsJson = JsonSerializer.Serialize(attachments);
@@ -344,13 +387,13 @@ public sealed class KnowledgeDocumentService
 
     public ServiceResult<bool> DeleteDraft(Employee actor, Guid id)
     {
-        if (!_data.HasPermission(actor, OaPermissions.DocumentManage))
-            return ServiceResult<bool>.Failure("无知识库管理权限。", "AUTH_002");
-
         var record = _db.KnowledgeDocuments.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null) return ServiceResult<bool>.Failure("文档不存在。", "DOC_003");
         if (record.Status != (int)DocumentStatus.Draft)
             return ServiceResult<bool>.Failure("仅草稿状态文档可删除。", "DOC_004");
+
+        if (!_data.CanManageDepartmentDocument(actor, record.DepartmentId))
+            return ServiceResult<bool>.Failure("无权删除该部门的文档。", "AUTH_002");
 
         _db.KnowledgeDocuments.Remove(record);
         _db.SaveChanges();
@@ -360,13 +403,13 @@ public sealed class KnowledgeDocumentService
 
     public ServiceResult<KnowledgeDocumentView> PublishDocument(Employee actor, Guid id)
     {
-        if (!_data.HasPermission(actor, OaPermissions.DocumentManage))
-            return ServiceResult<KnowledgeDocumentView>.Failure("无知识库管理权限。", "AUTH_002");
-
         var record = _db.KnowledgeDocuments.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null) return ServiceResult<KnowledgeDocumentView>.Failure("文档不存在。", "DOC_003");
         if (record.Status != (int)DocumentStatus.Draft)
             return ServiceResult<KnowledgeDocumentView>.Failure("仅草稿状态文档可执行发布。", "DOC_004");
+
+        if (!_data.CanManageDepartmentDocument(actor, record.DepartmentId))
+            return ServiceResult<KnowledgeDocumentView>.Failure("无权发布该部门的文档。", "AUTH_002");
 
         var now = DateTimeOffset.UtcNow;
         record.Status = (int)DocumentStatus.Published;
@@ -414,15 +457,15 @@ public sealed class KnowledgeDocumentService
 
     public ServiceResult<KnowledgeDocumentView> ReviseDocument(Employee actor, Guid id, ReviseDocumentRequest request)
     {
-        if (!_data.HasPermission(actor, OaPermissions.DocumentManage))
-            return ServiceResult<KnowledgeDocumentView>.Failure("无知识库管理权限。", "AUTH_002");
-
         var record = _db.KnowledgeDocuments.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null) return ServiceResult<KnowledgeDocumentView>.Failure("文档不存在。", "DOC_003");
         if (record.Status != (int)DocumentStatus.Published)
             return ServiceResult<KnowledgeDocumentView>.Failure("仅已发布文档可执行版本修订。", "DOC_004");
         if (record.Version != request.Version)
             return ServiceResult<KnowledgeDocumentView>.Failure("文档已被其他人更新，请刷新重试。", "CONCURRENCY_001");
+
+        if (!_data.CanManageDepartmentDocument(actor, record.DepartmentId))
+            return ServiceResult<KnowledgeDocumentView>.Failure("无权修订该部门的文档。", "AUTH_002");
 
         if (string.IsNullOrWhiteSpace(request.Title) || request.Title.Trim().Length > 100)
             return ServiceResult<KnowledgeDocumentView>.Failure("文档标题应为 1–100 个字符。", "DOC_001");
@@ -483,13 +526,13 @@ public sealed class KnowledgeDocumentService
 
     public ServiceResult<bool> ArchiveDocument(Employee actor, Guid id)
     {
-        if (!_data.HasPermission(actor, OaPermissions.DocumentManage))
-            return ServiceResult<bool>.Failure("无知识库管理权限。", "AUTH_002");
-
         var record = _db.KnowledgeDocuments.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null) return ServiceResult<bool>.Failure("文档不存在。", "DOC_003");
         if (record.Status != (int)DocumentStatus.Published)
             return ServiceResult<bool>.Failure("仅已发布文档可归档。", "DOC_004");
+
+        if (!_data.CanManageDepartmentDocument(actor, record.DepartmentId))
+            return ServiceResult<bool>.Failure("无权归档该部门的文档。", "AUTH_002");
 
         record.Status = (int)DocumentStatus.Archived;
         record.ArchivedAt = DateTimeOffset.UtcNow;
@@ -514,7 +557,7 @@ public sealed class KnowledgeDocumentService
         if (!record.IsMustRead)
             return ServiceResult<DocumentAcknowledgementView>.Failure("该文档未要求强制阅读确认。", "DOC_004");
 
-        if (record.DepartmentId != null && record.DepartmentId != actor.DepartmentId)
+        if (record.DepartmentId != null && !_data.CanAccessDepartmentDocument(actor, record.DepartmentId))
             return ServiceResult<DocumentAcknowledgementView>.Failure("您不在该制度的适用部门范围内。", "AUTH_002");
 
         // Check if already acknowledged for this exact version
@@ -556,9 +599,8 @@ public sealed class KnowledgeDocumentService
         var record = _db.KnowledgeDocuments.AsNoTracking().SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null) return ServiceResult<DocumentAcknowledgementStats>.Failure("文档不存在。", "DOC_003");
 
-        var isManager = _data.HasPermission(actor, OaPermissions.DocumentManage);
-        if (!isManager && actor.DepartmentId != record.DepartmentId)
-            return ServiceResult<DocumentAcknowledgementStats>.Failure("无权查看签收统计。", "AUTH_002");
+        if (!_data.CanManageDepartmentDocument(actor, record.DepartmentId))
+            return ServiceResult<DocumentAcknowledgementStats>.Failure("无权查看该部门文档的签署统计。", "AUTH_002");
 
         var targetEmployees = _data.ActiveEmployees
             .Where(e => record.DepartmentId == null || e.DepartmentId == record.DepartmentId)
@@ -593,8 +635,11 @@ public sealed class KnowledgeDocumentService
         var record = _db.KnowledgeDocuments.AsNoTracking().SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null) return ServiceResult<IReadOnlyList<DocumentVersionView>>.Failure("文档不存在。", "DOC_003");
 
-        var isManager = _data.HasPermission(actor, OaPermissions.DocumentManage);
-        if (!isManager && record.Status != (int)DocumentStatus.Published && record.Status != (int)DocumentStatus.Archived)
+        if (!_data.CanAccessDepartmentDocument(actor, record.DepartmentId))
+            return ServiceResult<IReadOnlyList<DocumentVersionView>>.Failure("文档不存在或无权访问。", "DOC_003");
+
+        var canManage = _data.CanManageDepartmentDocument(actor, record.DepartmentId);
+        if (!canManage && record.Status != (int)DocumentStatus.Published && record.Status != (int)DocumentStatus.Archived)
             return ServiceResult<IReadOnlyList<DocumentVersionView>>.Failure("无权查看版本历史。", "DOC_003");
 
         var versions = _db.DocumentVersions.AsNoTracking()
@@ -626,12 +671,12 @@ public sealed class KnowledgeDocumentService
         var record = _db.KnowledgeDocuments.AsNoTracking().SingleOrDefault(item => item.TenantId == TenantId && item.Id == documentId);
         if (record is null) return false;
 
-        var isManager = _data.HasPermission(actor, OaPermissions.DocumentManage);
-        if (!isManager)
-        {
-            if (record.Status != (int)DocumentStatus.Published) return false;
-            if (record.DepartmentId != null && record.DepartmentId != actor.DepartmentId) return false;
-        }
+        if (!_data.CanAccessDepartmentDocument(actor, record.DepartmentId))
+            return false;
+
+        var canManage = _data.CanManageDepartmentDocument(actor, record.DepartmentId);
+        if (!canManage && record.Status != (int)DocumentStatus.Published)
+            return false;
 
         var files = DeserializeList(record.AttachmentsJson);
         if (files.Contains(fileId.ToString()))
