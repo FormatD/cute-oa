@@ -218,7 +218,7 @@ const pendingAckChecked = computed({
 })
 
 // Document Create/Edit
-function openCreateDocument() {
+function resetDocForm() {
   editingDocId.value = null
   docForm.title = ''
   docForm.categoryId = docStore.categories[0]?.id ?? ''
@@ -230,7 +230,21 @@ function openCreateDocument() {
   docForm.effectiveDate = new Date().toISOString().slice(0, 10)
   docForm.expiryDate = ''
   docForm.attachments = []
+}
+
+function openCreateDocument() {
+  resetDocForm()
   documentEditorOpen.value = true
+}
+
+function closeDocumentEditor() {
+  const isDirty = Boolean(docForm.title.trim() || docForm.summary.trim() || docForm.content.trim())
+  if (isDirty) {
+    if (!confirm('当前制度文档内容尚未保存，确定要退出编辑吗？未保存的内容将丢失。')) {
+      return
+    }
+  }
+  documentEditorOpen.value = false
 }
 
 function openEditDocument(doc: KnowledgeDocument) {
@@ -289,6 +303,7 @@ async function submitDocument() {
 
   if (res) {
     documentEditorOpen.value = false
+    resetDocForm()
   }
 }
 
@@ -638,7 +653,9 @@ async function deleteCategory(cat: DocumentCategory) {
     description="编制完成后保存在草稿箱中，确认无误后可一键正式向全员或部门发布。"
     :submit-label="editingDocId ? '更新草稿' : '保存草稿'"
     :busy="docStore.loading"
-    @close="documentEditorOpen = false"
+    width="min(860px, 95vw)"
+    :mask-closable="false"
+    @close="closeDocumentEditor"
     @submit="submitDocument"
   >
     <label class="dialog-field">
@@ -711,6 +728,8 @@ async function deleteCategory(cat: DocumentCategory) {
     title="目录分类管理"
     description="管理企业知识库的组织结构层级与部门分类设置。"
     submit-label="关闭"
+    width="min(820px, 95vw)"
+    :mask-closable="false"
     @close="categoryManagerOpen = false"
     @submit="categoryManagerOpen = false"
   >
@@ -759,6 +778,7 @@ async function deleteCategory(cat: DocumentCategory) {
     :title="editingCatId ? '编辑分类组织结构' : '新增分类'"
     description="设置分类名称、编码、上级分类及适用部门。"
     submit-label="保存分类"
+    :mask-closable="false"
     @close="categoryEditorOpen = false"
     @submit="submitCategory"
   >

@@ -133,6 +133,20 @@ async function submitRevision() {
   }
 }
 
+function closeReviseDialog() {
+  const isDirty = Boolean(
+    reviseForm.title.trim() !== (doc.value?.title || '') ||
+    reviseForm.summary.trim() !== (doc.value?.summary || '') ||
+    reviseForm.content.trim() !== (doc.value?.content || '')
+  )
+  if (isDirty) {
+    if (!confirm('当前修订内容尚未发布保存，确定要退出编辑吗？未保存的内容将丢失。')) {
+      return
+    }
+  }
+  reviseDialogOpen.value = false
+}
+
 function openMoveCategoryDialog() {
   if (!doc.value) return
   targetCategoryId.value = doc.value.categoryId
@@ -488,7 +502,9 @@ async function archiveDocument() {
     description="发布新版本后，制度版本号将自动递增。如果为必读制度，将向员工发送新版本知晓提醒。"
     submit-label="正式发布新版本"
     :busy="docStore.loading"
-    @close="reviseDialogOpen = false"
+    width="min(860px, 95vw)"
+    :mask-closable="false"
+    @close="closeReviseDialog"
     @submit="submitRevision"
   >
     <label class="dialog-field">
@@ -519,6 +535,7 @@ async function archiveDocument() {
     description="将当前制度文档组织分类调整到指定分类目录中。"
     submit-label="确认调整分类"
     :busy="docStore.loading"
+    :mask-closable="false"
     @close="moveCategoryDialogOpen = false"
     @submit="submitMoveCategory"
   >
@@ -539,6 +556,7 @@ async function archiveDocument() {
     description="系统将基于目标历史版本的快照内容递增发布新版本，原有的全部修订历史将安全保留，并完整记录版本回退审计链条。"
     submit-label="确认回退并递增发布"
     :busy="docStore.loading"
+    :mask-closable="false"
     @close="rollbackDialogOpen = false"
     @submit="submitRollback"
   >
@@ -573,6 +591,8 @@ async function archiveDocument() {
     :title="diffResult ? `版本差异对比：v${diffResult.sourceVersion}.0 → v${diffResult.targetVersion}.0` : '版本差异对比'"
     description="对比两版本之间的元数据与正文逐行变动。"
     submit-label="关闭"
+    width="min(920px, 96vw)"
+    :mask-closable="false"
     @close="diffDialogOpen = false"
     @submit="diffDialogOpen = false"
   >
