@@ -95,3 +95,22 @@ button { cursor: pointer; }
 .mfa-instruction { margin: 0; color: #64748b; font-size: .78rem; line-height: 1.6; }.mfa-secret { display: block; overflow-wrap: anywhere; border: 1px dashed #9db8df; border-radius: 7px; padding: 12px; background: #f3f7fd; color: #245fae; font-size: .88rem; letter-spacing: .08em; text-align: center; }.mfa-app-link { display: block; border: 1px solid #d9e0ea; border-radius: 7px; padding: 10px 12px; background: #fff; color: #356bb7; font-size: .78rem; font-weight: 700; text-align: center; text-decoration: none; }.login-form > button.secondary { border: 1px solid #d9e0ea; background: #fff; color: #536176; }.recovery-code-panel { gap: 18px; }.recovery-code-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; padding: 0; list-style: none; }.recovery-code-list li { border: 1px solid #dde5f0; border-radius: 6px; padding: 8px; background: #f8fafc; text-align: center; }.recovery-code-list code { color: #334e75; font-size: .76rem; } @media (max-width: 420px) { .login-card { padding: 26px 22px; }.recovery-code-list { grid-template-columns: 1fr; } }
 .mfa-status-panel { display: flex; align-items: center; justify-content: space-between; gap: 24px; }.mfa-status-panel h2 { margin: 5px 0 7px; color: #2f3e55; font-size: 1rem; }.mfa-status-panel p:last-child { margin: 0; color: #718096; font-size: .78rem; }.mfa-status-values { display: grid; justify-items: end; gap: 6px; color: #69778c; font-size: .75rem; }.mfa-status-values em { border-radius: 99px; padding: 4px 8px; background: #e8f7ef; color: #278052; font-style: normal; }.mfa-status-values em.archived { background: #f1f3f6; color: #7f8a9a; }.mfa-status-values small { color: #98a3b3; } @media (max-width: 600px) { .mfa-status-panel { align-items: flex-start; flex-direction: column; }.mfa-status-values { justify-items: start; } }
 .mfa-admin-state { align-self: center; color: #278052; font-size: .78rem; font-weight: 700; }.password-reset button.danger-outline { border-color: #efb8b4; color: #c64c45; }
+.budget-summary-card { margin-bottom: 16px; padding: 16px; border: 1px solid #d8e5f8; border-radius: 8px; background: #f4f8fd; }
+.budget-summary-card h4 { margin: 0 0 10px; color: #23457a; font-size: 0.88rem; }
+.budget-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.budget-stat-grid > div { padding: 10px 12px; border-radius: 6px; background: #ffffff; border: 1px solid #e1ebf7; }
+.budget-stat-grid span { display: block; color: #69788f; font-size: 0.72rem; }
+.budget-stat-grid strong { display: block; margin-top: 4px; color: #1e355b; font-size: 0.95rem; }
+.warning-text { color: #d84d47 !important; }
+.reconciliation-board { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
+.recon-card { padding: 14px; border: 1px solid #dfe7f1; border-radius: 8px; background: #fbfcfe; }
+.recon-card span { display: block; color: #748197; font-size: 0.75rem; }
+.recon-card strong { display: block; margin-top: 5px; color: #27364e; font-size: 1.15rem; }
+.recon-card small { display: block; margin-top: 4px; font-size: 0.72rem; color: #288053; }
+.recon-card small.unaccepted { color: #d97706; }
+.invoice-badge { display: inline-block; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; background: #e0f2fe; color: #0369a1; }
+.invoice-badge.paid { background: #dcfce7; color: #15803d; }
+.invoice-badge.released { background: #f3f4f6; color: #6b7280; }
+.invoice-row { display: grid; grid-template-columns: 1.2fr 1fr 1.2fr 1fr 1fr 0.8fr 1fr auto; gap: 8px; align-items: center; margin-bottom: 8px; padding: 8px; background: #f8fafc; border-radius: 6px; border: 1px solid #e2e8f0; }
+.invoice-error { grid-column: 1 / -1; color: #dc2626; font-size: 0.75rem; margin-top: 2px; }
+@media (max-width: 800px) { .budget-stat-grid, .reconciliation-board { grid-template-columns: repeat(2, minmax(0, 1fr)); } .invoice-row { grid-template-columns: 1fr; } }

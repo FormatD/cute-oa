@@ -14,7 +14,8 @@ export const createExpenseApi = ({ request }: HttpClient) => ({
       description: form.description,
       travelRequestId: form.travelRequestId || null,
       copyRecipientIds: form.copyRecipientIds,
-      items: [{ expenseDate: form.expenseDate, category: form.category, amount: Number(form.amount), description: form.description, receiptNumber: form.receiptNumber || null, attachments: form.attachments }]
+      items: [{ expenseDate: form.expenseDate, category: form.category, amount: Number(form.amount), description: form.description, receiptNumber: form.receiptNumber || null, attachments: form.attachments }],
+      invoices: form.invoices ?? []
     })
   }),
   submitExpense: (id: string) => request<ExpenseClaim>(`/expense-claims/${id}/submit`, { method: 'POST', body: '{}' }),

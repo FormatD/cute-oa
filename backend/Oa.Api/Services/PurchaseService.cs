@@ -21,6 +21,8 @@ public sealed class PurchaseService
     private readonly IProcessRouter processRouter;
     private readonly FlowInstanceService flowInstances;
     private readonly FlowCopyService copyRecipients;
+    private readonly BudgetService budgetService;
+    private readonly PaymentService paymentService;
 
     public PurchaseService(
         DemoData data,
@@ -29,7 +31,9 @@ public sealed class PurchaseService
         FileService? files = null,
         IProcessRouter? processRouter = null,
         FlowInstanceService? flowInstances = null,
-        FlowCopyService? copyRecipients = null)
+        FlowCopyService? copyRecipients = null,
+        BudgetService? budgetService = null,
+        PaymentService? paymentService = null)
     {
         this.data = data;
         this.db = db;
@@ -38,6 +42,8 @@ public sealed class PurchaseService
         this.processRouter = processRouter ?? new DefaultProcessRouter(data);
         this.flowInstances = flowInstances ?? new FlowInstanceService(db);
         this.copyRecipients = copyRecipients ?? new FlowCopyService(data, db);
+        this.budgetService = budgetService ?? new BudgetService(data, db);
+        this.paymentService = paymentService ?? new PaymentService(data, db, this.budgetService, this.notifications, this.files);
     }
 
     public PagedResponse<PurchaseRequestListItem> List(Employee actor, DocumentListQuery query, int? requestedPage, int? requestedPageSize)
@@ -67,7 +73,7 @@ public sealed class PurchaseService
         var items = source.OrderByDescending(item => item.CreatedAt).ThenByDescending(item => item.Id)
             .Skip((page - 1) * pageSize).Take(pageSize)
             .Select(item => new PurchaseRequestListItem(item.Id, item.Number, item.ApplicantId, item.ApplicantName, item.DepartmentName,
-                item.Title, item.RequiredDate, item.ItemCount, item.EstimatedTotal, (PurchaseStatus)item.Status, item.Version, item.IsDemo, item.CreatedAt, item.UpdatedAt))
+                item.Title, item.RequiredDate, item.ItemCount, item.EstimatedTotal, (PurchaseStatus)item.Status, item.PaymentStatus, item.PaidTotalAmount, item.Version, item.IsDemo, item.CreatedAt, item.UpdatedAt))
             .ToList();
         return new PagedResponse<PurchaseRequestListItem>(items, total, page, pageSize, totalPages);
     }
@@ -170,6 +176,13 @@ public sealed class PurchaseService
         record.CurrentFlowInstanceId = instance.Id;
         record.Version++;
         record.UpdatedAt = DateTimeOffset.UtcNow;
+
+        // 预算预占
+        var reserveResult = budgetService.Reserve(TenantId, record.DepartmentName, null, record.EstimatedTotal, BusinessType, record.Id, record.Number, actor.Id, false);
+        if (!reserveResult.IsSuccess)
+            return ServiceResult<PurchaseRequest>.Failure(reserveResult.Error!, reserveResult.Code!);
+        record.BudgetPoolId = reserveResult.Value;
+
         Audit(actor, "PURCHASE_SUBMITTED", record, $"提交采购审批，预估金额 {record.EstimatedTotal:F2} 元");
         var first = route.Value.Approvers.First().Assignee;
         notifications.Enqueue(first.Id, "TODO_CREATED", "新增采购审批待办", $"{actor.Name} 提交了 {record.Number}", "PurchaseRequest", record.Id);
@@ -227,6 +240,7 @@ public sealed class PurchaseService
         instance.CompletedAt = DateTimeOffset.UtcNow;
         AddFlowAction(instance.Id, FlowActionType.Withdrawn, actor, comment: "申请人撤回");
         FlowInstanceService.UpdateTaskSla(db, instance.Id, FlowActionType.Withdrawn);
+        budgetService.Release(TenantId, record.BudgetPoolId, BusinessType, record.Id, record.Number, record.EstimatedTotal, actor.Id, "撤回采购申请释放预占预算");
         var copied = ActivateCopies(record, PurchaseStatus.Withdrawn.ToString());
         Audit(actor, "PURCHASE_WITHDRAWN", record, "撤回采购申请");
         foreach (var assignee in tasks.Select(item => item.AssigneeId).Distinct().Where(item => item != actor.Id))
@@ -241,9 +255,11 @@ public sealed class PurchaseService
         if (record is null) return ServiceResult<bool>.Failure("采购申请不存在或无权限。", "DATA_001");
         if ((PurchaseStatus)record.Status is not (PurchaseStatus.Draft or PurchaseStatus.Rejected or PurchaseStatus.Withdrawn))
             return ServiceResult<bool>.Failure("当前状态不允许删除。", "STATE_001");
+        budgetService.Release(TenantId, record.BudgetPoolId, BusinessType, record.Id, record.Number, record.EstimatedTotal, actor.Id, "删除采购申请释放预占预算");
         var instanceIds = db.FlowInstances.Where(item => item.TenantId == TenantId && item.BusinessType == BusinessType && item.BusinessId == id).Select(item => item.Id).ToList();
         db.FlowCopyRecipients.Where(item => item.TenantId == TenantId && item.BusinessType == BusinessType && item.BusinessId == id).ExecuteDelete();
         db.PurchaseTasks.Where(item => item.PurchaseRequestId == id).ExecuteDelete();
+        db.PaymentTransactions.Where(item => item.TenantId == TenantId && item.BusinessType == BusinessType && item.BusinessId == id).ExecuteDelete();
         db.FlowActions.Where(item => instanceIds.Contains(item.FlowInstanceId)).ExecuteDelete();
         db.FlowInstances.Where(item => instanceIds.Contains(item.Id)).ExecuteDelete();
         db.PurchaseRequests.Remove(record);
@@ -368,6 +384,7 @@ public sealed class PurchaseService
             purchase.Status = (int)PurchaseStatus.Rejected;
             instance.Status = (int)FlowInstanceStatus.Rejected;
             instance.CompletedAt = DateTimeOffset.UtcNow;
+            budgetService.Release(TenantId, purchase.BudgetPoolId, BusinessType, purchase.Id, purchase.Number, purchase.EstimatedTotal, actor.Id, $"驳回采购申请释放预占预算：{task.Comment}");
             notifications.Enqueue(purchase.ApplicantId, "PURCHASE_REJECTED", "采购申请已驳回", $"{purchase.Number} 已被驳回：{task.Comment}", "PurchaseRequest", purchase.Id);
         }
         else
@@ -483,7 +500,8 @@ public sealed class PurchaseService
             Title = record.Title, Purpose = record.Purpose, RequiredDate = record.RequiredDate, SuggestedSupplier = record.SuggestedSupplier,
             Items = JsonSerializer.Deserialize<List<PurchaseItem>>(record.ItemsJson) ?? [], EstimatedTotal = record.EstimatedTotal,
             Attachments = DeserializeList(record.AttachmentsJson), CopyRecipientIds = copyRecipients.LoadRecipientIds(BusinessType, record.Id),
-            Status = (PurchaseStatus)record.Status, Version = record.Version, IsDemo = record.IsDemo,
+            Status = (PurchaseStatus)record.Status, PaymentStatus = record.PaymentStatus, PaidTotalAmount = record.PaidTotalAmount, PrepaymentLimitRate = record.PrepaymentLimitRate, Version = record.Version, IsDemo = record.IsDemo,
+            BudgetPoolId = record.BudgetPoolId,
             ProcessDefinitionId = record.ProcessDefinitionId, ProcessDefinitionCode = record.ProcessDefinitionCode, ProcessDefinitionVersion = record.ProcessDefinitionVersion,
             CurrentFlowInstanceId = record.CurrentFlowInstanceId,
             ConfigVersionId = record.ConfigVersionId, ConfigVersionNumber = record.ConfigVersionNumber, ConfigSnapshotJson = record.ConfigSnapshotJson, ConfigResolvedAt = record.ConfigResolvedAt,
@@ -493,6 +511,43 @@ public sealed class PurchaseService
             Order = order is null ? null : new PurchaseOrder(order.Supplier, order.OrderNumber, order.ActualAmount, order.OrderDate, order.ExpectedDeliveryDate, order.Notes, DeserializeList(order.AttachmentsJson), order.CreatedBy, order.CreatedByName, order.CreatedAt),
             Receipt = receipt is null ? null : new PurchaseReceipt(receipt.ReceivedDate, receipt.Result, receipt.Notes, DeserializeList(receipt.AttachmentsJson), receipt.CreatedBy, receipt.CreatedByName, receipt.CreatedAt)
         };
+    }
+
+    public ServiceResult<PurchaseReconciliation> GetReconciliation(Employee actor, Guid id)
+    {
+        var record = db.PurchaseRequests.AsNoTracking().SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
+        if (record is null) return ServiceResult<PurchaseReconciliation>.Failure("采购申请不存在。", "DATA_001");
+        var subject = data.FindEmployee(record.ApplicantId);
+        var directlyRelated = db.PurchaseTasks.AsNoTracking().Any(item => item.TenantId == TenantId && item.PurchaseRequestId == id && item.AssigneeId == actor.Id) ||
+            copyRecipients.CanView(actor, BusinessType, id) ||
+            data.HasPermission(actor, OaPermissions.PurchaseManage) ||
+            data.HasPermission(actor, OaPermissions.ExpensePay);
+        if (subject is null || !data.CanView(actor, subject, BusinessType) && !directlyRelated)
+            return ServiceResult<PurchaseReconciliation>.Failure("无权查看该采购对账信息。", "AUTH_002");
+
+        var order = db.PurchaseOrders.AsNoTracking().SingleOrDefault(item => item.PurchaseRequestId == id);
+        var receipt = db.PurchaseReceipts.AsNoTracking().SingleOrDefault(item => item.PurchaseRequestId == id);
+        var isAccepted = receipt is not null && receipt.Result == "ALL_ACCEPTED";
+        var contractAmount = order?.ActualAmount ?? 0m;
+        var limitRate = record.PrepaymentLimitRate > 0 ? record.PrepaymentLimitRate : 0.50m;
+        var maxPrepayment = decimal.Round(contractAmount * limitRate, 2);
+        var payments = paymentService.GetPayments(actor, BusinessType, id);
+
+        var dto = new PurchaseReconciliation(
+            PurchaseRequestId: record.Id,
+            PurchaseRequestNumber: record.Number,
+            EstimatedAmount: record.EstimatedTotal,
+            OrderedAmount: contractAmount,
+            AcceptedAmount: isAccepted ? contractAmount : 0m,
+            PaidAmount: record.PaidTotalAmount,
+            RemainingPayable: Math.Max(0m, contractAmount - record.PaidTotalAmount),
+            PrepaymentLimitRate: limitRate,
+            MaxPrepaymentAllowed: maxPrepayment,
+            IsAcceptancePassed: isAccepted,
+            PaymentStatus: record.PaymentStatus,
+            Payments: payments);
+
+        return ServiceResult<PurchaseReconciliation>.Success(dto);
     }
 
     private ServiceResult<PurchaseRequest> SaveAndReload(PurchaseRequestRecord record, string concurrencyMessage, string? uniqueCode = null)

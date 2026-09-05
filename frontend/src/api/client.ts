@@ -18,12 +18,15 @@ import { createSystemApi } from './modules/system'
 import { createTravelApi } from './modules/travel'
 import { createWorkflowApi } from './modules/workflow'
 import { createWorkItemApi } from './modules/work-items'
+import { createBudgetApi } from './modules/budgets'
+import { createPaymentApi } from './modules/payments'
 
 function createApiClient(http: HttpClient) {
   return {
     announcements: createAnnouncementApi(http),
     attendance: createAttendanceApi(http),
     auth: createAuthApi(http),
+    budgets: createBudgetApi(http),
     businessConfigurations: createBusinessConfigurationApi(http),
     contracts: createContractApi(http),
     documents: createDocumentApi(http),
@@ -32,6 +35,7 @@ function createApiClient(http: HttpClient) {
     identity: createIdentityApi(http),
     leave: createLeaveApi(http),
     organization: createOrganizationApi(http),
+    payments: createPaymentApi(http),
     personnel: createPersonnelApi(http),
     purchase: createPurchaseApi(http),
     seal: createSealApi(http),

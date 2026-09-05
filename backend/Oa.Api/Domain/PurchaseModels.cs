@@ -81,9 +81,13 @@ public sealed class PurchaseRequest
     public string? SuggestedSupplier { get; init; }
     public IReadOnlyList<PurchaseItem> Items { get; init; } = [];
     public decimal EstimatedTotal { get; init; }
+    public Guid? BudgetPoolId { get; init; }
     public IReadOnlyList<string> Attachments { get; init; } = [];
     public IReadOnlyList<string> CopyRecipientIds { get; init; } = [];
     public PurchaseStatus Status { get; init; }
+    public string PaymentStatus { get; init; } = "UNPAID";
+    public decimal PaidTotalAmount { get; init; }
+    public decimal PrepaymentLimitRate { get; init; } = 0.50m;
     public int Version { get; init; }
     public bool IsDemo { get; init; }
     public Guid? ProcessDefinitionId { get; init; }
@@ -100,6 +104,7 @@ public sealed class PurchaseRequest
     public IReadOnlyList<FlowInstance> FlowInstances { get; init; } = [];
     public PurchaseOrder? Order { get; init; }
     public PurchaseReceipt? Receipt { get; init; }
+    public IReadOnlyList<PaymentTransaction> Payments { get; init; } = [];
 }
 
 public sealed record PurchaseRequestListItem(
@@ -113,6 +118,8 @@ public sealed record PurchaseRequestListItem(
     int ItemCount,
     decimal EstimatedTotal,
     PurchaseStatus Status,
+    string PaymentStatus,
+    decimal PaidTotalAmount,
     int Version,
     bool IsDemo,
     DateTimeOffset CreatedAt,

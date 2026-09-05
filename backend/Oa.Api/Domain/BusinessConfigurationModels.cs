@@ -156,6 +156,7 @@ public sealed class ExpenseCategoryPolicyConfig
 public sealed class ExpensePolicyConfig
 {
     public List<ExpenseCategoryPolicyConfig> Categories { get; set; } = [];
+    public bool BlockWhenExceeded { get; set; }
 }
 
 public sealed class TravelCityTierConfig

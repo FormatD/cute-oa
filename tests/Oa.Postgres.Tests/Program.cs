@@ -215,6 +215,13 @@ finally
     await dropSchema.ExecuteNonQueryAsync();
 }
 
+await using (var resetConnection = new NpgsqlConnection(connectionString))
+{
+    await resetConnection.OpenAsync();
+    await using var resetPublic = new NpgsqlCommand("DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;", resetConnection);
+    await resetPublic.ExecuteNonQueryAsync();
+}
+
 DemoData data;
 await using (var setup = new OaDbContext(options))
 {
@@ -2495,6 +2502,15 @@ await using (var performanceDb = new OaDbContext(performanceOptions))
         throw new InvalidOperationException("花名册关键字未按字面量处理 SQL LIKE 通配符，或空结果查询次数异常。");
 }
 
+await using (var performanceCleanupDb = new OaDbContext(options))
+{
+    var perfProfiles = performanceCleanupDb.PersonnelProfiles.Where(p => p.UserId.StartsWith("u-roster-perf-"));
+    performanceCleanupDb.PersonnelProfiles.RemoveRange(perfProfiles);
+    var perfUsers = performanceCleanupDb.Users.Where(u => u.Id.StartsWith("u-roster-perf-"));
+    performanceCleanupDb.Users.RemoveRange(perfUsers);
+    await performanceCleanupDb.SaveChangesAsync();
+}
+
 // --- Business Configuration Center PostgreSQL Integration Tests ---
 await using (var configDb = new OaDbContext(options))
 {
@@ -2658,6 +2674,256 @@ await using (var configDb = new OaDbContext(options))
     {
         throw new InvalidOperationException($"业务配置审计记录不完整，现有审计动作：{string.Join(", ", auditActions)}。");
     }
+}
+
+// -------------------------------------------------------------
+// P1-F4: PostgreSQL 费用预算与采购付款闭环持久化测试
+// -------------------------------------------------------------
+await using (var f4Db = new OaDbContext(options))
+{
+    var f4Data = new DemoData(f4Db);
+    var financeManager = f4Data.GetEmployee("u-lin");
+    var financeOfficer = f4Data.GetEmployee("u-chen");
+    var employee = f4Data.GetEmployee("u-zhang");
+    var administrator = f4Data.GetEmployee("u-admin");
+
+    var budgetService = new BudgetService(f4Data, f4Db);
+    var paymentService = new PaymentService(f4Data, f4Db, budgetService);
+    var expenseService = new ExpenseService(f4Data, f4Db, budgetService: budgetService);
+    var purchaseService = new PurchaseService(f4Data, f4Db, budgetService: budgetService, paymentService: paymentService);
+
+    var testRunId = Guid.NewGuid().ToString("N")[..8];
+    var invoiceFp = $"INV-PG-{testRunId}";
+    var txExp1 = $"PG-TX-EXP-1-{testRunId}";
+    var txExp2 = $"PG-TX-EXP-2-{testRunId}";
+    var txPur1 = $"PG-TX-PUR-1-{testRunId}";
+    var txPur2 = $"PG-TX-PUR-2-{testRunId}";
+    var txPur3 = $"PG-TX-PUR-3-{testRunId}";
+    var poNum = $"PO-DELL-{testRunId}";
+
+    // 1. 预算池创建或调整与审计
+    var curYear = DateTime.Today.Year;
+    var existingBudget = f4Db.Budgets.FirstOrDefault(b => b.TenantId == "demo" && b.DepartmentId == "engineering" && b.Year == curYear && b.Month == 0);
+    Guid budgetId;
+    if (existingBudget != null)
+    {
+        budgetId = existingBudget.Id;
+        existingBudget.AllocatedAmount = Math.Max(existingBudget.AllocatedAmount, 60000m);
+        f4Db.SaveChanges();
+    }
+    else
+    {
+        var budgetRes = budgetService.Create(financeManager, new CreateBudgetRequest(
+            DepartmentId: "engineering",
+            Year: curYear,
+            Month: 0,
+            ExpenseCategory: null,
+            ProjectId: null,
+            AllocatedAmount: 50000m));
+        if (!budgetRes.IsSuccess) throw new InvalidOperationException($"PG预算池创建失败：{budgetRes.Error}");
+        budgetId = budgetRes.Value!.Id;
+
+        var budgetAdjust = budgetService.Adjust(financeManager, budgetId, new AdjustBudgetRequest(10000m, "研发追加预算"));
+        if (!budgetAdjust.IsSuccess) throw new InvalidOperationException($"PG预算额度调整失败：{budgetAdjust.Error}");
+        if (budgetAdjust.Value!.AllocatedAmount != 60000m) throw new InvalidOperationException("PG预算调整后总额不符合预期。");
+    }
+
+    // 2. 报销提交触发预算预占与发票强防重
+    var invoiceDate = DateOnly.FromDateTime(DateTime.Today.AddDays(-10));
+    var invoiceInput = new ExpenseInvoiceInput(InvoiceType.VatElectronic, $"01100{testRunId}", invoiceFp, invoiceDate, 1886.79m, 0.06m, 113.21m, 2000m, null, null);
+
+    var claimRes = expenseService.CreateDraft(employee, new CreateExpenseClaim(
+        null, "张晨", "6222026000001234", "招商银行", "PG发票与预算闭环测试",
+        [new ExpenseItem(invoiceDate, "办公", 2000m, "研发耗材", "FP-PG-01", ["proof.pdf"])],
+        Invoices: [invoiceInput]));
+    if (!claimRes.IsSuccess) throw new InvalidOperationException($"PG创建报销草稿失败：{claimRes.Error}");
+
+    var submitRes = expenseService.Submit(employee, claimRes.Value!.Id);
+    if (!submitRes.IsSuccess) throw new InvalidOperationException($"PG报销单提交失败：{submitRes.Error}");
+
+    // 验证发票被锁定占用，重复提交拦截
+    var dupClaim = expenseService.CreateDraft(financeOfficer, new CreateExpenseClaim(
+        null, "陈敏", "6222026000005555", "建设银行", "冲突发票单据",
+        [new ExpenseItem(invoiceDate, "办公", 2000m, "耗材重复", "FP-PG-02", ["proof.pdf"])],
+        Invoices: [invoiceInput]));
+    var dupSubmit = expenseService.Submit(financeOfficer, dupClaim.Value!.Id);
+    if (dupSubmit.IsSuccess || dupSubmit.Code != "INVOICE_DUPLICATE") throw new InvalidOperationException("PG发票冲突未正确阻断。");
+
+    // 审批报销单
+    var claimId = claimRes.Value.Id;
+    var tasks = f4Db.ExpenseTasks.Where(t => t.TenantId == "demo" && t.ExpenseClaimId == claimId).OrderBy(t => t.Sequence).ToList();
+    foreach (var task in tasks)
+    {
+        var assignee = f4Data.GetEmployee(task.AssigneeId);
+        expenseService.Approve(assignee, task.Id, "同意通过");
+    }
+
+    // 3. 多笔分期付款与银行流水号唯一性
+    var pay1 = paymentService.RegisterExpensePayment(financeOfficer, claimId, new CreatePaymentTransactionRequest(
+        BatchTitle: "首期付款",
+        PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+        PaymentMethod: PaymentMethodNames.BankTransfer,
+        PayerAccount: "955880001",
+        PayeeName: "张晨",
+        PayeeAccount: "6222026000001234",
+        PayeeBank: "招商银行",
+        TransactionNumber: txExp1,
+        PaidAmount: 800m,
+        FeeAmount: 0m,
+        ProofAttachmentId: null,
+        Remarks: "首期款"));
+    if (!pay1.IsSuccess) throw new InvalidOperationException($"PG登记报销付款失败：{pay1.Error}");
+
+    // 银行流水号重复拦截
+    var dupTxPay = paymentService.RegisterExpensePayment(financeOfficer, claimId, new CreatePaymentTransactionRequest(
+        BatchTitle: "第二期付款",
+        PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+        PaymentMethod: PaymentMethodNames.BankTransfer,
+        PayerAccount: "955880001",
+        PayeeName: "张晨",
+        PayeeAccount: "6222026000001234",
+        PayeeBank: "招商银行",
+        TransactionNumber: txExp1, // 重复流水号
+        PaidAmount: 1200m,
+        FeeAmount: 0m,
+        ProofAttachmentId: null,
+        Remarks: "尾款"));
+    if (dupTxPay.IsSuccess || dupTxPay.Code != "PAYMENT_TX_DUPLICATE") throw new InvalidOperationException("PG流水号防重未拦截。");
+
+    // 结清尾款
+    var pay2 = paymentService.RegisterExpensePayment(financeOfficer, claimId, new CreatePaymentTransactionRequest(
+        BatchTitle: "结清尾款",
+        PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+        PaymentMethod: PaymentMethodNames.BankTransfer,
+        PayerAccount: "955880001",
+        PayeeName: "张晨",
+        PayeeAccount: "6222026000001234",
+        PayeeBank: "招商银行",
+        TransactionNumber: txExp2,
+        PaidAmount: 1200m,
+        FeeAmount: 0m,
+        ProofAttachmentId: null,
+        Remarks: "尾款结清"));
+    if (!pay2.IsSuccess) throw new InvalidOperationException($"PG结清尾款失败：{pay2.Error}");
+
+    // 验证报销单状态变为 Completed, 发票状态变为 PAID
+    var completedClaim = f4Db.ExpenseClaims.Single(c => c.Id == claimId);
+    if (completedClaim.PaymentStatus != "PAID" || completedClaim.Status != (int)ExpenseStatus.Completed)
+        throw new InvalidOperationException("PG报销单付清后状态未流转至Completed/PAID。");
+
+    // 4. 采购四单对账看板与未验收 50% 预付款限额
+    var purchaseReq = purchaseService.CreateDraft(employee, new SavePurchaseRequest(
+        Title: "PG采购对账测试",
+        Purpose: "服务器扩容采购",
+        RequiredDate: DateOnly.FromDateTime(DateTime.Today.AddDays(7)),
+        SuggestedSupplier: "戴尔直销",
+        Items: [new SavePurchaseItem("IT设备", "机架式服务器", "PowerEdge R750", 2, "台", 15000m, "高性能计算")],
+        Attachments: ["quote-spec.pdf"],
+        CopyRecipientIds: []));
+    if (!purchaseReq.IsSuccess) throw new InvalidOperationException($"PG采购申请草稿创建失败：{purchaseReq.Error}");
+    var pId = purchaseReq.Value!.Id;
+    var submitP = purchaseService.Submit(employee, pId);
+    if (!submitP.IsSuccess) throw new InvalidOperationException($"PG采购提交失败: {submitP.Error}");
+
+    var pTasks = f4Db.PurchaseTasks.Where(t => t.PurchaseRequestId == pId).OrderBy(t => t.Sequence).ToList();
+    foreach (var pt in pTasks)
+    {
+        var app = purchaseService.Approve(f4Data.GetEmployee(pt.AssigneeId), pt.Id, "同意");
+        if (!app.IsSuccess) throw new InvalidOperationException($"PG采购审批失败: {app.Error}");
+    }
+
+    var curPurchase = f4Db.PurchaseRequests.Single(p => p.Id == pId);
+
+    // 下单登记 30,000 元合同
+    var orderRes = purchaseService.RegisterOrder(administrator, pId, new RegisterPurchaseOrderRequest(
+        Version: curPurchase.Version,
+        Supplier: "戴尔(中国)有限公司",
+        OrderNumber: poNum,
+        ActualAmount: 30000m,
+        OrderDate: DateOnly.FromDateTime(DateTime.Today),
+        ExpectedDeliveryDate: DateOnly.FromDateTime(DateTime.Today.AddDays(14)),
+        Notes: "签署合同",
+        Attachments: []));
+    if (!orderRes.IsSuccess) throw new InvalidOperationException($"PG登记采购订单失败：{orderRes.Error}");
+
+    // 未验收前，尝试支付 20,000 元（> 50% 限额 15,000 元）应被阻断
+    var overPrepay = paymentService.RegisterPurchasePayment(financeOfficer, pId, new CreatePaymentTransactionRequest(
+        BatchTitle: "过大首付款",
+        PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+        PaymentMethod: PaymentMethodNames.BankTransfer,
+        PayerAccount: "955880001",
+        PayeeName: "戴尔(中国)有限公司",
+        PayeeAccount: "110022334455",
+        PayeeBank: "花旗银行",
+        TransactionNumber: txPur1,
+        PaidAmount: 20000m,
+        FeeAmount: 0m,
+        ProofAttachmentId: null,
+        Remarks: "尝试超付"));
+    if (overPrepay.IsSuccess || overPrepay.Code != "PURCHASE_PREPAYMENT_EXCEEDED")
+        throw new InvalidOperationException("PG采购未验收50%首付限额风控未生效。");
+
+    // 支付允许的 40% 预付款 12,000 元
+    var validPrepay = paymentService.RegisterPurchasePayment(financeOfficer, pId, new CreatePaymentTransactionRequest(
+        BatchTitle: "首期预付款 (40%)",
+        PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+        PaymentMethod: PaymentMethodNames.BankTransfer,
+        PayerAccount: "955880001",
+        PayeeName: "戴尔(中国)有限公司",
+        PayeeAccount: "110022334455",
+        PayeeBank: "花旗银行",
+        TransactionNumber: txPur2,
+        PaidAmount: 12000m,
+        FeeAmount: 0m,
+        ProofAttachmentId: null,
+        Remarks: "按约付40%首付款"));
+    if (!validPrepay.IsSuccess) throw new InvalidOperationException($"PG首期采购预付款失败：{validPrepay.Error}");
+
+    var curPurchaseAfterOrder = f4Db.PurchaseRequests.Single(p => p.Id == pId);
+
+    // 验收货物入库
+    purchaseService.Receive(employee, pId, new ReceivePurchaseRequest(
+        Version: curPurchaseAfterOrder.Version,
+        ReceivedDate: DateOnly.FromDateTime(DateTime.Today),
+        Result: "ALL_ACCEPTED",
+        Notes: "开箱通电测试正常",
+        Attachments: []));
+
+    // 验收后结清 18,000 尾款
+    var finalPay = paymentService.RegisterPurchasePayment(financeOfficer, pId, new CreatePaymentTransactionRequest(
+        BatchTitle: "验收付清尾款",
+        PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+        PaymentMethod: PaymentMethodNames.BankTransfer,
+        PayerAccount: "955880001",
+        PayeeName: "戴尔(中国)有限公司",
+        PayeeAccount: "110022334455",
+        PayeeBank: "花旗银行",
+        TransactionNumber: txPur3,
+        PaidAmount: 18000m,
+        FeeAmount: 0m,
+        ProofAttachmentId: null,
+        Remarks: "验收付清"));
+    if (!finalPay.IsSuccess) throw new InvalidOperationException($"PG采购尾款支付失败：{finalPay.Error}");
+
+    // 验证采购四单对账
+    var reconRes = purchaseService.GetReconciliation(financeOfficer, pId);
+    if (!reconRes.IsSuccess) throw new InvalidOperationException("PG采购四单对账查询失败。");
+    var recon = reconRes.Value!;
+    if (recon.EstimatedAmount != 30000m || recon.OrderedAmount != 30000m || recon.PaidAmount != 30000m || recon.RemainingPayable != 0m || !recon.IsAcceptancePassed || recon.PaymentStatus != "PAID")
+        throw new InvalidOperationException("PG采购四单对账数据核算不符合预期。");
+
+    // 5. 财务 CSV 导出与审计
+    var expCsv = paymentService.ExportExpensesCsv(financeOfficer, null, null, null, null, null);
+    if (!expCsv.Contains(invoiceFp) || !expCsv.Contains(txExp1))
+        throw new InvalidOperationException("PG报销财务对账CSV导出内容缺失。");
+
+    var purCsv = paymentService.ExportPurchasesCsv(financeOfficer, null, null, null, null, null);
+    if (!purCsv.Contains(poNum) || !purCsv.Contains(txPur2))
+        throw new InvalidOperationException("PG采购财务对账CSV导出内容缺失。");
+
+    var auditCount = f4Db.AuditLogs.Count(a => a.TenantId == "demo" &&
+        (a.Action == "EXPENSE_PAYMENT_REGISTERED" || a.Action == "PURCHASE_PAYMENT_REGISTERED" || a.Action == "FINANCE_EXPORT"));
+    if (auditCount < 3) throw new InvalidOperationException("PG财务敏感操作审计日志记录不完整。");
 }
 
 Console.WriteLine("PostgreSQL persistence integration passed.");

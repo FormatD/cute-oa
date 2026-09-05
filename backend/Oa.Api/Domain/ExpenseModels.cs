@@ -2,8 +2,8 @@ namespace Oa.Api.Domain;
 
 public enum ExpenseStatus { Draft, Approving, Rejected, Approved, Completed, Withdrawn }
 public sealed record ExpenseItem(DateOnly ExpenseDate, string Category, decimal Amount, string Description, string? ReceiptNumber, IReadOnlyList<string>? Attachments = null);
-public sealed record CreateExpenseClaim(string? Project, string PayeeAccountName, string PayeeAccount, string? BankName, string? Description, IReadOnlyList<ExpenseItem> Items, IReadOnlyList<string>? CopyRecipientIds = null, Guid? TravelRequestId = null);
-public sealed record RegisterPaymentRequest(DateOnly PaymentDate, string PaymentMethod, string TransactionNumber, decimal PaidAmount, string ProofFile);
+public sealed record CreateExpenseClaim(string? Project, string PayeeAccountName, string PayeeAccount, string? BankName, string? Description, IReadOnlyList<ExpenseItem> Items, IReadOnlyList<string>? CopyRecipientIds = null, Guid? TravelRequestId = null, IReadOnlyList<ExpenseInvoiceInput>? Invoices = null);
+public sealed record RegisterPaymentRequest(DateOnly PaymentDate, string PaymentMethod, string TransactionNumber, decimal PaidAmount, string ProofFile, string? BatchTitle = null, decimal FeeAmount = 0m, string? Remarks = null);
 
 public sealed class ExpenseClaim
 {
@@ -21,6 +21,10 @@ public sealed class ExpenseClaim
     public IReadOnlyList<ExpenseItem> Items { get; init; } = [];
     public IReadOnlyList<string> CopyRecipientIds { get; init; } = [];
     public decimal TotalAmount { get; init; }
+    public Guid? BudgetPoolId { get; set; }
+    public string PaymentStatus { get; set; } = "UNPAID";
+    public decimal PaidTotalAmount { get; set; }
+    public int InvoiceCount { get; set; }
     public int Version { get; init; } = 1;
     public Guid? ProcessDefinitionId { get; set; }
     public string? ProcessDefinitionCode { get; set; }
@@ -34,6 +38,8 @@ public sealed class ExpenseClaim
     public ExpenseStatus Status { get; set; } = ExpenseStatus.Draft;
     public List<ExpenseTask> Tasks { get; } = [];
     public List<FlowInstance> FlowInstances { get; } = [];
+    public List<ExpenseInvoice> Invoices { get; set; } = [];
+    public List<PaymentTransaction> PaymentTransactions { get; set; } = [];
     public PaymentRecord? Payment { get; set; }
 }
 

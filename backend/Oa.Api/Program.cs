@@ -33,6 +33,8 @@ builder.Services.AddScoped<WorkCalendarService>();
 builder.Services.AddScoped<IWorkCalendar>(serviceProvider => serviceProvider.GetRequiredService<WorkCalendarService>());
 builder.Services.AddScoped<LeaveService>();
 builder.Services.AddScoped<ExpenseService>();
+builder.Services.AddScoped<BudgetService>();
+builder.Services.AddScoped<PaymentService>();
 builder.Services.AddScoped<TravelService>();
 builder.Services.AddScoped<PurchaseService>();
 builder.Services.AddScoped<SealService>();
@@ -61,6 +63,11 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<LeavePeriod>());
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<LeaveStatus>());
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<ExpenseStatus>());
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<BudgetStatus>());
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<BudgetTransactionType>());
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<InvoiceType>());
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<InvoiceStatus>());
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<PaymentTransactionStatus>());
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<TravelStatus>());
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<PurchaseStatus>());
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<SealStatus>());
@@ -142,7 +149,7 @@ IResult Write<T>(HttpRequest request, Employee actor, IdempotencyService idempot
             {
                 "AUTH_002" => StatusCodes.Status403Forbidden,
                 "DATA_001" => StatusCodes.Status404NotFound,
-                "CONFLICT_001" or "CONCURRENCY_001" or "CONTRACT_002" => StatusCodes.Status409Conflict,
+                "CONFLICT_001" or "CONCURRENCY_001" or "CONTRACT_002" or "INVOICE_DUPLICATE" or "PAYMENT_CONFLICT" or "PAYMENT_TX_DUPLICATE" => StatusCodes.Status409Conflict,
                 _ => StatusCodes.Status400BadRequest
             };
             return Results.Json(new { code = result.Code, message = result.Error }, statusCode: failureStatus);
@@ -153,6 +160,11 @@ IResult Write<T>(HttpRequest request, Employee actor, IdempotencyService idempot
         serializerOptions.Converters.Add(new JsonStringEnumConverter<LeavePeriod>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<LeaveStatus>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<ExpenseStatus>());
+        serializerOptions.Converters.Add(new JsonStringEnumConverter<BudgetStatus>());
+        serializerOptions.Converters.Add(new JsonStringEnumConverter<BudgetTransactionType>());
+        serializerOptions.Converters.Add(new JsonStringEnumConverter<InvoiceType>());
+        serializerOptions.Converters.Add(new JsonStringEnumConverter<InvoiceStatus>());
+        serializerOptions.Converters.Add(new JsonStringEnumConverter<PaymentTransactionStatus>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<TravelStatus>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<PurchaseStatus>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<FlowTaskStatus>());
@@ -196,7 +208,7 @@ async Task<IResult> WriteAsync<T>(HttpRequest request, Employee actor, Idempoten
             {
                 "AUTH_002" => StatusCodes.Status403Forbidden,
                 "DATA_001" => StatusCodes.Status404NotFound,
-                "CONFLICT_001" or "CONCURRENCY_001" or "CONTRACT_002" => StatusCodes.Status409Conflict,
+                "CONFLICT_001" or "CONCURRENCY_001" or "CONTRACT_002" or "INVOICE_DUPLICATE" or "PAYMENT_CONFLICT" or "PAYMENT_TX_DUPLICATE" => StatusCodes.Status409Conflict,
                 "FILE_007" => StatusCodes.Status503ServiceUnavailable,
                 _ => StatusCodes.Status400BadRequest
             };
@@ -208,6 +220,11 @@ async Task<IResult> WriteAsync<T>(HttpRequest request, Employee actor, Idempoten
         serializerOptions.Converters.Add(new JsonStringEnumConverter<LeavePeriod>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<LeaveStatus>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<ExpenseStatus>());
+        serializerOptions.Converters.Add(new JsonStringEnumConverter<BudgetStatus>());
+        serializerOptions.Converters.Add(new JsonStringEnumConverter<BudgetTransactionType>());
+        serializerOptions.Converters.Add(new JsonStringEnumConverter<InvoiceType>());
+        serializerOptions.Converters.Add(new JsonStringEnumConverter<InvoiceStatus>());
+        serializerOptions.Converters.Add(new JsonStringEnumConverter<PaymentTransactionStatus>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<TravelStatus>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<PurchaseStatus>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<FlowTaskStatus>());
@@ -620,6 +637,25 @@ app.MapGet("/api/v1/expense-tasks/done", (HttpRequest request, DemoAuthService a
 app.MapPost("/api/v1/expense-tasks/{id:guid}/reject", (Guid id, RejectTaskRequest body, HttpRequest request, DemoAuthService auth, ExpenseService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Reject(actor, id, body.Comment)); });
 app.MapPost("/api/v1/expense-tasks/{id:guid}/transfer", (Guid id, TransferTaskRequest body, HttpRequest request, DemoAuthService auth, ExpenseService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Transfer(actor, id, body)); });
 app.MapPost("/api/v1/expense-claims/{id:guid}/payment", (Guid id, RegisterPaymentRequest body, HttpRequest request, DemoAuthService auth, ExpenseService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.RegisterPayment(actor, id, body)); });
+app.MapPost("/api/v1/expenses/{id:guid}/payments", (Guid id, CreatePaymentTransactionRequest body, HttpRequest request, DemoAuthService auth, PaymentService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.RegisterExpensePayment(actor, id, body), created: true, atomic: true, fingerprintPayload: new { id, body }); });
+app.MapPost("/api/v1/expense-claims/{id:guid}/payments", (Guid id, CreatePaymentTransactionRequest body, HttpRequest request, DemoAuthService auth, PaymentService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.RegisterExpensePayment(actor, id, body), created: true, atomic: true, fingerprintPayload: new { id, body }); });
+app.MapPost("/api/v1/expenses/invoices/validate", (ValidateInvoiceRequest body, HttpRequest request, DemoAuthService auth, ExpenseService service) => { var result = service.ValidateInvoice(Actor(request, auth), body); return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: StatusCodes.Status400BadRequest); });
+app.MapPost("/api/v1/expense-claims/invoices/validate", (ValidateInvoiceRequest body, HttpRequest request, DemoAuthService auth, ExpenseService service) => { var result = service.ValidateInvoice(Actor(request, auth), body); return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: StatusCodes.Status400BadRequest); });
+app.MapGet("/api/v1/finance/invoices", (string? keyword, InvoiceType? type, DateOnly? startDate, DateOnly? endDate, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, ExpenseService service) => Results.Ok(Paging.Create(service.GetFinanceInvoices(Actor(request, auth), keyword, type, startDate, endDate), page, pageSize)));
+app.MapGet("/api/v1/finance/export/expenses", (string? applicantId, string? departmentId, DateOnly? startDate, DateOnly? endDate, string? paymentStatus, HttpRequest request, DemoAuthService auth, PaymentService service) =>
+{
+    var actor = Actor(request, auth);
+    try
+    {
+        var csv = service.ExportExpensesCsv(actor, applicantId, departmentId, startDate, endDate, paymentStatus);
+        var bytes = System.Text.Encoding.UTF8.GetBytes(csv);
+        return Results.File(bytes, "text/csv; charset=utf-8", $"expense_export_{DateTime.Now:yyyyMMddHHmmss}.csv");
+    }
+    catch (UnauthorizedAccessException)
+    {
+        return Results.Json(new { code = "AUTH_002", message = "无报销对账数据导出权限。" }, statusCode: StatusCodes.Status403Forbidden);
+    }
+});
 
 app.MapGet("/api/v1/travel-requests", (string? keyword, int? status, string? applicantId, DateOnly? startDate, DateOnly? endDate, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, TravelService service) => Results.Ok(Paging.Create(service.List(Actor(request, auth), new DocumentListQuery(keyword, status, applicantId, startDate, endDate)), page, pageSize)));
 app.MapGet("/api/v1/travel-requests/{id:guid}", (Guid id, HttpRequest request, DemoAuthService auth, TravelService service) => { var result = service.Get(Actor(request, auth), id); return result.IsSuccess ? Results.Ok(result.Value) : Results.NotFound(new { code = result.Code, message = result.Error }); });
@@ -659,6 +695,50 @@ app.MapPost("/api/v1/purchase-requests/demo-data", (HttpRequest request, DemoAut
     var actor = Actor(request, auth);
     return Write(request, actor, idempotency, () => service.GenerateDemoData(actor), atomic: true, fingerprintPayload: new { operation = "purchase-demo-data" });
 });
+app.MapPost("/api/v1/purchases/{id:guid}/payments", (Guid id, CreatePaymentTransactionRequest body, HttpRequest request, DemoAuthService auth, PaymentService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.RegisterPurchasePayment(actor, id, body), created: true, atomic: true, fingerprintPayload: new { id, body }); });
+app.MapPost("/api/v1/purchase-requests/{id:guid}/payments", (Guid id, CreatePaymentTransactionRequest body, HttpRequest request, DemoAuthService auth, PaymentService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.RegisterPurchasePayment(actor, id, body), created: true, atomic: true, fingerprintPayload: new { id, body }); });
+app.MapGet("/api/v1/purchases/{id:guid}/reconciliation", (Guid id, HttpRequest request, DemoAuthService auth, PurchaseService service) => { var result = service.GetReconciliation(Actor(request, auth), id); return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: result.Code == "AUTH_002" ? StatusCodes.Status403Forbidden : StatusCodes.Status404NotFound); });
+app.MapGet("/api/v1/purchase-requests/{id:guid}/reconciliation", (Guid id, HttpRequest request, DemoAuthService auth, PurchaseService service) => { var result = service.GetReconciliation(Actor(request, auth), id); return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: result.Code == "AUTH_002" ? StatusCodes.Status403Forbidden : StatusCodes.Status404NotFound); });
+app.MapGet("/api/v1/payments/{businessType}/{businessId:guid}", (string businessType, Guid businessId, HttpRequest request, DemoAuthService auth, PaymentService service) => Results.Ok(service.GetPayments(Actor(request, auth), businessType, businessId)));
+app.MapGet("/api/v1/finance/export/purchases", (string? applicantId, string? departmentId, DateOnly? startDate, DateOnly? endDate, string? paymentStatus, HttpRequest request, DemoAuthService auth, PaymentService service) =>
+{
+    var actor = Actor(request, auth);
+    try
+    {
+        var csv = service.ExportPurchasesCsv(actor, applicantId, departmentId, startDate, endDate, paymentStatus);
+        var bytes = System.Text.Encoding.UTF8.GetBytes(csv);
+        return Results.File(bytes, "text/csv; charset=utf-8", $"purchase_export_{DateTime.Now:yyyyMMddHHmmss}.csv");
+    }
+    catch (UnauthorizedAccessException)
+    {
+        return Results.Json(new { code = "AUTH_002", message = "无采购对账数据导出权限。" }, statusCode: StatusCodes.Status403Forbidden);
+    }
+});
+
+// -------------------------------------------------------------
+// Budget Management Endpoints
+// -------------------------------------------------------------
+app.MapGet("/api/v1/budgets", (string? departmentId, int? year, int? month, string? expenseCategory, string? status, HttpRequest request, DemoAuthService auth, BudgetService service) =>
+    Results.Ok(service.List(Actor(request, auth), departmentId, year, month, expenseCategory, status)));
+app.MapGet("/api/v1/budgets/{id:guid}", (Guid id, HttpRequest request, DemoAuthService auth, BudgetService service) =>
+{
+    var result = service.Get(Actor(request, auth), id);
+    return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: result.Code == "AUTH_002" ? StatusCodes.Status403Forbidden : StatusCodes.Status404NotFound);
+});
+app.MapPost("/api/v1/budgets", (CreateBudgetRequest body, HttpRequest request, DemoAuthService auth, BudgetService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.Create(actor, body), created: true, atomic: true, fingerprintPayload: body);
+});
+app.MapPut("/api/v1/budgets/{id:guid}/adjust", (Guid id, AdjustBudgetRequest body, HttpRequest request, DemoAuthService auth, BudgetService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.Adjust(actor, id, body), atomic: true, fingerprintPayload: new { id, body });
+});
+app.MapGet("/api/v1/budgets/{id:guid}/transactions", (Guid id, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, BudgetService service) =>
+    Results.Ok(service.GetTransactions(Actor(request, auth), id, page, pageSize)));
+app.MapPost("/api/v1/budgets/check", (BudgetCheckRequest body, HttpRequest request, DemoAuthService auth, BudgetService service) =>
+    Results.Ok(service.Check(Actor(request, auth), body)));
 
 app.MapGet("/api/v1/seal-requests", (string? keyword, int? status, string? applicantId, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, SealService service) =>
     Results.Ok(service.List(Actor(request, auth), new DocumentListQuery(keyword, status, applicantId, null, null, null, null), page, pageSize)));

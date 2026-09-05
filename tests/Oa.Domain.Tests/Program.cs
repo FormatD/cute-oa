@@ -451,6 +451,163 @@ var dupDictResult = BusinessConfigurationValidator.ValidateAndNormalize(
     """{"items": [{"code": "DUP", "name": "A"}, {"code": "dup", "name": "B"}]}""");
 True(!dupDictResult.IsSuccess && dupDictResult.Error!.Contains("字典项编码重复"), "字典项编码不可重复");
 
+// -------------------------------------------------------------
+// P1-F4: 发票防重、预算管控与付款闭环领域测试
+// -------------------------------------------------------------
+// 1. 发票指纹计算一致性与空值容错
+var fp1 = InvoiceFingerprintHelper.ComputeFingerprint("demo", " 011002233 ", " 88990011 ");
+var fp2 = InvoiceFingerprintHelper.ComputeFingerprint("demo", "011002233", "88990011");
+Equal(fp1, fp2, "发票指纹对两端空格进行标准化处理");
+
+// 2. 预算池编制、额度调整与超额预检
+var fManager = data.GetEmployee("u-lin");
+var fOfficer = data.GetEmployee("u-chen");
+var testBudgetService = new BudgetService(data);
+
+var budgetCreate = testBudgetService.Create(fManager, new CreateBudgetRequest(
+    DepartmentId: "技术部",
+    Year: 2026,
+    Month: 0,
+    ExpenseCategory: null,
+    ProjectId: null,
+    AllocatedAmount: 20000m));
+True(budgetCreate.IsSuccess, "财务经理可编制部门年度预算池");
+Equal(20000m, budgetCreate.Value!.AllocatedAmount, "编制预算初始额度正确");
+Equal(20000m, budgetCreate.Value.AvailableAmount, "期初可用额度等于编制额度");
+
+var budgetAdjust = testBudgetService.Adjust(fManager, budgetCreate.Value.Id, new AdjustBudgetRequest(5000m, "年度追加业务预算"));
+True(budgetAdjust.IsSuccess, "财务经理可调整追加预算额度");
+Equal(25000m, budgetAdjust.Value!.AllocatedAmount, "追加后预算总额正确");
+
+var preCheckNormal = testBudgetService.Check(employee, new BudgetCheckRequest("技术部", "日常办公", 5000m, 2026, 8));
+True(preCheckNormal.IsAllowed && !preCheckNormal.IsExceeded, "未超预算申请校验通过");
+Equal(25000m, preCheckNormal.AvailableAmount, "预检返回正确可用预算");
+
+var preCheckExceeded = testBudgetService.Check(employee, new BudgetCheckRequest("技术部", "日常办公", 30000m, 2026, 8));
+True(preCheckExceeded.IsExceeded, "超过可用额度触发超预算预警");
+
+// 3. 报销单结构化发票录入、开票日期校验与单据内查重
+var f4ExpenseService = new ExpenseService(data, budgetService: testBudgetService);
+
+// 3a. 发票开票日期不能早于 180 天前
+var oldDate = DateOnly.FromDateTime(DateTime.Today.AddDays(-200));
+var expiredInvoiceClaim = f4ExpenseService.CreateDraft(employee, new CreateExpenseClaim(
+    null, "张晨", "6222026000001234", "招商银行", "过期发票测试",
+    [new ExpenseItem(new DateOnly(2026, 8, 20), "办公", 300m, "过期票据", "FP-OLD", ["inv.pdf"])],
+    Invoices: [new ExpenseInvoiceInput(InvoiceType.VatNormal, "1100", "EXP-001", oldDate, 283.02m, 0.06m, 16.98m, 300m, null, null)]));
+True(expiredInvoiceClaim.IsSuccess, "草稿创建成功");
+var expiredSubmit = f4ExpenseService.Submit(employee, expiredInvoiceClaim.Value!.Id);
+True(!expiredSubmit.IsSuccess && expiredSubmit.Error!.Contains("180天"), "提交过期发票被强行阻断");
+
+// 3b. 单据内相同发票号码重复录入拦截
+var internalDupClaim = f4ExpenseService.CreateDraft(employee, new CreateExpenseClaim(
+    null, "张晨", "6222026000001234", "招商银行", "单据内重复发票测试",
+    [
+        new ExpenseItem(new DateOnly(2026, 8, 20), "交通", 100m, "发票1", "FP-1", ["inv.pdf"]),
+        new ExpenseItem(new DateOnly(2026, 8, 20), "交通", 100m, "发票2", "FP-2", ["inv.pdf"])
+    ],
+    Invoices: [
+        new ExpenseInvoiceInput(InvoiceType.VatNormal, "1100", "INV-SAME-001", DateOnly.FromDateTime(DateTime.Today.AddDays(-5)), 94.34m, 0.06m, 5.66m, 100m, null, null),
+        new ExpenseInvoiceInput(InvoiceType.VatNormal, "1100", "INV-SAME-001", DateOnly.FromDateTime(DateTime.Today.AddDays(-5)), 94.34m, 0.06m, 5.66m, 100m, null, null)
+    ]));
+var internalDupSubmit = f4ExpenseService.Submit(employee, internalDupClaim.Value!.Id);
+True(!internalDupSubmit.IsSuccess && internalDupSubmit.Code == "INVOICE_DUPLICATE", "单据内录入重复发票时阻止提交");
+
+// 3c. 跨单据发票防重与撤回释放闭环
+var validInvoice1 = new ExpenseInvoiceInput(InvoiceType.VatElectronic, "01100", "INV-CROSS-888", DateOnly.FromDateTime(DateTime.Today.AddDays(-3)), 943.40m, 0.06m, 56.60m, 1000m, null, null);
+var claim1 = f4ExpenseService.CreateDraft(employee, new CreateExpenseClaim(
+    null, "张晨", "6222026000001234", "招商银行", "发票占用测试A",
+    [new ExpenseItem(new DateOnly(2026, 8, 20), "办公", 1000m, "采购用品", "FP-A", ["inv.pdf"])],
+    Invoices: [validInvoice1]));
+var submitClaim1 = f4ExpenseService.Submit(employee, claim1.Value!.Id);
+True(submitClaim1.IsSuccess, "首笔报销单提交成功并占用发票指纹");
+
+// 验证独立发票查验接口 ValidateInvoice
+var validateDup = f4ExpenseService.ValidateInvoice(employee, new ValidateInvoiceRequest(InvoiceType.VatElectronic, "01100", "INV-CROSS-888", DateOnly.FromDateTime(DateTime.Today.AddDays(-3)), 1000m));
+True(validateDup.IsSuccess && !validateDup.Value!.IsValid, "发票查验识别出已被占用的发票");
+True(validateDup.Value!.ErrorMessage!.Contains("INV-CROSS-888"), "查验提示包含冲突单据与发票信息");
+
+// 另一单据尝试提交同一发票被拦截
+var claim2 = f4ExpenseService.CreateDraft(data.GetEmployee("u-li"), new CreateExpenseClaim(
+    null, "李薇", "6222026000009999", "工商银行", "发票占用测试B",
+    [new ExpenseItem(new DateOnly(2026, 8, 20), "办公", 1000m, "用品重报", "FP-B", ["inv.pdf"])],
+    Invoices: [validInvoice1]));
+var submitClaim2 = f4ExpenseService.Submit(data.GetEmployee("u-li"), claim2.Value!.Id);
+True(!submitClaim2.IsSuccess && submitClaim2.Code == "INVOICE_DUPLICATE", "跨单据提交相同发票被强行阻断");
+
+// 申请人撤回单据1 -> 发票状态转为 Released，指纹释放
+var withdraw1 = f4ExpenseService.Withdraw(employee, claim1.Value.Id);
+True(withdraw1.IsSuccess, "申请人撤回报销单1");
+Equal(InvoiceStatus.Released, withdraw1.Value!.Invoices[0].Status, "撤回后发票状态更新为 Released 释放");
+
+// 释放后单据2再次提交应当成功
+var submitClaim2AfterRelease = f4ExpenseService.Submit(data.GetEmployee("u-li"), claim2.Value.Id);
+True(submitClaim2AfterRelease.IsSuccess, "原发票释放后允许在其他单据中正常报销");
+
+// 4. 付款服务分批打款与银行卡号脱敏
+var f4PaymentService = new PaymentService(data, null, testBudgetService);
+
+// 审批通过单据2
+True(f4ExpenseService.Approve(data.GetEmployee(submitClaim2AfterRelease.Value!.Tasks[0].AssigneeId), submitClaim2AfterRelease.Value!.Tasks[0].Id, "部门通过").IsSuccess, "部门负责人审批");
+True(f4ExpenseService.Approve(data.GetEmployee(submitClaim2AfterRelease.Value!.Tasks[1].AssigneeId), submitClaim2AfterRelease.Value!.Tasks[1].Id, "财务初审").IsSuccess, "财务审批");
+Equal(ExpenseStatus.Approved, submitClaim2AfterRelease.Value.Status, "审批完成后进入待付款状态");
+
+// 4a. 权限控制：普通员工无权登记付款
+var unauthorizedPay = f4PaymentService.RegisterExpensePayment(employee, claim2.Value.Id, new CreatePaymentTransactionRequest(
+    BatchTitle: "第一期付款",
+    PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+    PaymentMethod: PaymentMethodNames.BankTransfer,
+    PayerAccount: "955880001",
+    PayeeName: "李薇",
+    PayeeAccount: "6222026000009999",
+    PayeeBank: "工商银行",
+    TransactionNumber: "BANK-TX-20260906-001",
+    PaidAmount: 500m,
+    FeeAmount: 0m,
+    ProofAttachmentId: null,
+    Remarks: "首期付款"));
+True(!unauthorizedPay.IsSuccess && unauthorizedPay.Code == "AUTH_002", "普通员工无权登记付款");
+
+// 4b. 财务人员登记第一笔分批付款 (500/1000)
+var payBatch1 = f4PaymentService.RegisterExpensePayment(fOfficer, claim2.Value.Id, new CreatePaymentTransactionRequest(
+    BatchTitle: "第一期付款",
+    PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+    PaymentMethod: PaymentMethodNames.BankTransfer,
+    PayerAccount: "955880001",
+    PayeeName: "李薇",
+    PayeeAccount: "6222026000009999",
+    PayeeBank: "工商银行",
+    TransactionNumber: "BANK-TX-20260906-001",
+    PaidAmount: 500m,
+    FeeAmount: 0m,
+    ProofAttachmentId: null,
+    Remarks: "首期付款"));
+True(payBatch1.IsSuccess, "财务专员成功登记第一笔分批付款");
+
+// 4c. 银行账号脱敏查询校验
+var paymentsForNormalUser = f4PaymentService.GetPayments(employee, "Expense", claim2.Value.Id);
+True(paymentsForNormalUser.Count == 1, "查询到1笔付款流水");
+Equal("**** **** **** 9999", paymentsForNormalUser[0].PayeeAccountMasked, "非财务人员查看到的收款账号脱敏");
+
+var paymentsForFinanceUser = f4PaymentService.GetPayments(fOfficer, "Expense", claim2.Value.Id);
+Equal("6222026000009999", paymentsForFinanceUser[0].PayeeAccountMasked, "财务人员可查看到明文银行账号");
+
+// 4d. 重复流水号拦截
+var payDupTx = f4PaymentService.RegisterExpensePayment(fOfficer, claim2.Value.Id, new CreatePaymentTransactionRequest(
+    BatchTitle: "第二期付款",
+    PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+    PaymentMethod: PaymentMethodNames.BankTransfer,
+    PayerAccount: "955880001",
+    PayeeName: "李薇",
+    PayeeAccount: "6222026000009999",
+    PayeeBank: "工商银行",
+    TransactionNumber: "BANK-TX-20260906-001", // 重复流水号
+    PaidAmount: 500m,
+    FeeAmount: 0m,
+    ProofAttachmentId: null,
+    Remarks: "第二期付款"));
+True(payBatch1.Value!.Status == PaymentTransactionStatus.Success, "第一笔款项登记状态为成功");
+
 if (failures.Count > 0)
 {
     Console.Error.WriteLine(string.Join(Environment.NewLine, failures));
