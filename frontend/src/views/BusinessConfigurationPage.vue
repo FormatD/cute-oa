@@ -1,16 +1,27 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import type {
+  AnnualLeaveBonusConfig,
   BusinessConfigurationListItem,
   BusinessConfigurationRecord,
   ConfigurationDomain,
   ConfigurationVersionSummary,
   DictionaryConfig,
+  DictionaryItemConfig,
+  ExpenseCategoryPolicyConfig,
   ExpensePolicyConfig,
   LeavePolicyConfig,
+  LeaveTypePolicyConfig,
+  ProcurementAmountTierConfig,
+  ProcurementCategoryPolicyConfig,
   ProcurementPolicyConfig,
+  SealDocumentCategoryConfig,
   SealPolicyConfig,
-  TravelPolicyConfig
+  SealRegistryItemConfig,
+  SealRiskRulesConfig,
+  TravelCityTierConfig,
+  TravelPolicyConfig,
+  TravelStandardItemConfig
 } from '../api/types'
 import OaDialog from '../components/OaDialog.vue'
 import UserSelect from '../components/UserSelect.vue'
@@ -277,53 +288,232 @@ function getDefaultConfigForDomain(domain: string): { code: string; name: string
   }
 }
 
+// Case-agnostic property extractor helper (supports camelCase, PascalCase, or mixed)
+function prop<T = any>(obj: any, ...keys: string[]): T | undefined {
+  if (!obj || typeof obj !== 'object') return undefined
+  for (const k of keys) {
+    if (obj[k] !== undefined) return obj[k]
+  }
+  const lowerKeys = keys.map(k => k.toLowerCase())
+  for (const objKey of Object.keys(obj)) {
+    if (lowerKeys.includes(objKey.toLowerCase()) && obj[objKey] !== undefined) {
+      return obj[objKey]
+    }
+  }
+  return undefined
+}
+
+function parseLeaveConfig(data: any): LeavePolicyConfig {
+  const rawList = prop<any[]>(data, 'leaveTypes', 'LeaveTypes') ?? []
+  const leaveTypes: LeaveTypePolicyConfig[] = Array.isArray(rawList)
+    ? rawList.map(item => ({
+        type: String(prop(item, 'type', 'Type') ?? '').trim(),
+        name: String(prop(item, 'name', 'Name') ?? '').trim(),
+        isEnabled: prop(item, 'isEnabled', 'IsEnabled') !== false,
+        minUnit: Number(prop(item, 'minUnit', 'MinUnit')) || 0.5,
+        requiresAttachment: Boolean(prop(item, 'requiresAttachment', 'RequiresAttachment')),
+        attachmentThresholdDays:
+          prop(item, 'attachmentThresholdDays', 'AttachmentThresholdDays') != null &&
+          prop(item, 'attachmentThresholdDays', 'AttachmentThresholdDays') !== ''
+            ? Number(prop(item, 'attachmentThresholdDays', 'AttachmentThresholdDays'))
+            : null
+      }))
+    : []
+
+  const rawBonus = prop<any>(data, 'annualLeaveBonus', 'AnnualLeaveBonus')
+  const annualLeaveBonus: AnnualLeaveBonusConfig = {
+    legalMinStandardProtected: prop(rawBonus, 'legalMinStandardProtected', 'LegalMinStandardProtected') !== false,
+    tier1BonusDays: Number(prop(rawBonus, 'tier1BonusDays', 'Tier1BonusDays')) || 0,
+    tier2BonusDays: Number(prop(rawBonus, 'tier2BonusDays', 'Tier2BonusDays')) || 0,
+    tier3BonusDays: Number(prop(rawBonus, 'tier3BonusDays', 'Tier3BonusDays')) || 0
+  }
+
+  return {
+    leaveTypes,
+    allowCrossYear: prop(data, 'allowCrossYear', 'AllowCrossYear') !== false,
+    compTimeValidityDays: Number(prop(data, 'compTimeValidityDays', 'CompTimeValidityDays')) || 365,
+    annualLeaveBonus
+  }
+}
+
+function parseExpenseConfig(data: any): ExpensePolicyConfig {
+  const rawList = prop<any[]>(data, 'categories', 'Categories') ?? []
+  const categories: ExpenseCategoryPolicyConfig[] = Array.isArray(rawList)
+    ? rawList.map(item => ({
+        name: String(prop(item, 'name', 'Name') ?? '').trim(),
+        isEnabled: prop(item, 'isEnabled', 'IsEnabled') !== false,
+        singleLimit:
+          prop(item, 'singleLimit', 'SingleLimit') != null && prop(item, 'singleLimit', 'SingleLimit') !== ''
+            ? Number(prop(item, 'singleLimit', 'SingleLimit'))
+            : null,
+        requiresReceipt: Boolean(prop(item, 'requiresReceipt', 'RequiresReceipt')),
+        requiresReasonWhenExceeded: Boolean(prop(item, 'requiresReasonWhenExceeded', 'RequiresReasonWhenExceeded')),
+        blockWhenExceeded: Boolean(prop(item, 'blockWhenExceeded', 'BlockWhenExceeded'))
+      }))
+    : []
+  return { categories }
+}
+
+function parseTravelConfig(data: any): TravelPolicyConfig {
+  const rawTiers = prop<any[]>(data, 'cityTiers', 'CityTiers') ?? []
+  const cityTiers: TravelCityTierConfig[] = Array.isArray(rawTiers)
+    ? rawTiers.map(t => ({
+        tierName: String(prop(t, 'tierName', 'TierName') ?? '').trim(),
+        cities: Array.isArray(prop(t, 'cities', 'Cities'))
+          ? (prop(t, 'cities', 'Cities') as string[]).map(c => String(c).trim()).filter(Boolean)
+          : []
+      }))
+    : []
+
+  const rawRanks = prop<any[]>(data, 'employeeRanks', 'EmployeeRanks') ?? []
+  const employeeRanks: string[] = Array.isArray(rawRanks)
+    ? rawRanks.map(r => String(r).trim()).filter(Boolean)
+    : []
+
+  const rawStandards = prop<any[]>(data, 'standards', 'Standards') ?? []
+  const standards: TravelStandardItemConfig[] = Array.isArray(rawStandards)
+    ? rawStandards.map(s => ({
+        cityTier: String(prop(s, 'cityTier', 'CityTier') ?? '').trim(),
+        rank: String(prop(s, 'rank', 'Rank') ?? '').trim(),
+        hotelDailyLimit: Number(prop(s, 'hotelDailyLimit', 'HotelDailyLimit')) || 0,
+        mealDailyAllowance: Number(prop(s, 'mealDailyAllowance', 'MealDailyAllowance')) || 0,
+        transportationStandard: String(prop(s, 'transportationStandard', 'TransportationStandard') ?? '').trim()
+      }))
+    : []
+
+  return { cityTiers, employeeRanks, standards }
+}
+
+function parseProcurementConfig(data: any): ProcurementPolicyConfig {
+  const rawCats = prop<any[]>(data, 'categories', 'Categories') ?? []
+  const categories: ProcurementCategoryPolicyConfig[] = Array.isArray(rawCats)
+    ? rawCats.map(c => ({
+        name: String(prop(c, 'name', 'Name') ?? '').trim(),
+        isEnabled: prop(c, 'isEnabled', 'IsEnabled') !== false
+      }))
+    : []
+
+  const rawTiers = prop<any[]>(data, 'amountTiers', 'AmountTiers') ?? []
+  const amountTiers: ProcurementAmountTierConfig[] = Array.isArray(rawTiers)
+    ? rawTiers.map(t => ({
+        name: String(prop(t, 'name', 'Name') ?? '').trim(),
+        maxAmount:
+          prop(t, 'maxAmount', 'MaxAmount') != null && prop(t, 'maxAmount', 'MaxAmount') !== ''
+            ? Number(prop(t, 'maxAmount', 'MaxAmount'))
+            : null
+      }))
+    : []
+
+  return {
+    categories,
+    quoteAttachmentThreshold: Number(prop(data, 'quoteAttachmentThreshold', 'QuoteAttachmentThreshold')) || 0,
+    amountTiers,
+    defaultPurchaserUserId: String(prop(data, 'defaultPurchaserUserId', 'DefaultPurchaserUserId') ?? '').trim(),
+    requiresAcceptance: prop(data, 'requiresAcceptance', 'RequiresAcceptance') !== false,
+    acceptanceRoleOrAssignee: String(prop(data, 'acceptanceRoleOrAssignee', 'AcceptanceRoleOrAssignee') ?? '').trim()
+  }
+}
+
+function parseSealConfig(data: any): SealPolicyConfig {
+  const rawSeals = prop<any[]>(data, 'seals', 'Seals') ?? []
+  const seals: SealRegistryItemConfig[] = Array.isArray(rawSeals)
+    ? rawSeals.map(s => ({
+        name: String(prop(s, 'name', 'Name') ?? '').trim(),
+        sealType: String(prop(s, 'sealType', 'SealType') ?? '').trim(),
+        custodianUserId: String(prop(s, 'custodianUserId', 'CustodianUserId') ?? '').trim(),
+        isEnabled: prop(s, 'isEnabled', 'IsEnabled') !== false,
+        allowOut: Boolean(prop(s, 'allowOut', 'AllowOut')),
+        maxOutDays: Number(prop(s, 'maxOutDays', 'MaxOutDays')) || 0
+      }))
+    : []
+
+  const rawDocs = prop<any[]>(data, 'documentCategories', 'DocumentCategories') ?? []
+  const documentCategories: SealDocumentCategoryConfig[] = Array.isArray(rawDocs)
+    ? rawDocs.map(dc => ({
+        name: String(prop(dc, 'name', 'Name') ?? '').trim(),
+        isEnabled: prop(dc, 'isEnabled', 'IsEnabled') !== false,
+        riskLevel: String(prop(dc, 'riskLevel', 'RiskLevel') ?? 'LOW').toUpperCase()
+      }))
+    : []
+
+  const rawRules = prop<any>(data, 'riskRules', 'RiskRules')
+  const riskRules: SealRiskRulesConfig = {
+    highRiskMetric: Number(prop(rawRules, 'highRiskMetric', 'HighRiskMetric')) || 3,
+    mediumRiskMetric: Number(prop(rawRules, 'mediumRiskMetric', 'MediumRiskMetric')) || 2,
+    lowRiskMetric: Number(prop(rawRules, 'lowRiskMetric', 'LowRiskMetric')) || 1
+  }
+
+  return { seals, documentCategories, riskRules }
+}
+
+function parseDictionaryConfig(data: any): DictionaryConfig {
+  const rawItems = prop<any[]>(data, 'items', 'Items') ?? []
+  const items: DictionaryItemConfig[] = Array.isArray(rawItems)
+    ? rawItems.map((it, idx) => ({
+        code: String(prop(it, 'code', 'Code') ?? '').trim(),
+        name: String(prop(it, 'name', 'Name') ?? '').trim(),
+        sortOrder: Number(prop(it, 'sortOrder', 'SortOrder')) || idx + 1,
+        isEnabled: prop(it, 'isEnabled', 'IsEnabled') !== false,
+        description: prop(it, 'description', 'Description') ? String(prop(it, 'description', 'Description')).trim() : null
+      }))
+    : []
+  return { items }
+}
+
+function normalizeDomainConfig(domain: string, rawData: any): any {
+  if (!rawData || typeof rawData !== 'object') return null
+  switch (domain) {
+    case 'Leave': return parseLeaveConfig(rawData)
+    case 'Expense': return parseExpenseConfig(rawData)
+    case 'Travel': return parseTravelConfig(rawData)
+    case 'Procurement': return parseProcurementConfig(rawData)
+    case 'Seal': return parseSealConfig(rawData)
+    case 'Dictionary': return parseDictionaryConfig(rawData)
+    default: return rawData
+  }
+}
+
 function parseJsonToVisual(domain: string, jsonStr: string) {
   try {
     const data = JSON.parse(jsonStr || '{}')
+    const normalized = normalizeDomainConfig(domain, data)
+    if (!normalized) return
+
     switch (domain) {
       case 'Leave':
-        leaveForm.leaveTypes = Array.isArray(data.leaveTypes) ? data.leaveTypes : []
-        leaveForm.allowCrossYear = data.allowCrossYear !== false
-        leaveForm.compTimeValidityDays = typeof data.compTimeValidityDays === 'number' ? data.compTimeValidityDays : 365
-        leaveForm.annualLeaveBonus = {
-          legalMinStandardProtected: data.annualLeaveBonus?.legalMinStandardProtected !== false,
-          tier1BonusDays: data.annualLeaveBonus?.tier1BonusDays ?? 0,
-          tier2BonusDays: data.annualLeaveBonus?.tier2BonusDays ?? 0,
-          tier3BonusDays: data.annualLeaveBonus?.tier3BonusDays ?? 0
-        }
+        leaveForm.leaveTypes = normalized.leaveTypes
+        leaveForm.allowCrossYear = normalized.allowCrossYear
+        leaveForm.compTimeValidityDays = normalized.compTimeValidityDays
+        leaveForm.annualLeaveBonus = normalized.annualLeaveBonus
         break
       case 'Expense':
-        expenseForm.categories = Array.isArray(data.categories) ? data.categories : []
+        expenseForm.categories = normalized.categories
         break
       case 'Travel':
-        travelForm.cityTiers = Array.isArray(data.cityTiers) ? data.cityTiers : []
-        travelForm.employeeRanks = Array.isArray(data.employeeRanks) ? data.employeeRanks : []
-        travelForm.standards = Array.isArray(data.standards) ? data.standards : []
-        travelTierInputs.splice(0, travelTierInputs.length, ...travelForm.cityTiers.map(t => ({
+        travelForm.cityTiers = normalized.cityTiers
+        travelForm.employeeRanks = normalized.employeeRanks
+        travelForm.standards = normalized.standards
+        travelTierInputs.splice(0, travelTierInputs.length, ...travelForm.cityTiers.map((t: TravelCityTierConfig) => ({
           tierName: t.tierName,
           citiesStr: (t.cities || []).join(', ')
         })))
         travelRanksStr.value = travelForm.employeeRanks.join(', ')
         break
       case 'Procurement':
-        procurementForm.categories = Array.isArray(data.categories) ? data.categories : []
-        procurementForm.quoteAttachmentThreshold = typeof data.quoteAttachmentThreshold === 'number' ? data.quoteAttachmentThreshold : 5000
-        procurementForm.amountTiers = Array.isArray(data.amountTiers) ? data.amountTiers : []
-        procurementForm.defaultPurchaserUserId = data.defaultPurchaserUserId || ''
-        procurementForm.requiresAcceptance = data.requiresAcceptance !== false
-        procurementForm.acceptanceRoleOrAssignee = data.acceptanceRoleOrAssignee || ''
+        procurementForm.categories = normalized.categories
+        procurementForm.quoteAttachmentThreshold = normalized.quoteAttachmentThreshold
+        procurementForm.amountTiers = normalized.amountTiers
+        procurementForm.defaultPurchaserUserId = normalized.defaultPurchaserUserId
+        procurementForm.requiresAcceptance = normalized.requiresAcceptance
+        procurementForm.acceptanceRoleOrAssignee = normalized.acceptanceRoleOrAssignee
         break
       case 'Seal':
-        sealForm.seals = Array.isArray(data.seals) ? data.seals : []
-        sealForm.documentCategories = Array.isArray(data.documentCategories) ? data.documentCategories : []
-        sealForm.riskRules = {
-          highRiskMetric: data.riskRules?.highRiskMetric ?? 3,
-          mediumRiskMetric: data.riskRules?.mediumRiskMetric ?? 2,
-          lowRiskMetric: data.riskRules?.lowRiskMetric ?? 1
-        }
+        sealForm.seals = normalized.seals
+        sealForm.documentCategories = normalized.documentCategories
+        sealForm.riskRules = normalized.riskRules
         break
       case 'Dictionary':
-        dictionaryForm.items = Array.isArray(data.items) ? data.items : []
+        dictionaryForm.items = normalized.items
         break
     }
   } catch {
@@ -445,14 +635,58 @@ function syncVisualToJson(): string {
   return JSON.stringify(obj, null, 2)
 }
 
-function handleDomainChange() {
-  if (editingId.value) return // code/domain locked when editing
+async function loadBaseConfigForDomain(domain: ConfigurationDomain) {
+  // Check if an existing configuration exists in current list for this domain
+  const existing = store.items.find(i => i.domain === domain && i.status === 'EFFECTIVE')
+    || store.items.find(i => i.domain === domain)
+  if (existing) {
+    const full = await store.loadDetail(existing.id)
+    if (full && full.contentJson) {
+      form.code = full.code
+      form.name = `${full.name} (新草稿)`
+      form.description = full.description || ''
+      form.contentJson = full.contentJson
+      parseJsonToVisual(domain, full.contentJson)
+      return
+    }
+  }
+  const def = getDefaultConfigForDomain(domain)
+  form.code = def.code
+  form.name = def.name
+  form.description = def.description
+  form.contentJson = def.json
+  parseJsonToVisual(domain, def.json)
+}
+
+function resetToDefaultTemplate() {
   const def = getDefaultConfigForDomain(form.domain)
   form.code = def.code
   form.name = def.name
   form.description = def.description
   form.contentJson = def.json
-  parseJsonToVisual(form.domain, form.contentJson)
+  parseJsonToVisual(form.domain, def.json)
+  store.message = `已载入【${domainLabel(form.domain)}】的出厂默认配置模板。`
+}
+
+async function copyFromExistingConfig() {
+  const existing = store.items.find(i => i.domain === form.domain && i.status === 'EFFECTIVE')
+    || store.items.find(i => i.domain === form.domain)
+  if (existing) {
+    const full = await store.loadDetail(existing.id)
+    if (full && full.contentJson) {
+      form.contentJson = full.contentJson
+      form.code = full.code
+      parseJsonToVisual(form.domain, full.contentJson)
+      store.message = `已成功复制当前【${domainLabel(form.domain)}】生效版本 (v${full.version}) 的配置内容。`
+      return
+    }
+  }
+  store.message = `当前业务域【${domainLabel(form.domain)}】暂无已有生效配置可供复制。`
+}
+
+async function handleDomainChange() {
+  if (editingId.value) return // code/domain locked when editing
+  await loadBaseConfigForDomain(form.domain)
 }
 
 function switchEditorMode(mode: 'visual' | 'json') {
@@ -471,7 +705,7 @@ function switchEditorMode(mode: 'visual' | 'json') {
   }
 }
 
-function openCreate() {
+async function openCreate() {
   editingId.value = null
   editingVersion.value = 1
   editingConcurrencyVersion.value = 0
@@ -481,18 +715,14 @@ function openCreate() {
   store.message = ''
 
   form.domain = (store.domainFilter as ConfigurationDomain) || 'Leave'
-  const def = getDefaultConfigForDomain(form.domain)
-  form.code = def.code
-  form.name = def.name
-  form.description = def.description
   form.effectiveFrom = toLocalInput(new Date().toISOString())
   form.effectiveTo = ''
-  form.contentJson = def.json
-  parseJsonToVisual(form.domain, def.json)
+
+  await loadBaseConfigForDomain(form.domain)
   editorOpen.value = true
 }
 
-async function openEdit(item: BusinessConfigurationListItem) {
+async function openEdit(item: BusinessConfigurationListItem | BusinessConfigurationRecord) {
   validationError.value = ''
   store.error = ''
   store.message = ''
@@ -675,7 +905,10 @@ async function confirmRetire() {
 async function handleCreateNewVersion(item: BusinessConfigurationListItem) {
   store.error = ''
   store.message = ''
-  await store.createNewVersion(item.id)
+  const newRecord = await store.createNewVersion(item.id)
+  if (newRecord) {
+    await openEdit(newRecord)
+  }
 }
 
 // ---------------- Delete Modal ----------------
@@ -719,7 +952,12 @@ async function openVersionHistory(item: BusinessConfigurationListItem) {
 
 async function handleBranchFromHistory(ver: ConfigurationVersionSummary) {
   versionHistoryModalOpen.value = false
-  await store.createNewVersion(ver.id)
+  store.error = ''
+  store.message = ''
+  const newRecord = await store.createNewVersion(ver.id)
+  if (newRecord) {
+    await openEdit(newRecord)
+  }
 }
 
 // ---------------- Details Modal ----------------
@@ -730,7 +968,8 @@ const detailMode = ref<'visual' | 'json'>('visual')
 const detailParsed = computed(() => {
   if (!detailRecord.value?.contentJson) return null
   try {
-    return JSON.parse(detailRecord.value.contentJson)
+    const raw = JSON.parse(detailRecord.value.contentJson)
+    return normalizeDomainConfig(detailRecord.value.domain, raw) || raw
   } catch {
     return null
   }
@@ -1035,6 +1274,24 @@ onMounted(() => {
         <small>支持通过结构化可视化表单配置，或直接编辑原始 JSON</small>
       </div>
       <div class="mode-switch-group">
+        <button
+          v-if="!editingId"
+          type="button"
+          class="switch-btn"
+          title="从系统当前已有的生效配置复制所有参数内容"
+          @click="copyFromExistingConfig"
+        >
+          📋 复制已有配置
+        </button>
+        <button
+          v-if="!editingId"
+          type="button"
+          class="switch-btn"
+          title="重置为系统出厂预设模板"
+          @click="resetToDefaultTemplate"
+        >
+          🔄 默认模板
+        </button>
         <button
           type="button"
           class="switch-btn"

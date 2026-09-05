@@ -5,7 +5,12 @@ namespace Oa.Api.Services;
 
 public static class BusinessConfigurationValidator
 {
-    private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    };
 
     public static ServiceResult<string> ValidateAndNormalize(string domain, string contentJson, DemoData? data = null)
     {

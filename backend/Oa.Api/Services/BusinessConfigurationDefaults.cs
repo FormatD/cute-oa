@@ -7,7 +7,12 @@ namespace Oa.Api.Services;
 
 public static class BusinessConfigurationDefaults
 {
-    public static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true, WriteIndented = true };
+    public static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    };
 
     public static BusinessConfigurationRecord? ResolveEffectiveConfig(OaDbContext? db, string domain, string code, string tenantId = "demo", DateTimeOffset? asOf = null)
     {
