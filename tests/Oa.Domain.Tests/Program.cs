@@ -389,6 +389,66 @@ True(!data.CanEditDepartmentDocument(employee, null), "研发普通员工无权�
 True(data.CanEditDepartmentDocument(manager, "engineering"), "研发主管有权创建和编辑本部门文档");
 True(data.CanEditDepartmentDocument(hr, "finance"), "全公司文档管理员有权创建和编辑各部门文档");
 
+// Business Configuration Validator Tests
+var unknownDomainResult = BusinessConfigurationValidator.ValidateAndNormalize("InvalidDomain", "{}");
+True(!unknownDomainResult.IsSuccess && unknownDomainResult.Error!.Contains("不支持的业务领域"), "校验器拒绝未知的业务领域");
+
+var invalidJsonResult = BusinessConfigurationValidator.ValidateAndNormalize(ConfigurationDomains.Leave, "{ broken json }");
+True(!invalidJsonResult.IsSuccess && invalidJsonResult.Error!.Contains("配置 JSON 格式非法"), "校验器拦截非合法 JSON 语法");
+
+var validLeaveResult = BusinessConfigurationValidator.ValidateAndNormalize(
+    ConfigurationDomains.Leave,
+    System.Text.Json.JsonSerializer.Serialize(BusinessConfigurationDefaults.CreateDefaultLeavePolicy(), BusinessConfigurationDefaults.JsonOptions));
+True(validLeaveResult.IsSuccess, "默认休假策略通过校验");
+
+var unprotectedLeaveJson = """{"leaveTypes": [{"type": "ANNUAL", "name": "年假", "minUnit": 0.5}], "allowCrossYear": true, "compTimeValidityDays": 365, "annualLeaveBonus": {"legalMinStandardProtected": false, "tier1BonusDays": 1, "tier2BonusDays": 2, "tier3BonusDays": 3}}""";
+var unprotectedLeaveResult = BusinessConfigurationValidator.ValidateAndNormalize(ConfigurationDomains.Leave, unprotectedLeaveJson);
+True(!unprotectedLeaveResult.IsSuccess && unprotectedLeaveResult.Error!.Contains("法定标准保护"), "休假规则必须勾选中国法定年假最低标准保护");
+
+var validExpenseResult = BusinessConfigurationValidator.ValidateAndNormalize(
+    ConfigurationDomains.Expense,
+    System.Text.Json.JsonSerializer.Serialize(BusinessConfigurationDefaults.CreateDefaultExpensePolicy(), BusinessConfigurationDefaults.JsonOptions));
+True(validExpenseResult.IsSuccess, "默认报销策略通过校验");
+
+var emptyExpenseResult = BusinessConfigurationValidator.ValidateAndNormalize(ConfigurationDomains.Expense, """{"categories": []}""");
+True(!emptyExpenseResult.IsSuccess && emptyExpenseResult.Error!.Contains("费用类别"), "费用报销规则必须包含至少一个类别");
+
+var validTravelResult = BusinessConfigurationValidator.ValidateAndNormalize(
+    ConfigurationDomains.Travel,
+    System.Text.Json.JsonSerializer.Serialize(BusinessConfigurationDefaults.CreateDefaultTravelPolicy(), BusinessConfigurationDefaults.JsonOptions));
+True(validTravelResult.IsSuccess, "默认差旅策略通过校验");
+
+var negativeTravelResult = BusinessConfigurationValidator.ValidateAndNormalize(
+    ConfigurationDomains.Travel,
+    """{"standards": [{"cityTier": "一线城市", "rank": "员工", "hotelDailyLimit": -100, "mealDailyAllowance": 50, "transportationStandard": "飞机"}]}""");
+True(!negativeTravelResult.IsSuccess && negativeTravelResult.Error!.Contains("住宿限额不能为负数"), "出差标准住宿限额不能为负数");
+
+var validProcurementResult = BusinessConfigurationValidator.ValidateAndNormalize(
+    ConfigurationDomains.Procurement,
+    System.Text.Json.JsonSerializer.Serialize(BusinessConfigurationDefaults.CreateDefaultProcurementPolicy(), BusinessConfigurationDefaults.JsonOptions),
+    data);
+True(validProcurementResult.IsSuccess, "默认采购策略通过校验");
+
+var validSealResult = BusinessConfigurationValidator.ValidateAndNormalize(
+    ConfigurationDomains.Seal,
+    System.Text.Json.JsonSerializer.Serialize(BusinessConfigurationDefaults.CreateDefaultSealPolicy(), BusinessConfigurationDefaults.JsonOptions),
+    data);
+True(validSealResult.IsSuccess, "默认用印策略通过校验");
+
+var invalidSealRiskJson = """{"seals": [{"name": "公章", "sealType": "公章", "custodianUserId": "u-admin", "isEnabled": true}], "documentCategories": [{"name": "合同", "riskLevel": "CRITICAL", "isEnabled": true}], "riskRules": {"highRiskMetric": 3, "mediumRiskMetric": 2, "lowRiskMetric": 1}}""";
+var invalidSealResult = BusinessConfigurationValidator.ValidateAndNormalize(ConfigurationDomains.Seal, invalidSealRiskJson, data);
+True(!invalidSealResult.IsSuccess && invalidSealResult.Error!.Contains("风险等级必须为"), "用印文件风险等级必须限制为 LOW/MEDIUM/HIGH");
+
+var validDictResult = BusinessConfigurationValidator.ValidateAndNormalize(
+    ConfigurationDomains.Dictionary,
+    System.Text.Json.JsonSerializer.Serialize(BusinessConfigurationDefaults.CreateDefaultAnnouncementTypeDict(), BusinessConfigurationDefaults.JsonOptions));
+True(validDictResult.IsSuccess, "默认字典策略通过校验");
+
+var dupDictResult = BusinessConfigurationValidator.ValidateAndNormalize(
+    ConfigurationDomains.Dictionary,
+    """{"items": [{"code": "DUP", "name": "A"}, {"code": "dup", "name": "B"}]}""");
+True(!dupDictResult.IsSuccess && dupDictResult.Error!.Contains("字典项编码重复"), "字典项编码不可重复");
+
 if (failures.Count > 0)
 {
     Console.Error.WriteLine(string.Join(Environment.NewLine, failures));

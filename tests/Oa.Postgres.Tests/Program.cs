@@ -2385,6 +2385,171 @@ await using (var performanceDb = new OaDbContext(performanceOptions))
         throw new InvalidOperationException("花名册关键字未按字面量处理 SQL LIKE 通配符，或空结果查询次数异常。");
 }
 
+// --- Business Configuration Center PostgreSQL Integration Tests ---
+await using (var configDb = new OaDbContext(options))
+{
+    var configData = new DemoData(configDb);
+    var admin = configData.GetEmployee("u-admin");
+    var zhang = configData.GetEmployee("u-zhang");
+    var configService = new BusinessConfigurationService(configDb, configData);
+
+    // 1. Seed verification
+    BusinessConfigurationDefaults.EnsureDefaultConfigurations(configDb, IdentityDefaults.TenantId);
+    var seededConfigs = configDb.BusinessConfigurations.AsNoTracking().Where(c => c.TenantId == IdentityDefaults.TenantId).ToList();
+    if (!seededConfigs.Any(c => c.Domain == ConfigurationDomains.Leave && c.Code == "LeavePolicy" && c.Status == ConfigurationStatus.Effective))
+        throw new InvalidOperationException("默认休假配置未自动初始化生效。");
+    if (!seededConfigs.Any(c => c.Domain == ConfigurationDomains.Expense && c.Code == "ExpensePolicy" && c.Status == ConfigurationStatus.Effective))
+        throw new InvalidOperationException("默认报销配置未自动初始化生效。");
+    if (!seededConfigs.Any(c => c.Domain == ConfigurationDomains.Travel && c.Code == "TravelPolicy" && c.Status == ConfigurationStatus.Effective))
+        throw new InvalidOperationException("默认差旅配置未自动初始化生效。");
+    if (!seededConfigs.Any(c => c.Domain == ConfigurationDomains.Procurement && c.Code == "ProcurementPolicy" && c.Status == ConfigurationStatus.Effective))
+        throw new InvalidOperationException("默认采购配置未自动初始化生效。");
+    if (!seededConfigs.Any(c => c.Domain == ConfigurationDomains.Seal && c.Code == "SealPolicy" && c.Status == ConfigurationStatus.Effective))
+        throw new InvalidOperationException("默认用印配置未自动初始化生效。");
+    if (!seededConfigs.Any(c => c.Domain == ConfigurationDomains.Dictionary && c.Code == "AnnouncementType" && c.Status == ConfigurationStatus.Effective))
+        throw new InvalidOperationException("默认公告字典未自动初始化生效。");
+
+    // 2. Permission enforcement
+    var forbiddenDraft = configService.CreateDraft(zhang, new CreateBusinessConfigurationRequest(
+        ConfigurationDomains.Dictionary, "FORBIDDEN_DICT", "无权限字典", "测试", DateTimeOffset.UtcNow, null, """{"items": [{"code": "A", "name": "A"}]}"""));
+    if (forbiddenDraft.IsSuccess || forbiddenDraft.Code != "AUTH_002")
+        throw new InvalidOperationException("未授权普通员工未能拦截访问业务参数配置中心。");
+
+    var forbiddenList = configService.List(zhang, new BusinessConfigurationFilterQuery());
+    if (forbiddenList.IsSuccess || forbiddenList.Code != "AUTH_002")
+        throw new InvalidOperationException("未授权员工未能拦截列表查询业务配置。");
+
+    // 3. Draft creation, update, and publish lifecycle
+    var nowUtc = DateTimeOffset.UtcNow;
+    var dictDraft = configService.CreateDraft(admin, new CreateBusinessConfigurationRequest(
+        ConfigurationDomains.Dictionary,
+        "INTEGRATION_DICT",
+        "集成测试字典",
+        "初版草稿",
+        nowUtc.AddMinutes(-30),
+        null,
+        """{"items": [{"code": "VAL_1", "name": "值1", "sortOrder": 1, "isEnabled": true}]}"""
+    ));
+    if (!dictDraft.IsSuccess || dictDraft.Value!.Status != ConfigurationStatus.Draft || dictDraft.Value.Version != 1)
+        throw new InvalidOperationException("管理员创建配置草稿失败。");
+
+    var updatedDraft = configService.UpdateDraft(admin, dictDraft.Value.Id, new UpdateBusinessConfigurationRequest(
+        "集成测试字典-更新版",
+        "更新后说明",
+        nowUtc.AddMinutes(-30),
+        null,
+        """{"items": [{"code": "VAL_1", "name": "值1更新", "sortOrder": 1, "isEnabled": true}]}""",
+        dictDraft.Value.ConcurrencyVersion
+    ));
+    if (!updatedDraft.IsSuccess || updatedDraft.Value!.Name != "集成测试字典-更新版")
+        throw new InvalidOperationException("管理员更新配置草稿失败。");
+
+    var publishedV1 = configService.Publish(admin, dictDraft.Value.Id, new PublishBusinessConfigurationRequest(
+        nowUtc.AddMinutes(-30),
+        null,
+        updatedDraft.Value.ConcurrencyVersion
+    ));
+    if (!publishedV1.IsSuccess || publishedV1.Value!.Status != ConfigurationStatus.Effective || publishedV1.Value.PublishedByName != admin.Name)
+        throw new InvalidOperationException("发布配置草稿为生效状态失败。");
+
+    // Published configuration cannot be modified in-place
+    var illegalEdit = configService.UpdateDraft(admin, publishedV1.Value.Id, new UpdateBusinessConfigurationRequest(
+        "非法就地篡改", null, nowUtc, null, publishedV1.Value.ContentJson, publishedV1.Value.ConcurrencyVersion));
+    if (illegalEdit.IsSuccess || illegalEdit.Code != "CONFIG_002")
+        throw new InvalidOperationException("已生效配置允许被就地修改，违反版本控制防篡改设计。");
+
+    // 4. Version branching & Overlap prevention
+    var branchedV2 = configService.CreateNewVersion(admin, publishedV1.Value.Id);
+    if (!branchedV2.IsSuccess || branchedV2.Value!.Version != 2 || branchedV2.Value.Status != ConfigurationStatus.Draft)
+        throw new InvalidOperationException("基于已生效版本升版创建新草稿失败。");
+
+    // Attempt to publish v2 overlapping before v1 start time (backdated overlap)
+    var overlapPublish = configService.Publish(admin, branchedV2.Value.Id, new PublishBusinessConfigurationRequest(
+        publishedV1.Value.EffectiveFrom.AddMinutes(-10), null, branchedV2.Value.ConcurrencyVersion));
+    if (overlapPublish.IsSuccess || overlapPublish.Code != "CONFIG_003")
+        throw new InvalidOperationException("生效时间重叠未被系统拦截。");
+
+    // Publish v2 scheduled for future
+    var scheduledFrom = nowUtc.AddDays(10);
+    var scheduledPublish = configService.Publish(admin, branchedV2.Value.Id, new PublishBusinessConfigurationRequest(
+        scheduledFrom, scheduledFrom.AddDays(30), branchedV2.Value.ConcurrencyVersion));
+    if (!scheduledPublish.IsSuccess || scheduledPublish.Value!.Status != ConfigurationStatus.Scheduled)
+        throw new InvalidOperationException("未来生效时间未正确设为待生效 (SCHEDULED)。");
+
+    // Retire v1
+    var latestV1 = configService.Get(admin, publishedV1.Value.Id).Value!;
+    var retireResult = configService.Retire(admin, publishedV1.Value.Id, new RetireBusinessConfigurationRequest(
+        nowUtc.AddMinutes(1), latestV1.ConcurrencyVersion));
+    if (!retireResult.IsSuccess || retireResult.Value!.Status != ConfigurationStatus.Retired)
+        throw new InvalidOperationException($"下线配置失败：{retireResult.Error}");
+
+    // 5. Document Snapshot Freezing in Leave, Expense, Seal
+    var leaveService = new LeaveService(configData, configDb);
+    var configTestLeaveDate = new DateOnly(2026, 9, 15);
+    var leaveDraft = leaveService.CreateDraft(zhang, new CreateLeaveRequest(
+        LeaveType.Personal, configTestLeaveDate, LeavePeriod.FullDay, configTestLeaveDate, LeavePeriod.FullDay, "参数中心冻结快照验证", []));
+    if (!leaveDraft.IsSuccess)
+        throw new InvalidOperationException($"创建请假单失败：{leaveDraft.Error}");
+    var leaveSubmit = leaveService.Submit(zhang, leaveDraft.Value!.Id);
+    if (!leaveSubmit.IsSuccess)
+        throw new InvalidOperationException($"提交请假单失败：{leaveSubmit.Error}");
+
+    var persistedLeave = configDb.LeaveRequests.AsNoTracking().Single(r => r.Id == leaveDraft.Value.Id);
+    if (persistedLeave.ConfigVersionId == null ||
+        persistedLeave.ConfigVersionId == Guid.Empty ||
+        persistedLeave.ConfigVersionNumber < 1 ||
+        string.IsNullOrWhiteSpace(persistedLeave.ConfigSnapshotJson) ||
+        !persistedLeave.ConfigSnapshotJson.Contains("leaveTypes", StringComparison.OrdinalIgnoreCase) ||
+        persistedLeave.ConfigResolvedAt == null)
+    {
+        throw new InvalidOperationException("请假单提交未正确冻结业务规则快照。");
+    }
+
+    // Seal Document Risk Level Resolution & Snapshot
+    var sealService = new SealService(configData, configDb);
+    var sealDraft = sealService.CreateDraft(zhang, new SaveSealRequest(
+        "商务用印", "合同协议", "战略采购协议", "公章", 2, false, null, null, null, "用印原因说明", ["contract.pdf"], null));
+    if (!sealDraft.IsSuccess)
+        throw new InvalidOperationException($"创建用印单失败：{sealDraft.Error}");
+    var sealSubmit = sealService.Submit(zhang, sealDraft.Value!.Id);
+    if (!sealSubmit.IsSuccess)
+        throw new InvalidOperationException($"提交用印单失败：{sealSubmit.Error}");
+
+    var persistedSeal = configDb.SealRequests.AsNoTracking().Single(r => r.Id == sealDraft.Value.Id);
+    if (persistedSeal.ConfigVersionId == null || persistedSeal.ConfigVersionId == Guid.Empty || persistedSeal.RiskLevel != "MEDIUM")
+        throw new InvalidOperationException($"用印单未根据业务规则中心动态计算风险等级或缺少配置快照，实际风险等级：{persistedSeal.RiskLevel}。");
+
+    // 6. Delete protection & Reference counting
+    var citedConfigId = persistedLeave.ConfigVersionId.Value;
+    var citedDelete = configService.Delete(admin, citedConfigId);
+    if (citedDelete.IsSuccess)
+        throw new InvalidOperationException("已被历史单据引用的生效配置被删除，违反防篡改保护要求。");
+
+    // Delete a temporary uncited draft
+    var disposableDraft = configService.CreateDraft(admin, new CreateBusinessConfigurationRequest(
+        ConfigurationDomains.Dictionary, "DISPOSABLE_DICT", "临时字典", null, nowUtc, null, """{"items": [{"code": "TMP", "name": "TMP"}]}"""));
+    if (!disposableDraft.IsSuccess)
+        throw new InvalidOperationException("创建临时草稿失败。");
+    var deleteDraftResult = configService.Delete(admin, disposableDraft.Value!.Id);
+    if (!deleteDraftResult.IsSuccess)
+        throw new InvalidOperationException("删除无引用的草稿配置失败。");
+
+    // 7. Audit log verification
+    var auditActions = configDb.AuditLogs.AsNoTracking()
+        .Where(a => a.TenantId == IdentityDefaults.TenantId && a.ResourceType == "BusinessConfiguration")
+        .Select(a => a.Action)
+        .Distinct()
+        .ToList();
+    if (!auditActions.Contains("CONFIG_DRAFT_CREATED") ||
+        !auditActions.Contains("CONFIG_DRAFT_UPDATED") ||
+        !auditActions.Contains("CONFIG_PUBLISHED") ||
+        !auditActions.Contains("CONFIG_RETIRED") ||
+        !auditActions.Contains("CONFIG_DELETED"))
+    {
+        throw new InvalidOperationException($"业务配置审计记录不完整，现有审计动作：{string.Join(", ", auditActions)}。");
+    }
+}
+
 Console.WriteLine("PostgreSQL persistence integration passed.");
 
 static async Task InstallNotificationFailureTriggerAsync(string connectionString, Guid resourceId)

@@ -158,7 +158,7 @@ public static class BusinessConfigurationEndpoints
             {
                 "AUTH_002" => StatusCodes.Status403Forbidden,
                 "DATA_001" => StatusCodes.Status404NotFound,
-                "CONFLICT_001" or "CONCURRENCY_001" or "CONFIG_003" or "CONFIG_004" => StatusCodes.Status409Conflict,
+                "CONFLICT_001" or "CONCURRENCY_001" or "CONFIG_002" or "CONFIG_003" or "CONFIG_004" => StatusCodes.Status409Conflict,
                 _ => StatusCodes.Status400BadRequest
             };
             return Results.Json(new { code = result.Code, message = result.Error }, statusCode: statusCode);
@@ -201,7 +201,7 @@ public static class BusinessConfigurationEndpoints
                 {
                     "AUTH_002" => StatusCodes.Status403Forbidden,
                     "DATA_001" => StatusCodes.Status404NotFound,
-                    "CONFLICT_001" or "CONCURRENCY_001" or "CONFIG_003" or "CONFIG_004" => StatusCodes.Status409Conflict,
+                    "CONFLICT_001" or "CONCURRENCY_001" or "CONFIG_002" or "CONFIG_003" or "CONFIG_004" => StatusCodes.Status409Conflict,
                     _ => StatusCodes.Status400BadRequest
                 };
                 return Results.Json(new { code = result.Code, message = result.Error }, statusCode: failureStatus);

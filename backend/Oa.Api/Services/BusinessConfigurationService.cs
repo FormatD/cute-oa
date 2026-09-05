@@ -282,6 +282,11 @@ public sealed class BusinessConfigurationService
         if (effectiveTo.HasValue && effectiveTo.Value <= effectiveFrom)
             return ServiceResult<BusinessConfigurationView>.Failure("失效时间必须晚于生效时间。", "CONFIG_001");
 
+        var now = DateTimeOffset.UtcNow;
+        var newStatus = effectiveFrom <= now && (effectiveTo == null || effectiveTo > now)
+            ? ConfigurationStatus.Effective
+            : ConfigurationStatus.Scheduled;
+
         // Range overlap check with other published versions
         var otherPublished = db.BusinessConfigurations
             .Where(item => item.TenantId == TenantId && item.Domain == record.Domain && item.Code == record.Code && item.Id != record.Id)
@@ -299,8 +304,11 @@ public sealed class BusinessConfigurationService
                 if (effectiveFrom >= other.EffectiveFrom && other.Status == ConfigurationStatus.Effective && other.EffectiveTo == null)
                 {
                     other.EffectiveTo = effectiveFrom;
-                    other.Status = ConfigurationStatus.Retired;
-                    other.UpdatedAt = DateTimeOffset.UtcNow;
+                    if (newStatus == ConfigurationStatus.Effective)
+                    {
+                        other.Status = ConfigurationStatus.Retired;
+                    }
+                    other.UpdatedAt = now;
                     other.UpdatedBy = actor.Id;
                     other.UpdatedByName = actor.Name;
                     other.ConcurrencyVersion++;
@@ -313,11 +321,6 @@ public sealed class BusinessConfigurationService
                 }
             }
         }
-
-        var now = DateTimeOffset.UtcNow;
-        var newStatus = effectiveFrom <= now && (effectiveTo == null || effectiveTo > now)
-            ? ConfigurationStatus.Effective
-            : ConfigurationStatus.Scheduled;
 
         // If new status is Effective, retire any active versions that have ended
         if (newStatus == ConfigurationStatus.Effective)
