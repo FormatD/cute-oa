@@ -41,7 +41,64 @@ const employeeDirectoryStore = useEmployeeDirectoryStore()
 const isOpen = ref(false)
 const searchQuery = ref('')
 const containerRef = ref<HTMLElement | null>(null)
+const triggerRef = ref<HTMLElement | null>(null)
+const dropdownRef = ref<HTMLElement | null>(null)
 const searchInputRef = ref<HTMLInputElement | null>(null)
+const dropdownStyle = ref<Record<string, string>>({})
+
+function updateDropdownPosition() {
+  if (!isOpen.value || !triggerRef.value) return
+  const rect = triggerRef.value.getBoundingClientRect()
+  if (rect.width === 0 && rect.height === 0) return
+
+  // Close if trigger element is completely scrolled out of the visible screen
+  if (rect.bottom < -50 || rect.top > window.innerHeight + 50) {
+    isOpen.value = false
+    return
+  }
+
+  const spaceBelow = window.innerHeight - rect.bottom
+  const spaceAbove = rect.top
+  const dropdownEstimatedHeight = 280
+  const popWidth = Math.max(rect.width, 260)
+
+  let top: number
+  if (spaceBelow < dropdownEstimatedHeight && spaceAbove > spaceBelow) {
+    // Render above trigger
+    top = Math.max(8, rect.top - dropdownEstimatedHeight - 4)
+  } else {
+    // Render below trigger
+    top = rect.bottom + 4
+  }
+
+  let left = rect.left
+  if (left + popWidth > window.innerWidth - 12) {
+    left = Math.max(12, window.innerWidth - popWidth - 12)
+  }
+  if (left < 12) {
+    left = 12
+  }
+
+  dropdownStyle.value = {
+    position: 'fixed',
+    top: `${Math.round(top)}px`,
+    left: `${Math.round(left)}px`,
+    width: `${Math.round(popWidth)}px`,
+    minWidth: '260px',
+    maxWidth: '380px',
+    zIndex: '999999'
+  }
+}
+
+watch(isOpen, (opened) => {
+  if (opened) {
+    updateDropdownPosition()
+    nextTick(() => {
+      updateDropdownPosition()
+      searchInputRef.value?.focus()
+    })
+  }
+})
 
 // Ensure data is loaded
 onMounted(async () => {
@@ -54,16 +111,26 @@ onMounted(async () => {
     }
   }
   document.addEventListener('click', handleOutsideClick)
+  window.addEventListener('resize', updateDropdownPosition)
+  window.addEventListener('scroll', updateDropdownPosition, true)
 })
 
 onBeforeUnmount(() => {
   document.removeEventListener('click', handleOutsideClick)
+  window.removeEventListener('resize', updateDropdownPosition)
+  window.removeEventListener('scroll', updateDropdownPosition, true)
 })
 
 function handleOutsideClick(event: MouseEvent) {
-  if (isOpen.value && containerRef.value && !containerRef.value.contains(event.target as Node)) {
-    isOpen.value = false
+  if (!isOpen.value) return
+  const target = event.target as Node
+  if (
+    containerRef.value?.contains(target) ||
+    dropdownRef.value?.contains(target)
+  ) {
+    return
   }
+  isOpen.value = false
 }
 
 // All available candidate options merged and deduplicated by id
@@ -181,6 +248,7 @@ function getAvatarText(name: string): string {
   >
     <!-- Display Trigger -->
     <div
+      ref="triggerRef"
       class="user-select-trigger"
       :class="{ 'has-value': Boolean(selectedUser), 'is-active': isOpen }"
       tabindex="0"
@@ -212,53 +280,61 @@ function getAvatarText(name: string): string {
       </div>
     </div>
 
-    <!-- Dropdown Popover -->
-    <div v-if="isOpen" class="user-select-dropdown">
-      <!-- Search Input -->
-      <div class="dropdown-search-wrap">
-        <input
-          ref="searchInputRef"
-          v-model="searchQuery"
-          type="text"
-          class="dropdown-search-input"
-          placeholder="搜索姓名、工号、部门..."
-          @click.stop
-        />
-        <span v-if="searchQuery" class="search-clear" @click="searchQuery = ''">×</span>
+    <!-- Dropdown Popover Teleported to body -->
+    <Teleport to="body">
+      <div
+        v-if="isOpen"
+        ref="dropdownRef"
+        class="user-select-dropdown"
+        :style="dropdownStyle"
+        @keydown="handleKeyDown"
+      >
+        <!-- Search Input -->
+        <div class="dropdown-search-wrap">
+          <input
+            ref="searchInputRef"
+            v-model="searchQuery"
+            type="text"
+            class="dropdown-search-input"
+            placeholder="搜索姓名、工号、部门..."
+            @click.stop
+          />
+          <span v-if="searchQuery" class="search-clear" @click="searchQuery = ''">×</span>
+        </div>
+
+        <!-- User List -->
+        <ul class="dropdown-user-list">
+          <li
+            v-for="user in filteredCandidates"
+            :key="user.id"
+            class="user-list-item"
+            :class="{ 'is-selected': user.id === modelValue }"
+            @click="selectUser(user)"
+          >
+            <div class="user-item-avatar">
+              {{ getAvatarText(user.name) }}
+            </div>
+            <div class="user-item-info">
+              <div class="user-primary-row">
+                <strong class="user-item-name">{{ user.name }}</strong>
+                <code class="user-item-id">{{ user.id }}</code>
+              </div>
+              <div class="user-secondary-row">
+                <span v-if="user.departmentName" class="dept-badge">{{ user.departmentName }}</span>
+                <span v-if="user.positionName || user.role" class="position-badge">
+                  {{ user.positionName || user.role }}
+                </span>
+              </div>
+            </div>
+            <span v-if="user.id === modelValue" class="selected-checkmark">✓</span>
+          </li>
+
+          <li v-if="filteredCandidates.length === 0" class="empty-results-tip">
+            <span>未找到匹配员工</span>
+          </li>
+        </ul>
       </div>
-
-      <!-- User List -->
-      <ul class="dropdown-user-list">
-        <li
-          v-for="user in filteredCandidates"
-          :key="user.id"
-          class="user-list-item"
-          :class="{ 'is-selected': user.id === modelValue }"
-          @click="selectUser(user)"
-        >
-          <div class="user-item-avatar">
-            {{ getAvatarText(user.name) }}
-          </div>
-          <div class="user-item-info">
-            <div class="user-primary-row">
-              <strong class="user-item-name">{{ user.name }}</strong>
-              <code class="user-item-id">{{ user.id }}</code>
-            </div>
-            <div class="user-secondary-row">
-              <span v-if="user.departmentName" class="dept-badge">{{ user.departmentName }}</span>
-              <span v-if="user.positionName || user.role" class="position-badge">
-                {{ user.positionName || user.role }}
-              </span>
-            </div>
-          </div>
-          <span v-if="user.id === modelValue" class="selected-checkmark">✓</span>
-        </li>
-
-        <li v-if="filteredCandidates.length === 0" class="empty-results-tip">
-          <span>未找到匹配员工</span>
-        </li>
-      </ul>
-    </div>
+    </Teleport>
   </div>
 </template>
 
@@ -409,21 +485,19 @@ function getAvatarText(name: string): string {
 
 /* Dropdown */
 .user-select-dropdown {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  width: 100%;
+  position: fixed;
   min-width: 260px;
   max-width: 380px;
   max-height: 280px;
   background: #fff;
   border: 1px solid #cbd5e1;
   border-radius: 8px;
-  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
-  z-index: 1000;
+  box-shadow: 0 12px 32px -4px rgba(0, 0, 0, 0.22), 0 6px 14px -4px rgba(0, 0, 0, 0.12);
+  z-index: 999999;
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  box-sizing: border-box;
 }
 
 .dropdown-search-wrap {
