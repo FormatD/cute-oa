@@ -1,71 +1,78 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import type { FlowCopy } from '../api/types'
+import type { WorkItem, WorkItemTab } from '../api/types'
 import { useAnnouncementStore } from '../stores/announcements'
 import { useAuthStore } from '../stores/auth'
 import { useDashboardStore } from '../stores/dashboard'
-import { useDocumentStore } from '../stores/documents'
 import { useExpenseStore } from '../stores/expense'
 import { useLeaveStore } from '../stores/leave'
 import { usePurchaseStore } from '../stores/purchase'
 import { useSealStore } from '../stores/seal'
 import { useTravelStore } from '../stores/travel'
-import { useWorkflowStore } from '../stores/workflow'
+import { useWorkItemStore } from '../stores/work-items'
 
 const router = useRouter()
 const announcements = useAnnouncementStore()
 const auth = useAuthStore()
 const dashboard = useDashboardStore()
-const documents = useDocumentStore()
 const expense = useExpenseStore()
 const leave = useLeaveStore()
 const purchase = usePurchaseStore()
 const seal = useSealStore()
 const travel = useTravelStore()
-const workflow = useWorkflowStore()
-const activeStatuses = new Set(['Draft', 'Approving', 'Rejected', 'Approved'])
-const initiatedItems = computed(() => [
-  ...leave.initiatedLeaves.filter(item => activeStatuses.has(item.status)).map(item => ({ ...item, module: 'leave' as const, title: `${item.type}请假`, amount: `${item.days} 天` })),
-  ...expense.initiatedExpenses.filter(item => activeStatuses.has(item.status)).map(item => ({ ...item, module: 'expense' as const, title: item.description || '费用报销', amount: `¥${item.totalAmount.toFixed(2)}` })),
-  ...travel.initiatedTravels.filter(item => activeStatuses.has(item.status)).map(item => ({ ...item, module: 'travel' as const, title: item.purpose, amount: `${item.days} 天 · ¥${item.estimatedBudget.toFixed(2)}` })),
-  ...purchase.initiatedPurchases.filter(item => activeStatuses.has(item.status)).map(item => ({ ...item, module: 'purchase' as const, title: item.title, amount: `¥${item.estimatedTotal.toFixed(2)}` })),
-  ...seal.initiatedSeals.filter(item => activeStatuses.has(item.status)).map(item => ({ ...item, module: 'seal' as const, title: item.title, amount: `${item.sealType} · ${item.copies} 份` }))
-].sort((a, b) => (b.createdAt ?? '').localeCompare(a.createdAt ?? '')).slice(0, 5))
-const unreadCopies = computed(() => workflow.unreadCopies.slice(0, 5))
-async function openCopy(item: FlowCopy) {
-  await workflow.markCopyRead(item)
-  if (item.readAt) {
-    const route = item.businessType === 'Leave' ? 'leave' : item.businessType === 'Expense' ? 'expense' : item.businessType === 'Travel' ? 'travel' : item.businessType === 'Purchase' ? 'purchase' : 'seal'
-    await router.push(`/${route}/${item.businessId}`)
-  }
-}
+const workItems = useWorkItemStore()
 
-function createLeave() { leave.showForm = true; router.push('/leave') }
-function createExpense() { expense.showExpenseForm = true; router.push('/expense') }
-function createTravel() { travel.showTravelForm = true; router.push('/travel') }
-function createPurchase() { purchase.showPurchaseForm = true; router.push('/purchase') }
-function createSeal() { seal.showSealForm = true; router.push('/seal') }
-onMounted(() => { void announcements.loadPublished(1, 3) })
+const roleHeadline = computed(() => {
+  if (workItems.summary.pendingFinanceCount) return '费用审批与待付款事项已按您的财务权限汇总。'
+  if (workItems.summary.pendingAttendanceCount || workItems.summary.pendingPersonnelCount) return '人员与运营事项已按您的管理范围汇总。'
+  if (workItems.summary.pendingApprovalCount) return '团队审批与个人事项已集中汇总。'
+  return '以下是您的个人事项、待阅信息和常用入口。'
+})
+const pendingDetail = computed(() => [
+  workItems.summary.pendingApprovalCount ? `${workItems.summary.pendingApprovalCount} 审批` : '',
+  workItems.summary.pendingPersonnelCount ? `${workItems.summary.pendingPersonnelCount} 人事` : '',
+  workItems.summary.pendingAttendanceCount ? `${workItems.summary.pendingAttendanceCount} 考勤` : '',
+  workItems.summary.pendingFinanceCount ? `${workItems.summary.pendingFinanceCount} 付款` : ''
+].filter(Boolean).join(' · ') || '暂无待处理')
+
+function createLeave() { leave.showForm = true; void router.push('/leave') }
+function createExpense() { expense.showExpenseForm = true; void router.push('/expense') }
+function createTravel() { travel.showTravelForm = true; void router.push('/travel') }
+function createPurchase() { purchase.showPurchaseForm = true; void router.push('/purchase') }
+function createSeal() { seal.showSealForm = true; void router.push('/seal') }
+async function openItem(item: WorkItem) {
+  if (item.category === 'COPY' && !await workItems.markCopyRead(item)) return
+  await router.push(item.route)
+}
+async function openCenter(tab: WorkItemTab) { workItems.activeTab = tab; await router.push('/approval') }
+function businessLabel(value: string) { return ({ leave: '请假', expense: '报销', travel: '出差', purchase: '采购', seal: '用章', personnel: '人事办理', attendance: '考勤申诉', announcement: '公告', document: '制度', contract: '合同' } as Record<string, string>)[value] ?? value }
+function actionLabel(item: WorkItem) { return item.actionType === 'COMPLETE' ? '去办理' : item.actionType === 'REVIEW' ? '去审核' : item.actionType === 'PAYMENT' ? '去付款' : item.actionType === 'ACKNOWLEDGE' ? '去签收' : item.actionType === 'READ' ? '阅读' : '查看' }
+onMounted(() => { void announcements.loadPublished(1, 3); if (!workItems.workbenchLoaded) void workItems.loadWorkbench() })
 </script>
 
 <template>
   <template v-if="dashboard.summary">
-    <div class="page-heading"><div><p class="eyebrow">DASHBOARD</p><h1>你好，{{ auth.currentUser?.name ?? '同事' }}</h1><p>欢迎回来，以下是今天的工作概览。</p></div><button class="primary-action" @click="createLeave">＋ 发起请假</button></div>
+    <div class="page-heading"><div><p class="eyebrow">ROLE WORKBENCH</p><h1>你好，{{ auth.currentUser?.name ?? '同事' }}</h1><p>{{ roleHeadline }}</p></div><button class="primary-action" @click="createLeave">＋ 发起请假</button></div>
 
-    <aside v-if="documents.pendingMustReadDocuments.length" class="notice warning record-link" style="cursor: pointer; margin-bottom: 20px;" @click="router.push('/documents')">
-      ⚠ 您有 {{ documents.pendingMustReadDocuments.length }} 份重要企业合规制度尚未完成在线签署确认，点击前往签署 →
-    </aside>
+    <aside v-if="workItems.workbenchReading.some(item => item.category === 'DOCUMENT')" class="notice warning record-link" style="cursor: pointer; margin-bottom: 20px;" @click="openCenter('reading')">⚠ 您有必须阅读或签收的制度文件，点击进入事项中心处理 →</aside>
 
-    <section class="cards"><article><span class="card-icon blue">✓</span><div><small>待我审批</small><strong>{{ dashboard.summary.pendingTaskCount }}</strong><em>待处理事项</em></div></article><article><span class="card-icon green">◷</span><div><small>我的年假</small><strong>{{ dashboard.summary.leaveBalance.available }}<sup>天</sup></strong><em>已冻结 {{ dashboard.summary.leaveBalance.frozen }} 天</em></div></article><article><span class="card-icon orange">▤</span><div><small>待我阅读</small><strong>{{ dashboard.summary.pendingReadCount }}</strong><em>未读抄送事项</em></div></article><article class="record-link" @click="router.push('/hr/contracts')"><span class="card-icon orange">▧</span><div><small>合同风险</small><strong>{{ dashboard.summary.contractRiskCount }}</strong><em>待处理或待确认</em></div></article></section>
+    <section class="cards">
+      <article class="record-link" @click="openCenter('pending')"><span class="card-icon blue">✓</span><div><small>待我处理</small><strong>{{ workItems.summary.pendingCount }}</strong><em>{{ pendingDetail }}</em></div></article>
+      <article><span class="card-icon green">◷</span><div><small>我的年假</small><strong>{{ dashboard.summary.leaveBalance.available }}<sup>天</sup></strong><em>已冻结 {{ dashboard.summary.leaveBalance.frozen }} 天</em></div></article>
+      <article class="record-link" @click="openCenter('reading')"><span class="card-icon orange">▤</span><div><small>待我阅读</small><strong>{{ workItems.summary.pendingReadCount }}</strong><em>公告、制度与审批抄送</em></div></article>
+      <article class="record-link" @click="openCenter('risk')"><span class="card-icon orange">▧</span><div><small>风险提醒</small><strong>{{ workItems.summary.riskCount }}</strong><em>按权限范围展示</em></div></article>
+    </section>
 
     <section class="workbench-grid">
-      <article class="panel"><div class="section-title"><div><p class="eyebrow">IN PROGRESS</p><h2>我发起的进行中事项</h2></div><button class="secondary" @click="router.push('/leave')">查看请假</button></div><div v-if="initiatedItems.length" class="records"><button v-for="item in initiatedItems" :key="`${item.module}-${item.id}`" class="record record-link" @click="router.push(`/${item.module}/${item.id}`)"><span><strong>{{ item.title }}</strong><span>{{ item.number }} · {{ item.amount }}</span></span><em>{{ item.status }}</em></button></div><p v-else class="empty">暂无进行中的个人事项。</p></article>
-      <article class="panel"><div class="section-title"><div><p class="eyebrow">TO READ</p><h2>待我阅读</h2></div><button class="secondary" @click="router.push('/copies')">全部抄送</button></div><div v-if="unreadCopies.length" class="records"><button v-for="item in unreadCopies" :key="item.id" class="record record-link" @click="openCopy(item)"><span><strong>{{ item.title }}</strong><span>{{ item.businessNumber }} · {{ item.applicantName }}</span></span><em>{{ item.availableAt.slice(0, 10) }}</em></button></div><p v-else class="empty">暂无未读抄送事项。</p></article>
+      <article class="panel"><div class="section-title"><div><p class="eyebrow">TO DO</p><h2>待我处理</h2></div><button class="secondary" @click="openCenter('pending')">全部待办</button></div><div v-if="workItems.workbenchPending.length" class="records"><button v-for="item in workItems.workbenchPending" :key="item.id" class="record record-link" @click="openItem(item)"><span><strong>{{ item.title }}</strong><span>{{ businessLabel(item.businessType) }} · {{ item.applicantName }} · {{ item.currentNode }}</span></span><em :class="{ archived: item.urgency === 'OVERDUE' }">{{ actionLabel(item) }}</em></button></div><p v-else class="empty">当前没有待处理事项。</p></article>
+      <article class="panel"><div class="section-title"><div><p class="eyebrow">INITIATED</p><h2>我发起的</h2></div><button class="secondary" @click="openCenter('initiated')">全部发起</button></div><div v-if="workItems.workbenchInitiated.length" class="records"><button v-for="item in workItems.workbenchInitiated" :key="item.id" class="record record-link" @click="openItem(item)"><span><strong>{{ item.title }}</strong><span>{{ item.number }} · {{ businessLabel(item.businessType) }}</span></span><em>{{ item.status }}</em></button></div><p v-else class="empty">暂无个人发起事项。</p></article>
     </section>
+
+    <section class="panel"><div class="section-title"><div><p class="eyebrow">TO READ</p><h2>待我阅读</h2></div><button class="secondary" @click="openCenter('reading')">全部待阅</button></div><div v-if="workItems.workbenchReading.length" class="records"><button v-for="item in workItems.workbenchReading" :key="item.id" class="record record-link" @click="openItem(item)"><span><strong>{{ item.title }}</strong><span>{{ businessLabel(item.businessType) }} · {{ item.applicantName || '公司发布' }}</span></span><em>{{ actionLabel(item) }}</em></button></div><p v-else class="empty">暂无未读事项。</p></section>
 
     <section class="panel workbench-announcements"><div class="section-title"><div><p class="eyebrow">COMPANY NEWS</p><h2>最新公告</h2></div><button class="secondary" @click="router.push('/announcements')">全部公告</button></div><div v-if="announcements.published.length" class="records"><button v-for="item in announcements.published" :key="item.id" class="record record-link" @click="router.push(`/announcements/${item.id}`)"><span><strong>{{ item.title }}</strong><span>{{ item.publishedByName || item.createdByName }} · {{ item.publishedAt?.slice(0, 10) }}</span></span><em :class="{ archived: !item.readAt }">{{ item.readAt ? '已读' : '待确认' }}</em></button></div><p v-else-if="announcements.loading" class="empty">正在加载公告…</p><p v-else class="empty">当前没有有效公告。</p></section>
 
-    <section class="panel"><div class="section-title"><div><p class="eyebrow">QUICK ACTIONS</p><h2>常用入口</h2></div></div><div class="quick-actions"><button @click="createLeave"><span>◫</span>发起请假</button><button @click="createExpense"><span>¥</span>发起报销</button><button @click="createTravel"><span>⌖</span>发起出差</button><button @click="createPurchase"><span>▦</span>发起采购</button><button @click="createSeal"><span>印</span>发起用章</button><button @click="router.push('/approval')"><span>✓</span>处理审批</button><button @click="router.push('/hr/contracts')"><span>▧</span>劳动合同</button><button @click="router.push('/documents')"><span>📖</span>制度知识库</button><button @click="router.push('/announcements')"><span>◈</span>查看公告</button><button @click="router.push('/calendar')"><span>▣</span>查看日历</button></div></section>
+    <section class="panel"><div class="section-title"><div><p class="eyebrow">QUICK ACTIONS</p><h2>常用入口</h2></div></div><div class="quick-actions"><button @click="createLeave"><span>◫</span>发起请假</button><button @click="createExpense"><span>¥</span>发起报销</button><button @click="createTravel"><span>⌖</span>发起出差</button><button @click="createPurchase"><span>▦</span>发起采购</button><button @click="createSeal"><span>印</span>发起用章</button><button @click="openCenter('pending')"><span>✓</span>处理事项</button><button @click="router.push('/hr/contracts')"><span>▧</span>劳动合同</button><button @click="router.push('/documents')"><span>📖</span>制度知识库</button><button @click="router.push('/announcements')"><span>◈</span>查看公告</button><button @click="router.push('/calendar')"><span>▣</span>查看日历</button></div></section>
   </template>
 </template>

@@ -81,8 +81,8 @@ const navSections: NavSection[] = [
       { id: 'travel', navKey: 'travel', route: 'travel', icon: '⌖', name: '出差管理', keywords: ['cc', 'chuchai', 'travel'] },
       { id: 'purchase', navKey: 'purchase', route: 'purchase', icon: '▦', name: '采购管理', keywords: ['cg', 'caigou', 'purchase'] },
       { id: 'seal', navKey: 'seal', route: 'seal', icon: '印', name: '用章管理', keywords: ['yz', 'yongzhang', 'yinzhang', 'seal'] },
-      { id: 'approval', navKey: 'approval', route: 'approval', icon: '✓', name: '审批中心', badgeKey: 'pendingTaskCount', keywords: ['sp', 'shenpi', 'approval'] },
-      { id: 'copies', navKey: 'copies', route: 'copies', icon: '▤', name: '待我阅读', badgeKey: 'pendingReadCount', keywords: ['cs', 'chaosong', 'yuedu'] },
+      { id: 'approval', navKey: 'approval', route: 'approval', icon: '✓', name: '事项中心', badgeKey: 'pendingTaskCount', keywords: ['sx', 'shixiang', 'approval', 'sp', 'shenpi'] },
+      { id: 'copies', navKey: 'copies', route: 'copies', icon: '▤', name: '审批抄送', keywords: ['cs', 'chaosong', 'yuedu'] },
       { id: 'delegations', navKey: 'delegations', route: 'delegations', icon: '⇄', name: '审批委托', keywords: ['wt', 'weituo'] }
     ]
   },

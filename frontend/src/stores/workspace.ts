@@ -19,6 +19,7 @@ import { useSealStore } from './seal'
 import { useTravelStore } from './travel'
 import { useUiStore } from './ui'
 import { useWorkflowStore } from './workflow'
+import { useWorkItemStore } from './work-items'
 
 export const useWorkspaceStore = defineStore('workspace', () => {
   const auth = useAuthStore()
@@ -32,6 +33,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const purchase = usePurchaseStore()
   const seal = useSealStore()
   const workflow = useWorkflowStore()
+  const workItems = useWorkItemStore()
   const organization = useOrganizationStore()
   const personnel = usePersonnelStore()
   const personnelCases = usePersonnelCaseStore()
@@ -94,7 +96,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       purchase.loadInitiated(auth.currentUserId),
       seal.loadSeals(),
       seal.loadInitiated(auth.currentUserId),
-      workflow.loadTasks(),
+      workItems.loadWorkbench(),
       workflow.loadNotifications(),
       workflow.loadCopies(),
       documents.loadCategories().catch(() => undefined),
@@ -112,6 +114,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     purchase.reset()
     seal.reset()
     workflow.reset()
+    workItems.reset()
     organization.reset()
     personnel.reset()
     personnelCases.reset()

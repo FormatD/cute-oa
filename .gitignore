@@ -6,6 +6,9 @@
 **/obj/
 frontend/node_modules/
 frontend/dist/
+frontend/playwright-report/
+frontend/test-results/
+frontend/.cache/ms-playwright/
 data/
 .tools/
 backend/Oa.Api/storage/

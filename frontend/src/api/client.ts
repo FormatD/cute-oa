@@ -17,6 +17,7 @@ import { createSealApi } from './modules/seal'
 import { createSystemApi } from './modules/system'
 import { createTravelApi } from './modules/travel'
 import { createWorkflowApi } from './modules/workflow'
+import { createWorkItemApi } from './modules/work-items'
 
 function createApiClient(http: HttpClient) {
   return {
@@ -36,7 +37,8 @@ function createApiClient(http: HttpClient) {
     seal: createSealApi(http),
     system: createSystemApi(http),
     travel: createTravelApi(http),
-    workflow: createWorkflowApi(http)
+    workflow: createWorkflowApi(http),
+    workItems: createWorkItemApi(http)
   }
 }
 

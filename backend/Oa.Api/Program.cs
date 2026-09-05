@@ -51,6 +51,7 @@ builder.Services.AddScoped<IProcessRouter>(provider => provider.GetRequiredServi
 builder.Services.AddScoped<DelegationService>();
 builder.Services.AddScoped<FlowInstanceService>();
 builder.Services.AddScoped<FlowCopyService>();
+builder.Services.AddScoped<WorkItemService>();
 builder.Services.Configure<FormOptions>(options => options.MultipartBodyLengthLimit = 21 * 1024 * 1024);
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
@@ -546,12 +547,26 @@ app.MapGet("/api/v1/files/{id:guid}", (Guid id, string resourceType, Guid resour
     var opened = files.Open(actor, id);
     return opened.IsSuccess ? Results.File(opened.Value!.Content, opened.Value.Descriptor.ContentType, opened.Value.Descriptor.Name, enableRangeProcessing: true) : Results.NotFound(new { code = opened.Code, message = opened.Error });
 });
-app.MapGet("/api/v1/demo/summary", (HttpRequest request, DemoAuthService auth, DemoData data, LeaveService leave, ExpenseService expense, TravelService travel, PurchaseService purchase, SealService seal, FlowCopyService copies, EmploymentContractService contracts) =>
+app.MapGet("/api/v1/demo/summary", (HttpRequest request, DemoAuthService auth, DemoData data, LeaveService leave, WorkItemService workItems) =>
 {
     var actor = Actor(request, auth);
-    var contractAlerts = contracts.AlertSummary(actor);
-    return Results.Ok(new { tenant = data.Tenant, currentUser = data.ToProfile(actor), pendingTaskCount = leave.GetPendingTasks(actor).Count + expense.GetPendingTasks(actor).Count + travel.GetPendingTasks(actor).Count + purchase.GetPendingTasks(actor).Count + seal.GetPendingTasks(actor).Count, pendingReadCount = copies.ListMine(actor).Count(item => item.ReadAt is null), contractRiskCount = contractAlerts.AtRiskContracts, leaveBalance = leave.GetBalance(actor) });
+    var workItemSummary = workItems.GetSummary(actor);
+    return Results.Ok(new
+    {
+        tenant = data.Tenant,
+        currentUser = data.ToProfile(actor),
+        pendingTaskCount = workItemSummary.PendingCount,
+        pendingReadCount = workItemSummary.PendingReadCount,
+        contractRiskCount = workItemSummary.RiskCount,
+        leaveBalance = leave.GetBalance(actor),
+        workItems = workItemSummary
+    });
 });
+
+app.MapGet("/api/v1/work-items", (string? tab, string? businessType, string? keyword, string? status, string? applicantId, string? departmentId, DateOnly? startDate, DateOnly? endDate, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, WorkItemService service) =>
+    Results.Ok(service.List(Actor(request, auth), new WorkItemQuery(tab, businessType, keyword, status, applicantId, departmentId, startDate, endDate, page, pageSize))));
+app.MapGet("/api/v1/work-items/overview", (int? take, HttpRequest request, DemoAuthService auth, WorkItemService service) =>
+    Results.Ok(service.GetOverview(Actor(request, auth), take ?? 5)));
 
 app.MapGet("/api/v1/leave-requests", (string? keyword, int? status, string? applicantId, DateOnly? startDate, DateOnly? endDate, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, LeaveService service) => Results.Ok(Paging.Create(service.List(Actor(request, auth), new DocumentListQuery(keyword, status, applicantId, startDate, endDate)), page, pageSize)));
 app.MapGet("/api/v1/leave-requests/{id:guid}", (Guid id, HttpRequest request, DemoAuthService auth, LeaveService service) => { var result = service.Get(Actor(request, auth), id); return result.IsSuccess ? Results.Ok(result.Value) : Results.NotFound(new { code = result.Code, message = result.Error }); });

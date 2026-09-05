@@ -254,11 +254,9 @@ public sealed class KnowledgeDocumentService
         // Pending acknowledgement filter for actor
         if (pendingAckOnly == true)
         {
-            var acknowledgedDocIds = _db.DocumentAcknowledgements.AsNoTracking()
-                .Where(a => a.TenantId == TenantId && a.UserId == actor.Id)
-                .Select(a => a.DocumentId)
-                .ToHashSet();
-            query = query.Where(item => item.IsMustRead && item.Status == (int)DocumentStatus.Published && !acknowledgedDocIds.Contains(item.Id));
+            query = query.Where(item => item.IsMustRead && item.Status == (int)DocumentStatus.Published
+                && !_db.DocumentAcknowledgements.Any(ack => ack.TenantId == TenantId && ack.UserId == actor.Id
+                    && ack.DocumentId == item.Id && ack.DocumentVersion == item.Version));
             if (!hasGlobalManage)
             {
                 query = query.Where(item => item.DepartmentId == null || item.DepartmentId == actor.DepartmentId);

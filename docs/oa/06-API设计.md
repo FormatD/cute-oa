@@ -26,6 +26,8 @@
 | POST | `/auth/sessions/revoke-others` | 保留当前会话并撤销当前账号的所有其他有效会话 |
 | GET | `/me` | 返回当前令牌对应的安全用户资料 |
 | GET | `/demo/summary` | 当前用户工作台聚合数据 |
+| GET | `/work-items` | 统一事项中心；`tab` 支持 `pending/processed/initiated/reading/risk`，可按业务类型、状态、发起人、部门、日期和关键字筛选，服务端分页并返回角色化汇总 |
+| GET | `/work-items/overview` | 工作台一次返回待处理、我发起、未读事项前若干条及角色化数量，避免按页签重复聚合 |
 | GET | `/announcements` | 有效已发布公告分页，按发布时间倒序并返回当前用户已读时间 |
 | GET | `/announcements/{id}` | 公告详情；普通员工不能读取草稿、撤回或过期公告 |
 | POST | `/announcements/{id}/read` | 当前用户确认已读，重复请求保持一条阅读记录 |
