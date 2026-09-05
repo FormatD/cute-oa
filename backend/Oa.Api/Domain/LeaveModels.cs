@@ -42,6 +42,10 @@ public sealed class LeaveRequest
     public int? ProcessDefinitionVersion { get; set; }
     public Guid? CurrentFlowInstanceId { get; set; }
     public int? BalanceYear { get; set; }
+    public Guid? ConfigVersionId { get; set; }
+    public int? ConfigVersionNumber { get; set; }
+    public string? ConfigSnapshotJson { get; set; }
+    public DateTimeOffset? ConfigResolvedAt { get; set; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
     public LeaveStatus Status { get; set; } = LeaveStatus.Draft;
     public List<FlowTask> Tasks { get; } = [];

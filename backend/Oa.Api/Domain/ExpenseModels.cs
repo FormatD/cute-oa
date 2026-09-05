@@ -26,6 +26,10 @@ public sealed class ExpenseClaim
     public string? ProcessDefinitionCode { get; set; }
     public int? ProcessDefinitionVersion { get; set; }
     public Guid? CurrentFlowInstanceId { get; set; }
+    public Guid? ConfigVersionId { get; set; }
+    public int? ConfigVersionNumber { get; set; }
+    public string? ConfigSnapshotJson { get; set; }
+    public DateTimeOffset? ConfigResolvedAt { get; set; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
     public ExpenseStatus Status { get; set; } = ExpenseStatus.Draft;
     public List<ExpenseTask> Tasks { get; } = [];

@@ -76,6 +76,11 @@ public sealed class SealRequest
     public string? ProcessDefinitionCode { get; init; }
     public int? ProcessDefinitionVersion { get; init; }
     public Guid? CurrentFlowInstanceId { get; init; }
+    public string? RiskLevel { get; init; }
+    public Guid? ConfigVersionId { get; init; }
+    public int? ConfigVersionNumber { get; init; }
+    public string? ConfigSnapshotJson { get; init; }
+    public DateTimeOffset? ConfigResolvedAt { get; init; }
     public DateTimeOffset CreatedAt { get; init; }
     public DateTimeOffset UpdatedAt { get; init; }
     public IReadOnlyList<SealTask> Tasks { get; init; } = [];
