@@ -123,6 +123,7 @@ public sealed class LeaveService
         if (days <= 0)
             return ServiceResult<LeaveRequest>.Failure("请假时长必须大于 0。", "LEAVE_003");
 
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Leave, "LeavePolicy");
         var item = new LeaveRequest
         {
             Number = $"QJ-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}",
@@ -136,7 +137,11 @@ public sealed class LeaveService
             Days = days,
             Reason = request.Reason.Trim(),
             Attachments = request.Attachments?.ToList() ?? [],
-            CopyRecipientIds = copies.Value!
+            CopyRecipientIds = copies.Value!,
+            ConfigVersionId = configRecord?.Id,
+            ConfigVersionNumber = configRecord?.Version,
+            ConfigSnapshotJson = configRecord?.ContentJson,
+            ConfigResolvedAt = configRecord is not null ? DateTimeOffset.UtcNow : null
         };
         return ExecuteMutation(() =>
         {
@@ -156,6 +161,29 @@ public sealed class LeaveService
         if (_requests.Any(request => request.Id != id && request.ApplicantId == actor.Id && request.Type == item.Type &&
             (request.Status is LeaveStatus.Approving or LeaveStatus.Completed) && IsOverlapping(request, item)))
             return ServiceResult<LeaveRequest>.Failure("存在时间重叠的有效请假申请。", "LEAVE_002");
+
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Leave, "LeavePolicy");
+        var policy = configRecord is not null
+            ? JsonSerializer.Deserialize<LeavePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultLeavePolicy();
+
+        var typeRule = policy?.LeaveTypes.FirstOrDefault(t => t.Type.Equals(item.Type.ToString(), StringComparison.OrdinalIgnoreCase));
+        if (typeRule is not null && !typeRule.IsEnabled)
+            return ServiceResult<LeaveRequest>.Failure($"假期类型【{typeRule.Name}】已被系统停用，无法提交申请。", "LEAVE_005");
+
+        if (typeRule is not null && typeRule.MinUnit > 0)
+        {
+            var remainder = item.Days % typeRule.MinUnit;
+            if (remainder != 0)
+                return ServiceResult<LeaveRequest>.Failure($"【{typeRule.Name}】最小申请单位为 {typeRule.MinUnit} 天，当前申请时长 {item.Days} 天不符合要求。", "LEAVE_006");
+        }
+
+        if (typeRule is not null)
+        {
+            var needsAttachment = typeRule.RequiresAttachment && (!typeRule.AttachmentThresholdDays.HasValue || item.Days > typeRule.AttachmentThresholdDays.Value);
+            if (needsAttachment && (item.Attachments is null || item.Attachments.Count == 0))
+                return ServiceResult<LeaveRequest>.Failure(typeRule.AttachmentThresholdDays.HasValue ? $"【{typeRule.Name}】申请时长超过 {typeRule.AttachmentThresholdDays} 天必须上传证明材料附件。" : $"【{typeRule.Name}】申请必须上传证明材料附件。", "LEAVE_007");
+        }
 
         var route = processRouter.Resolve("Leave", actor, item.Days, item.Type.ToString());
         if (!route.IsSuccess) return ServiceResult<LeaveRequest>.Failure(route.Error!, route.Code!);
@@ -184,6 +212,13 @@ public sealed class LeaveService
             item.ProcessDefinitionId = route.Value!.DefinitionId;
             item.ProcessDefinitionCode = route.Value.Code;
             item.ProcessDefinitionVersion = route.Value.Version;
+            if (configRecord is not null)
+            {
+                item.ConfigVersionId = configRecord.Id;
+                item.ConfigVersionNumber = configRecord.Version;
+                item.ConfigSnapshotJson = configRecord.ContentJson;
+                item.ConfigResolvedAt = DateTimeOffset.UtcNow;
+            }
             var instance = flowInstances.Start(item.FlowInstances, "Leave", item.Id, item.Number, actor, route.Value);
             item.CurrentFlowInstanceId = instance.Id;
             foreach (var (resolvedApprover, sequence) in route.Value.Approvers.Select((value, index) => (value, index + 1)))
@@ -422,6 +457,24 @@ public sealed class LeaveService
         var statutory = type == LeaveType.Annual
             ? AnnualLeavePolicy.Calculate(asOf, profile?.CumulativeWorkStartDate, employee.CumulativeWorkYears, profile?.HireDate)
             : 0m;
+        if (type == LeaveType.Annual)
+        {
+            var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Leave, "LeavePolicy");
+            if (configRecord is not null)
+            {
+                var policy = JsonSerializer.Deserialize<LeavePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
+                if (policy?.AnnualLeaveBonus is { } bonus)
+                {
+                    var bonusDays = employee.CumulativeWorkYears switch
+                    {
+                        < 10 => bonus.Tier1BonusDays,
+                        < 20 => bonus.Tier2BonusDays,
+                        _ => bonus.Tier3BonusDays
+                    };
+                    statutory += bonusDays;
+                }
+            }
+        }
         if (db is null) return new LeaveBalance(statutory, 0m, 0m, year, statutory, 0m);
         var record = db.LeaveBalances.AsNoTracking().SingleOrDefault(x => x.TenantId == TenantId && x.UserId == employee.Id && x.LeaveType == (int)type && x.Year == year);
         return record is null
@@ -434,7 +487,7 @@ public sealed class LeaveService
         var tasks = db.FlowTasks.AsNoTracking().Where(x => x.TenantId == TenantId).ToLookup(x => x.LeaveRequestId);
         return db.LeaveRequests.AsNoTracking().Where(x => x.TenantId == TenantId).OrderBy(x => x.CreatedAt).ToList().Select(x =>
         {
-            var request = new LeaveRequest { Id = x.Id, Number = x.Number, ApplicantId = x.ApplicantId, ApplicantName = x.ApplicantName, Type = (LeaveType)x.Type, StartDate = x.StartDate, StartPeriod = (LeavePeriod)x.StartPeriod, EndDate = x.EndDate, EndPeriod = (LeavePeriod)x.EndPeriod, Days = x.Days, Reason = x.Reason, Attachments = JsonSerializer.Deserialize<List<string>>(x.AttachmentsJson) ?? [], CopyRecipientIds = copyRecipients.LoadRecipientIds("Leave", x.Id), Version = x.Version, ProcessDefinitionId = x.ProcessDefinitionId, ProcessDefinitionCode = x.ProcessDefinitionCode, ProcessDefinitionVersion = x.ProcessDefinitionVersion, CurrentFlowInstanceId = x.CurrentFlowInstanceId, BalanceYear = x.BalanceYear, CreatedAt = x.CreatedAt, Status = (LeaveStatus)x.Status };
+            var request = new LeaveRequest { Id = x.Id, Number = x.Number, ApplicantId = x.ApplicantId, ApplicantName = x.ApplicantName, Type = (LeaveType)x.Type, StartDate = x.StartDate, StartPeriod = (LeavePeriod)x.StartPeriod, EndDate = x.EndDate, EndPeriod = (LeavePeriod)x.EndPeriod, Days = x.Days, Reason = x.Reason, Attachments = JsonSerializer.Deserialize<List<string>>(x.AttachmentsJson) ?? [], CopyRecipientIds = copyRecipients.LoadRecipientIds("Leave", x.Id), Version = x.Version, ProcessDefinitionId = x.ProcessDefinitionId, ProcessDefinitionCode = x.ProcessDefinitionCode, ProcessDefinitionVersion = x.ProcessDefinitionVersion, CurrentFlowInstanceId = x.CurrentFlowInstanceId, BalanceYear = x.BalanceYear, ConfigVersionId = x.ConfigVersionId, ConfigVersionNumber = x.ConfigVersionNumber, ConfigSnapshotJson = x.ConfigSnapshotJson, ConfigResolvedAt = x.ConfigResolvedAt, CreatedAt = x.CreatedAt, Status = (LeaveStatus)x.Status };
             request.Tasks.AddRange(tasks[x.Id].OrderBy(t => t.Sequence).Select(t => new FlowTask { Id = t.Id, LeaveRequestId = t.LeaveRequestId, FlowInstanceId = t.FlowInstanceId, AssigneeId = t.AssigneeId, AssigneeName = t.AssigneeName, OriginalAssigneeId = t.OriginalAssigneeId, OriginalAssigneeName = t.OriginalAssigneeName, DelegationId = t.DelegationId, Sequence = t.Sequence, Status = (FlowTaskStatus)t.Status, Comment = t.Comment, ProcessedAt = t.ProcessedAt }));
             request.FlowInstances.AddRange(flowInstances.Load("Leave", x.Id));
             return request;
@@ -456,7 +509,7 @@ public sealed class LeaveService
         {
             throw new DbUpdateConcurrencyException();
         }
-        record.Number = request.Number; record.ApplicantId = request.ApplicantId; record.ApplicantName = request.ApplicantName; record.Type = (int)request.Type; record.StartDate = request.StartDate; record.StartPeriod = (int)request.StartPeriod; record.EndDate = request.EndDate; record.EndPeriod = (int)request.EndPeriod; record.Days = request.Days; record.Reason = request.Reason; record.AttachmentsJson = JsonSerializer.Serialize(request.Attachments); record.Status = (int)request.Status; record.Version = request.Version; record.ProcessDefinitionId = request.ProcessDefinitionId; record.ProcessDefinitionCode = request.ProcessDefinitionCode; record.ProcessDefinitionVersion = request.ProcessDefinitionVersion; record.CurrentFlowInstanceId = request.CurrentFlowInstanceId; record.BalanceYear = request.BalanceYear; record.UpdatedAt = DateTimeOffset.UtcNow;
+        record.Number = request.Number; record.ApplicantId = request.ApplicantId; record.ApplicantName = request.ApplicantName; record.Type = (int)request.Type; record.StartDate = request.StartDate; record.StartPeriod = (int)request.StartPeriod; record.EndDate = request.EndDate; record.EndPeriod = (int)request.EndPeriod; record.Days = request.Days; record.Reason = request.Reason; record.AttachmentsJson = JsonSerializer.Serialize(request.Attachments); record.Status = (int)request.Status; record.Version = request.Version; record.ProcessDefinitionId = request.ProcessDefinitionId; record.ProcessDefinitionCode = request.ProcessDefinitionCode; record.ProcessDefinitionVersion = request.ProcessDefinitionVersion; record.CurrentFlowInstanceId = request.CurrentFlowInstanceId; record.BalanceYear = request.BalanceYear; record.ConfigVersionId = request.ConfigVersionId; record.ConfigVersionNumber = request.ConfigVersionNumber; record.ConfigSnapshotJson = request.ConfigSnapshotJson; record.ConfigResolvedAt = request.ConfigResolvedAt; record.UpdatedAt = DateTimeOffset.UtcNow;
         db.FlowTasks.Where(x => x.LeaveRequestId == request.Id).ExecuteDelete();
         flowInstances.Track(request.FlowInstances);
         copyRecipients.Track("Leave", request.Id, request.Number, request.ApplicantName, $"{request.Type}请假：{request.Reason}", request.CopyRecipientIds);

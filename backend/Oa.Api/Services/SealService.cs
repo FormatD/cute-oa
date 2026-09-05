@@ -103,6 +103,16 @@ public sealed class SealService
         if (!validation.IsSuccess) return ServiceResult<SealRequest>.Failure(validation.Error!, validation.Code!);
 
         var today = BusinessTime.ChinaToday();
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Seal, "SealPolicy");
+        var policy = configRecord is not null
+            ? JsonSerializer.Deserialize<SealPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultSealPolicy();
+
+        var docCategory = policy?.DocumentCategories.FirstOrDefault(r => r.Name.Equals(request.DocumentCategory.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (docCategory is not null && !docCategory.IsEnabled)
+            return ServiceResult<SealRequest>.Failure($"文件类别【{docCategory.Name}】已被系统停用，无法申请。", "SEAL_007");
+        var riskLevel = docCategory?.RiskLevel ?? (request.DocumentCategory.Trim() is "合同协议" or "招投标文件" ? "HIGH" : "LOW");
+
         var record = new SealRequestRecord
         {
             TenantId = TenantId,
@@ -124,6 +134,11 @@ public sealed class SealService
             Status = (int)SealStatus.Draft,
             Version = 1,
             IsDemo = isDemo,
+            RiskLevel = riskLevel,
+            ConfigVersionId = configRecord?.Id,
+            ConfigVersionNumber = configRecord?.Version,
+            ConfigSnapshotJson = configRecord?.ContentJson,
+            ConfigResolvedAt = configRecord is not null ? DateTimeOffset.UtcNow : null,
             CreatedAt = DateTimeOffset.UtcNow,
             UpdatedAt = DateTimeOffset.UtcNow
         };
@@ -167,6 +182,32 @@ public sealed class SealService
         if (record is null) return ServiceResult<SealRequest>.Failure("用章申请不存在或无权限。", "DATA_001");
         if ((SealStatus)record.Status is not (SealStatus.Draft or SealStatus.Rejected or SealStatus.Withdrawn))
             return ServiceResult<SealRequest>.Failure("当前状态不允许提交。", "STATE_001");
+
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Seal, "SealPolicy");
+        var policy = configRecord is not null
+            ? JsonSerializer.Deserialize<SealPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultSealPolicy();
+
+        var sealItem = policy?.Seals.FirstOrDefault(s => s.Name.Equals(record.SealType, StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(record.SealType, StringComparison.OrdinalIgnoreCase));
+        if (sealItem is not null && !sealItem.IsEnabled)
+            return ServiceResult<SealRequest>.Failure($"印章【{sealItem.Name}】已被系统停用，无法申请。", "SEAL_005");
+
+        if (record.IsOut && sealItem is not null && !sealItem.AllowOut)
+            return ServiceResult<SealRequest>.Failure($"印章【{sealItem.Name}】禁止外带使用。", "SEAL_006");
+
+        var docCategory = policy?.DocumentCategories.FirstOrDefault(r => r.Name.Equals(record.DocumentCategory, StringComparison.OrdinalIgnoreCase));
+        if (docCategory is not null && !docCategory.IsEnabled)
+            return ServiceResult<SealRequest>.Failure($"文件类别【{docCategory.Name}】已被系统停用，无法申请。", "SEAL_007");
+
+        record.RiskLevel = docCategory?.RiskLevel ?? (record.DocumentCategory is "合同协议" or "招投标文件" ? "HIGH" : "LOW");
+
+        if (configRecord is not null)
+        {
+            record.ConfigVersionId = configRecord.Id;
+            record.ConfigVersionNumber = configRecord.Version;
+            record.ConfigSnapshotJson = configRecord.ContentJson;
+            record.ConfigResolvedAt = DateTimeOffset.UtcNow;
+        }
 
         // Routing metric:
         // Tier 3: Out or Legal Person Seal -> 3m (Manager + HR/Admin + GM)
@@ -562,6 +603,11 @@ public sealed class SealService
             ProcessDefinitionCode = record.ProcessDefinitionCode,
             ProcessDefinitionVersion = record.ProcessDefinitionVersion,
             CurrentFlowInstanceId = record.CurrentFlowInstanceId,
+            RiskLevel = record.RiskLevel,
+            ConfigVersionId = record.ConfigVersionId,
+            ConfigVersionNumber = record.ConfigVersionNumber,
+            ConfigSnapshotJson = record.ConfigSnapshotJson,
+            ConfigResolvedAt = record.ConfigResolvedAt,
             CreatedAt = record.CreatedAt,
             UpdatedAt = record.UpdatedAt,
             Tasks = tasks,

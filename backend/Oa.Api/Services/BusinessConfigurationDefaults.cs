@@ -7,7 +7,38 @@ namespace Oa.Api.Services;
 
 public static class BusinessConfigurationDefaults
 {
-    private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true, WriteIndented = true };
+    public static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true, WriteIndented = true };
+
+    public static BusinessConfigurationRecord? ResolveEffectiveConfig(OaDbContext? db, string domain, string code, string tenantId = "demo", DateTimeOffset? asOf = null)
+    {
+        if (db is null) return null;
+        try
+        {
+            var targetTime = (asOf ?? DateTimeOffset.UtcNow).ToUniversalTime();
+            var record = db.BusinessConfigurations.AsNoTracking()
+                .Where(item => item.TenantId == tenantId && item.Domain == domain && item.Code == code)
+                .Where(item => item.Status == ConfigurationStatus.Effective || item.Status == ConfigurationStatus.Scheduled)
+                .Where(item => item.EffectiveFrom <= targetTime && (item.EffectiveTo == null || item.EffectiveTo > targetTime))
+                .OrderByDescending(item => item.EffectiveFrom)
+                .FirstOrDefault();
+
+            if (record is null)
+            {
+                EnsureDefaultConfigurations(db, tenantId);
+                record = db.BusinessConfigurations.AsNoTracking()
+                    .Where(item => item.TenantId == tenantId && item.Domain == domain && item.Code == code)
+                    .Where(item => item.Status == ConfigurationStatus.Effective)
+                    .OrderByDescending(item => item.EffectiveFrom)
+                    .FirstOrDefault();
+            }
+
+            return record;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
     public static LeavePolicyConfig CreateDefaultLeavePolicy() => new()
     {

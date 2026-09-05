@@ -120,11 +120,27 @@ public sealed class PurchaseService
         if (record is null) return ServiceResult<PurchaseRequest>.Failure("采购申请不存在或无权限。", "DATA_001");
         if ((PurchaseStatus)record.Status is not (PurchaseStatus.Draft or PurchaseStatus.Rejected or PurchaseStatus.Withdrawn))
             return ServiceResult<PurchaseRequest>.Failure("当前状态不允许提交。", "STATE_001");
+
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Procurement, "ProcurementPolicy");
+        var policy = configRecord is not null
+            ? JsonSerializer.Deserialize<ProcurementPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultProcurementPolicy();
+
+        var quoteThreshold = policy?.QuoteAttachmentThreshold ?? 5000m;
+        var doubleQuoteThreshold = 50000m;
         var attachmentCount = DeserializeList(record.AttachmentsJson).Count;
-        if (record.EstimatedTotal >= 50_000m && attachmentCount < 2 || record.EstimatedTotal >= 5_000m && attachmentCount < 1)
-            return ServiceResult<PurchaseRequest>.Failure(record.EstimatedTotal >= 50_000m ? "5 万元及以上采购至少需要两份报价或依据附件。" : "5000 元及以上采购至少需要一份报价或依据附件。", "PURCHASE_002");
+        if (record.EstimatedTotal >= doubleQuoteThreshold && attachmentCount < 2 || record.EstimatedTotal >= quoteThreshold && attachmentCount < 1)
+            return ServiceResult<PurchaseRequest>.Failure(record.EstimatedTotal >= doubleQuoteThreshold ? $"{doubleQuoteThreshold:N0} 元及以上采购至少需要两份报价或依据附件。" : $"{quoteThreshold:N0} 元及以上采购至少需要一份报价或依据附件。", "PURCHASE_002");
         var route = processRouter.Resolve(BusinessType, actor, record.EstimatedTotal);
         if (!route.IsSuccess) return ServiceResult<PurchaseRequest>.Failure(route.Error!, route.Code!);
+
+        if (configRecord is not null)
+        {
+            record.ConfigVersionId = configRecord.Id;
+            record.ConfigVersionNumber = configRecord.Version;
+            record.ConfigSnapshotJson = configRecord.ContentJson;
+            record.ConfigResolvedAt = DateTimeOffset.UtcNow;
+        }
 
         var attempt = db.FlowInstances.Where(item => item.TenantId == TenantId && item.BusinessType == BusinessType && item.BusinessId == record.Id)
             .Select(item => (int?)item.Attempt).Max() ?? 0;
@@ -306,10 +322,12 @@ public sealed class PurchaseService
     {
         var validation = Validate(actor, request, BusinessTime.ChinaToday());
         if (!validation.IsSuccess) return ServiceResult<PurchaseRequest>.Failure(validation.Error!, validation.Code!);
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Procurement, "ProcurementPolicy");
         var record = new PurchaseRequestRecord
         {
             TenantId = TenantId, Number = $"CG-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}",
-            ApplicantId = actor.Id, ApplicantName = actor.Name, DepartmentName = actor.DepartmentName, Status = (int)PurchaseStatus.Draft, Version = 1, IsDemo = isDemo
+            ApplicantId = actor.Id, ApplicantName = actor.Name, DepartmentName = actor.DepartmentName, Status = (int)PurchaseStatus.Draft, Version = 1, IsDemo = isDemo,
+            ConfigVersionId = configRecord?.Id, ConfigVersionNumber = configRecord?.Version, ConfigSnapshotJson = configRecord?.ContentJson, ConfigResolvedAt = configRecord is not null ? DateTimeOffset.UtcNow : null
         };
         Apply(record, request, validation.Value!.Items, validation.Value.Attachments);
         db.PurchaseRequests.Add(record);
@@ -462,7 +480,9 @@ public sealed class PurchaseService
             Attachments = DeserializeList(record.AttachmentsJson), CopyRecipientIds = copyRecipients.LoadRecipientIds(BusinessType, record.Id),
             Status = (PurchaseStatus)record.Status, Version = record.Version, IsDemo = record.IsDemo,
             ProcessDefinitionId = record.ProcessDefinitionId, ProcessDefinitionCode = record.ProcessDefinitionCode, ProcessDefinitionVersion = record.ProcessDefinitionVersion,
-            CurrentFlowInstanceId = record.CurrentFlowInstanceId, CreatedAt = record.CreatedAt, UpdatedAt = record.UpdatedAt,
+            CurrentFlowInstanceId = record.CurrentFlowInstanceId,
+            ConfigVersionId = record.ConfigVersionId, ConfigVersionNumber = record.ConfigVersionNumber, ConfigSnapshotJson = record.ConfigSnapshotJson, ConfigResolvedAt = record.ConfigResolvedAt,
+            CreatedAt = record.CreatedAt, UpdatedAt = record.UpdatedAt,
             Tasks = db.PurchaseTasks.AsNoTracking().Where(item => item.PurchaseRequestId == record.Id && item.FlowInstanceId == record.CurrentFlowInstanceId).OrderBy(item => item.Sequence).Select(ToTaskExpression()).ToList(),
             FlowInstances = flowInstances.Load(BusinessType, record.Id),
             Order = order is null ? null : new PurchaseOrder(order.Supplier, order.OrderNumber, order.ActualAmount, order.OrderDate, order.ExpectedDeliveryDate, order.Notes, DeserializeList(order.AttachmentsJson), order.CreatedBy, order.CreatedByName, order.CreatedAt),

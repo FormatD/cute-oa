@@ -73,10 +73,12 @@ public sealed class ExpenseService
         if (!travel.IsSuccess) return ServiceResult<ExpenseClaim>.Failure(travel.Error!, travel.Code!);
 
         var total = request.Items.Sum(item => item.Amount);
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Expense, "ExpensePolicy");
         var item = new ExpenseClaim
         {
             Number = $"BX-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}", ApplicantId = actor.Id, ApplicantName = actor.Name, DepartmentName = actor.DepartmentName,
-            TravelRequestId = travel.Value?.Id, TravelRequestNumber = travel.Value?.Number, PayeeAccountName = request.PayeeAccountName.Trim(), PayeeAccount = request.PayeeAccount.Trim(), BankName = request.BankName?.Trim(), Description = request.Description?.Trim(), Items = request.Items, CopyRecipientIds = copies.Value!, TotalAmount = total
+            TravelRequestId = travel.Value?.Id, TravelRequestNumber = travel.Value?.Number, PayeeAccountName = request.PayeeAccountName.Trim(), PayeeAccount = request.PayeeAccount.Trim(), BankName = request.BankName?.Trim(), Description = request.Description?.Trim(), Items = request.Items, CopyRecipientIds = copies.Value!, TotalAmount = total,
+            ConfigVersionId = configRecord?.Id, ConfigVersionNumber = configRecord?.Version, ConfigSnapshotJson = configRecord?.ContentJson, ConfigResolvedAt = configRecord is not null ? DateTimeOffset.UtcNow : null
         };
         _claims.Add(item);
         Persist(item);
@@ -94,6 +96,33 @@ public sealed class ExpenseService
             _claims.Where(claim => claim.Id != item.Id && claim.Status is ExpenseStatus.Approving or ExpenseStatus.Approved or ExpenseStatus.Completed)
                 .SelectMany(claim => claim.Items).Any(detail => !string.IsNullOrWhiteSpace(detail.ReceiptNumber) && receiptNumbers.Contains((detail.Category, detail.ReceiptNumber.Trim()))))
             return ServiceResult<ExpenseClaim>.Failure("存在已用于有效报销单的同类票据号。", "EXP_003");
+
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Expense, "ExpensePolicy");
+        var policy = configRecord is not null
+            ? JsonSerializer.Deserialize<ExpensePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultExpensePolicy();
+
+        if (policy is not null)
+        {
+            foreach (var detail in item.Items)
+            {
+                var catRule = policy.Categories.FirstOrDefault(c => c.Name.Equals(detail.Category, StringComparison.OrdinalIgnoreCase));
+                if (catRule is not null && !catRule.IsEnabled)
+                    return ServiceResult<ExpenseClaim>.Failure($"费用类别【{detail.Category}】已被系统停用，无法提交申请。", "EXP_005");
+
+                if (catRule is not null && catRule.RequiresReceipt && (detail.Attachments is null || detail.Attachments.Count == 0))
+                    return ServiceResult<ExpenseClaim>.Failure($"费用明细【{detail.Description}】属于【{detail.Category}】，必须上传发票凭证。", "EXP_002");
+
+                if (catRule is not null && catRule.SingleLimit > 0 && detail.Amount > catRule.SingleLimit)
+                {
+                    if (catRule.BlockWhenExceeded)
+                        return ServiceResult<ExpenseClaim>.Failure($"费用明细【{detail.Description}】金额超出单笔限额 {catRule.SingleLimit:N2} 元，禁止提交。", "EXP_006");
+                    if (catRule.RequiresReasonWhenExceeded && string.IsNullOrWhiteSpace(item.Description))
+                        return ServiceResult<ExpenseClaim>.Failure($"费用明细【{detail.Description}】超出单笔限额 {catRule.SingleLimit:N2} 元，必须填写说明原因。", "EXP_007");
+                }
+            }
+        }
+
         var route = processRouter.Resolve("Expense", actor, item.TotalAmount);
         if (!route.IsSuccess) return ServiceResult<ExpenseClaim>.Failure(route.Error!, route.Code!);
         item.Status = ExpenseStatus.Approving;
@@ -101,6 +130,13 @@ public sealed class ExpenseService
         item.ProcessDefinitionId = route.Value!.DefinitionId;
         item.ProcessDefinitionCode = route.Value.Code;
         item.ProcessDefinitionVersion = route.Value.Version;
+        if (configRecord is not null)
+        {
+            item.ConfigVersionId = configRecord.Id;
+            item.ConfigVersionNumber = configRecord.Version;
+            item.ConfigSnapshotJson = configRecord.ContentJson;
+            item.ConfigResolvedAt = DateTimeOffset.UtcNow;
+        }
         var instance = flowInstances.Start(item.FlowInstances, "Expense", item.Id, item.Number, actor, route.Value);
         item.CurrentFlowInstanceId = instance.Id;
         foreach (var (resolvedApprover, sequence) in route.Value.Approvers.Select((value, index) => (value, index + 1)))
@@ -270,7 +306,7 @@ public sealed class ExpenseService
         var travels = db.TravelRequests.AsNoTracking().ToDictionary(x => x.Id, x => x.Number);
         return db.ExpenseClaims.AsNoTracking().Where(x => x.TenantId == TenantId).OrderBy(x => x.CreatedAt).ToList().Select(x =>
         {
-            var claim = new ExpenseClaim { Id = x.Id, Number = x.Number, ApplicantId = x.ApplicantId, ApplicantName = x.ApplicantName, DepartmentName = x.DepartmentName, TravelRequestId = x.TravelRequestId, TravelRequestNumber = x.TravelRequestId is { } travelId ? travels.GetValueOrDefault(travelId) : null, PayeeAccountName = x.PayeeAccountName, PayeeAccount = x.PayeeAccount, BankName = x.BankName, Description = x.Description, TotalAmount = x.TotalAmount, Version = x.Version, ProcessDefinitionId = x.ProcessDefinitionId, ProcessDefinitionCode = x.ProcessDefinitionCode, ProcessDefinitionVersion = x.ProcessDefinitionVersion, CurrentFlowInstanceId = x.CurrentFlowInstanceId, CreatedAt = x.CreatedAt, Status = (ExpenseStatus)x.Status, Items = items[x.Id].Select(i => new ExpenseItem(i.ExpenseDate, i.Category, i.Amount, i.Description, i.ReceiptNumber, JsonSerializer.Deserialize<List<string>>(i.AttachmentsJson) ?? [])).ToList(), CopyRecipientIds = copyRecipients.LoadRecipientIds("Expense", x.Id) };
+            var claim = new ExpenseClaim { Id = x.Id, Number = x.Number, ApplicantId = x.ApplicantId, ApplicantName = x.ApplicantName, DepartmentName = x.DepartmentName, TravelRequestId = x.TravelRequestId, TravelRequestNumber = x.TravelRequestId is { } travelId ? travels.GetValueOrDefault(travelId) : null, PayeeAccountName = x.PayeeAccountName, PayeeAccount = x.PayeeAccount, BankName = x.BankName, Description = x.Description, TotalAmount = x.TotalAmount, Version = x.Version, ProcessDefinitionId = x.ProcessDefinitionId, ProcessDefinitionCode = x.ProcessDefinitionCode, ProcessDefinitionVersion = x.ProcessDefinitionVersion, CurrentFlowInstanceId = x.CurrentFlowInstanceId, ConfigVersionId = x.ConfigVersionId, ConfigVersionNumber = x.ConfigVersionNumber, ConfigSnapshotJson = x.ConfigSnapshotJson, ConfigResolvedAt = x.ConfigResolvedAt, CreatedAt = x.CreatedAt, Status = (ExpenseStatus)x.Status, Items = items[x.Id].Select(i => new ExpenseItem(i.ExpenseDate, i.Category, i.Amount, i.Description, i.ReceiptNumber, JsonSerializer.Deserialize<List<string>>(i.AttachmentsJson) ?? [])).ToList(), CopyRecipientIds = copyRecipients.LoadRecipientIds("Expense", x.Id) };
             claim.Tasks.AddRange(tasks[x.Id].OrderBy(t => t.Sequence).Select(t => new ExpenseTask { Id = t.Id, ExpenseClaimId = x.Id, FlowInstanceId = t.FlowInstanceId, AssigneeId = t.AssigneeId, AssigneeName = t.AssigneeName, OriginalAssigneeId = t.OriginalAssigneeId, OriginalAssigneeName = t.OriginalAssigneeName, DelegationId = t.DelegationId, Sequence = t.Sequence, Status = (FlowTaskStatus)t.Status, Comment = t.Comment, ProcessedAt = t.ProcessedAt }));
             claim.FlowInstances.AddRange(flowInstances.Load("Expense", x.Id));
             if (payments.TryGetValue(x.Id, out var payment)) claim.Payment = new PaymentRecord(payment.PaymentDate, payment.PaymentMethod, payment.TransactionNumber, payment.PaidAmount, payment.ProofFile, payment.OperatorId);
@@ -284,7 +320,7 @@ public sealed class ExpenseService
         db.ChangeTracker.Clear();
         var record = db.ExpenseClaims.SingleOrDefault(x => x.Id == claim.Id);
         if (record is null) { record = new ExpenseRecord { Id = claim.Id, TenantId = TenantId }; db.ExpenseClaims.Add(record); }
-        record.Number = claim.Number; record.ApplicantId = claim.ApplicantId; record.ApplicantName = claim.ApplicantName; record.DepartmentName = claim.DepartmentName; record.TravelRequestId = claim.TravelRequestId; record.PayeeAccountName = claim.PayeeAccountName; record.PayeeAccount = claim.PayeeAccount; record.BankName = claim.BankName; record.Description = claim.Description; record.TotalAmount = claim.TotalAmount; record.Status = (int)claim.Status; record.Version = claim.Version; record.ProcessDefinitionId = claim.ProcessDefinitionId; record.ProcessDefinitionCode = claim.ProcessDefinitionCode; record.ProcessDefinitionVersion = claim.ProcessDefinitionVersion; record.CurrentFlowInstanceId = claim.CurrentFlowInstanceId; record.UpdatedAt = DateTimeOffset.UtcNow;
+        record.Number = claim.Number; record.ApplicantId = claim.ApplicantId; record.ApplicantName = claim.ApplicantName; record.DepartmentName = claim.DepartmentName; record.TravelRequestId = claim.TravelRequestId; record.PayeeAccountName = claim.PayeeAccountName; record.PayeeAccount = claim.PayeeAccount; record.BankName = claim.BankName; record.Description = claim.Description; record.TotalAmount = claim.TotalAmount; record.Status = (int)claim.Status; record.Version = claim.Version; record.ProcessDefinitionId = claim.ProcessDefinitionId; record.ProcessDefinitionCode = claim.ProcessDefinitionCode; record.ProcessDefinitionVersion = claim.ProcessDefinitionVersion; record.CurrentFlowInstanceId = claim.CurrentFlowInstanceId; record.ConfigVersionId = claim.ConfigVersionId; record.ConfigVersionNumber = claim.ConfigVersionNumber; record.ConfigSnapshotJson = claim.ConfigSnapshotJson; record.ConfigResolvedAt = claim.ConfigResolvedAt; record.UpdatedAt = DateTimeOffset.UtcNow;
         db.ExpenseItems.Where(x => x.ExpenseClaimId == claim.Id).ExecuteDelete();
         db.ExpenseTasks.Where(x => x.ExpenseClaimId == claim.Id).ExecuteDelete();
         db.Payments.Where(x => x.ExpenseClaimId == claim.Id).ExecuteDelete();

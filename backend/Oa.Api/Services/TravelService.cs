@@ -63,6 +63,7 @@ public sealed class TravelService
         if (!validated.IsSuccess) return ServiceResult<TravelRequest>.Failure(validated.Error!, validated.Code!);
         var itinerary = request.Itinerary.OrderBy(item => item.StartDate).ToList();
         var companions = request.CompanionIds?.Distinct().Select(data.FindEmployee).Where(item => item is not null).Cast<Employee>().ToList() ?? [];
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Travel, "TravelPolicy");
         var item = new TravelRequest
         {
             Number = $"CC-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}",
@@ -70,7 +71,8 @@ public sealed class TravelService
             Purpose = request.Purpose.Trim(), StartDate = itinerary.Min(line => line.StartDate), EndDate = itinerary.Max(line => line.EndDate),
             Days = itinerary.Max(line => line.EndDate).DayNumber - itinerary.Min(line => line.StartDate).DayNumber + 1,
             EstimatedBudget = request.EstimatedBudget, Itinerary = itinerary, CompanionIds = companions.Select(value => value.Id).ToList(), CompanionNames = companions.Select(value => value.Name).ToList(),
-            Attachments = request.Attachments?.Distinct().ToList() ?? [], CopyRecipientIds = validated.Value!
+            Attachments = request.Attachments?.Distinct().ToList() ?? [], CopyRecipientIds = validated.Value!,
+            ConfigVersionId = configRecord?.Id, ConfigVersionNumber = configRecord?.Version, ConfigSnapshotJson = configRecord?.ContentJson, ConfigResolvedAt = configRecord is not null ? DateTimeOffset.UtcNow : null
         };
         requests.Add(item); Persist(item); Audit(actor, "TRAVEL_DRAFT_CREATED", item, "创建出差草稿");
         return ServiceResult<TravelRequest>.Success(item);
@@ -107,6 +109,16 @@ public sealed class TravelService
             return ServiceResult<TravelRequest>.Failure("存在时间重叠的有效出差申请。", "TRAVEL_002");
         var route = processRouter.Resolve("Travel", actor, item.Days);
         if (!route.IsSuccess) return ServiceResult<TravelRequest>.Failure(route.Error!, route.Code!);
+
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Travel, "TravelPolicy");
+        if (configRecord is not null)
+        {
+            item.ConfigVersionId = configRecord.Id;
+            item.ConfigVersionNumber = configRecord.Version;
+            item.ConfigSnapshotJson = configRecord.ContentJson;
+            item.ConfigResolvedAt = DateTimeOffset.UtcNow;
+        }
+
         item.Status = TravelStatus.Approving; item.Tasks.Clear(); item.ProcessDefinitionId = route.Value!.DefinitionId; item.ProcessDefinitionCode = route.Value.Code; item.ProcessDefinitionVersion = route.Value.Version;
         var instance = flowInstances.Start(item.FlowInstances, "Travel", item.Id, item.Number, actor, route.Value); item.CurrentFlowInstanceId = instance.Id;
         foreach (var (approver, sequence) in route.Value.Approvers.Select((value, index) => (value, index + 1)))
@@ -199,7 +211,7 @@ public sealed class TravelService
         return db.TravelRequests.AsNoTracking().Where(item => item.TenantId == TenantId).OrderBy(item => item.CreatedAt).ToList().Select(record =>
         {
             var companionIds = JsonSerializer.Deserialize<List<string>>(record.CompanionIdsJson) ?? [];
-            var item = new TravelRequest { Id = record.Id, Number = record.Number, ApplicantId = record.ApplicantId, ApplicantName = record.ApplicantName, DepartmentName = record.DepartmentName, Purpose = record.Purpose, StartDate = record.StartDate, EndDate = record.EndDate, Days = record.Days, EstimatedBudget = record.EstimatedBudget, Itinerary = JsonSerializer.Deserialize<List<TravelItineraryItem>>(record.ItineraryJson) ?? [], CompanionIds = companionIds, CompanionNames = companionIds.Select(data.FindEmployee).Where(value => value is not null).Select(value => value!.Name).ToList(), Attachments = JsonSerializer.Deserialize<List<string>>(record.AttachmentsJson) ?? [], CopyRecipientIds = copies.LoadRecipientIds("Travel", record.Id), Version = record.Version, Status = (TravelStatus)record.Status, ProcessDefinitionId = record.ProcessDefinitionId, ProcessDefinitionCode = record.ProcessDefinitionCode, ProcessDefinitionVersion = record.ProcessDefinitionVersion, CurrentFlowInstanceId = record.CurrentFlowInstanceId, CreatedAt = record.CreatedAt };
+            var item = new TravelRequest { Id = record.Id, Number = record.Number, ApplicantId = record.ApplicantId, ApplicantName = record.ApplicantName, DepartmentName = record.DepartmentName, Purpose = record.Purpose, StartDate = record.StartDate, EndDate = record.EndDate, Days = record.Days, EstimatedBudget = record.EstimatedBudget, Itinerary = JsonSerializer.Deserialize<List<TravelItineraryItem>>(record.ItineraryJson) ?? [], CompanionIds = companionIds, CompanionNames = companionIds.Select(data.FindEmployee).Where(value => value is not null).Select(value => value!.Name).ToList(), Attachments = JsonSerializer.Deserialize<List<string>>(record.AttachmentsJson) ?? [], CopyRecipientIds = copies.LoadRecipientIds("Travel", record.Id), Version = record.Version, Status = (TravelStatus)record.Status, ProcessDefinitionId = record.ProcessDefinitionId, ProcessDefinitionCode = record.ProcessDefinitionCode, ProcessDefinitionVersion = record.ProcessDefinitionVersion, CurrentFlowInstanceId = record.CurrentFlowInstanceId, ConfigVersionId = record.ConfigVersionId, ConfigVersionNumber = record.ConfigVersionNumber, ConfigSnapshotJson = record.ConfigSnapshotJson, ConfigResolvedAt = record.ConfigResolvedAt, CreatedAt = record.CreatedAt };
             item.Tasks.AddRange(tasks[record.Id].OrderBy(task => task.Sequence).Select(task => new TravelTask { Id = task.Id, TravelRequestId = record.Id, FlowInstanceId = task.FlowInstanceId, AssigneeId = task.AssigneeId, AssigneeName = task.AssigneeName, OriginalAssigneeId = task.OriginalAssigneeId, OriginalAssigneeName = task.OriginalAssigneeName, DelegationId = task.DelegationId, Sequence = task.Sequence, Status = (FlowTaskStatus)task.Status, Comment = task.Comment, ProcessedAt = task.ProcessedAt })); item.FlowInstances.AddRange(flows.Load("Travel", record.Id)); return item;
         }).ToList();
     }
@@ -207,7 +219,7 @@ public sealed class TravelService
     private void Persist(TravelRequest item)
     {
         if (db is null) return; db.ChangeTracker.Clear(); var record = db.TravelRequests.SingleOrDefault(value => value.Id == item.Id); if (record is null) { record = new TravelRecord { Id = item.Id, TenantId = TenantId }; db.TravelRequests.Add(record); }
-        record.Number = item.Number; record.ApplicantId = item.ApplicantId; record.ApplicantName = item.ApplicantName; record.DepartmentName = item.DepartmentName; record.Purpose = item.Purpose; record.StartDate = item.StartDate; record.EndDate = item.EndDate; record.Days = item.Days; record.EstimatedBudget = item.EstimatedBudget; record.ItineraryJson = JsonSerializer.Serialize(item.Itinerary); record.CompanionIdsJson = JsonSerializer.Serialize(item.CompanionIds); record.AttachmentsJson = JsonSerializer.Serialize(item.Attachments); record.Status = (int)item.Status; record.Version = item.Version; record.ProcessDefinitionId = item.ProcessDefinitionId; record.ProcessDefinitionCode = item.ProcessDefinitionCode; record.ProcessDefinitionVersion = item.ProcessDefinitionVersion; record.CurrentFlowInstanceId = item.CurrentFlowInstanceId; record.UpdatedAt = DateTimeOffset.UtcNow;
+        record.Number = item.Number; record.ApplicantId = item.ApplicantId; record.ApplicantName = item.ApplicantName; record.DepartmentName = item.DepartmentName; record.Purpose = item.Purpose; record.StartDate = item.StartDate; record.EndDate = item.EndDate; record.Days = item.Days; record.EstimatedBudget = item.EstimatedBudget; record.ItineraryJson = JsonSerializer.Serialize(item.Itinerary); record.CompanionIdsJson = JsonSerializer.Serialize(item.CompanionIds); record.AttachmentsJson = JsonSerializer.Serialize(item.Attachments); record.Status = (int)item.Status; record.Version = item.Version; record.ProcessDefinitionId = item.ProcessDefinitionId; record.ProcessDefinitionCode = item.ProcessDefinitionCode; record.ProcessDefinitionVersion = item.ProcessDefinitionVersion; record.CurrentFlowInstanceId = item.CurrentFlowInstanceId; record.ConfigVersionId = item.ConfigVersionId; record.ConfigVersionNumber = item.ConfigVersionNumber; record.ConfigSnapshotJson = item.ConfigSnapshotJson; record.ConfigResolvedAt = item.ConfigResolvedAt; record.UpdatedAt = DateTimeOffset.UtcNow;
         db.TravelTasks.Where(task => task.TravelRequestId == item.Id).ExecuteDelete(); flowInstances.Track(item.FlowInstances); copyRecipients.Track("Travel", item.Id, item.Number, item.ApplicantName, item.Purpose, item.CopyRecipientIds);
         db.TravelTasks.AddRange(item.Tasks.Select(task => new TravelTaskRecord { Id = task.Id, TenantId = TenantId, TravelRequestId = item.Id, FlowInstanceId = task.FlowInstanceId, AssigneeId = task.AssigneeId, AssigneeName = task.AssigneeName, OriginalAssigneeId = task.OriginalAssigneeId, OriginalAssigneeName = task.OriginalAssigneeName, DelegationId = task.DelegationId, Sequence = task.Sequence, Status = (int)task.Status, Comment = task.Comment, ProcessedAt = task.ProcessedAt })); db.SaveChanges();
     }
