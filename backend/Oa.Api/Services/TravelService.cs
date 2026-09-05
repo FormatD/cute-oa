@@ -111,7 +111,9 @@ public sealed class TravelService
         var instance = flowInstances.Start(item.FlowInstances, "Travel", item.Id, item.Number, actor, route.Value); item.CurrentFlowInstanceId = instance.Id;
         foreach (var (approver, sequence) in route.Value.Approvers.Select((value, index) => (value, index + 1)))
             item.Tasks.Add(new TravelTask { TravelRequestId = item.Id, FlowInstanceId = instance.Id, AssigneeId = approver.Assignee.Id, AssigneeName = approver.Assignee.Name, OriginalAssigneeId = approver.DelegationId is null ? null : approver.OriginalApprover.Id, OriginalAssigneeName = approver.DelegationId is null ? null : approver.OriginalApprover.Name, DelegationId = approver.DelegationId, Sequence = sequence });
-        Persist(item); Audit(actor, "TRAVEL_SUBMITTED", item, "提交出差审批");
+        Persist(item);
+        flowInstances.RegisterTasks(instance, "Travel", item.Tasks.Select(task => new ResolvedFlowTask(task.Id, task.Sequence, route.Value.Approvers[task.Sequence - 1])).ToList());
+        Audit(actor, "TRAVEL_SUBMITTED", item, "提交出差审批");
         if (item.Tasks.OrderBy(task => task.Sequence).FirstOrDefault() is { } first) notifications?.Create(first.AssigneeId, "TODO_CREATED", "新增出差审批待办", $"{item.ApplicantName} 提交了 {item.Number}", "TravelRequest", item.Id);
         return ServiceResult<TravelRequest>.Success(item);
     }

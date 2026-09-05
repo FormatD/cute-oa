@@ -108,6 +108,7 @@ public sealed class ExpenseService
             item.Tasks.Add(new ExpenseTask { ExpenseClaimId = item.Id, FlowInstanceId = instance.Id, AssigneeId = resolvedApprover.Assignee.Id, AssigneeName = resolvedApprover.Assignee.Name, OriginalAssigneeId = resolvedApprover.DelegationId is null ? null : resolvedApprover.OriginalApprover.Id, OriginalAssigneeName = resolvedApprover.DelegationId is null ? null : resolvedApprover.OriginalApprover.Name, DelegationId = resolvedApprover.DelegationId, Sequence = sequence });
         }
         Persist(item);
+        flowInstances.RegisterTasks(instance, "Expense", item.Tasks.Select(task => new ResolvedFlowTask(task.Id, task.Sequence, route.Value.Approvers[task.Sequence - 1])).ToList());
         Audit(actor, "EXPENSE_SUBMITTED", item, "提交报销审批");
         if (item.Tasks.OrderBy(task => task.Sequence).FirstOrDefault() is { } firstTask)
             notifications?.Create(firstTask.AssigneeId, "TODO_CREATED", "新增报销审批待办", $"{item.ApplicantName} 提交了 {item.Number}", "ExpenseClaim", item.Id);

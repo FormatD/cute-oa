@@ -60,9 +60,10 @@
 | POST | `/admin/users/{id}/reset-mfa` | 由另一名系统管理员清除目标用户 MFA 密钥/恢复码并撤销全部会话；敏感权限账号下次登录必须重新绑定 |
 | GET | `/audit-logs` | 审计日志分页查询；仅系统管理员，支持关键字、操作人、资源类型和日期区间筛选 |
 | GET/POST | `/process/definitions` | 查询/创建流程定义 |
-| PUT | `/process/definitions/{id}` | 编辑草稿版本的名称、优先级、适用部门/假别、条件规则与审批节点；已发布版本拒绝修改 |
+| PUT | `/process/definitions/{id}` | 编辑草稿版本的名称、优先级、适用部门/假别、条件规则与审批节点；节点含办理时限、提前提醒、逾期升级和异常路由策略；已发布版本拒绝修改 |
 | POST | `/process/definitions/{id}/clone` | 从任意历史版本复制递增的新草稿版本 |
 | POST | `/process/definitions/{id}/publish` | 发布流程版本 |
+| POST | `/process/definitions/{id}/simulate` | 系统管理员对草稿或历史版本试算；传申请人、业务金额/天数和可选类别，返回实际审批人、节点 SLA 与异常路由说明 |
 | GET | `/flow/tasks/my` | 我的待办 |
 | GET | `/flow/tasks/done` | 我的已办请假审批任务 |
 | POST | `/flow/tasks/{id}/approve` | 审批通过 |
@@ -192,11 +193,11 @@
 
 审计日志查询由服务端强制校验系统管理员角色，前端隐藏菜单不作为授权依据。日期筛选按租户时区（演示租户为中国标准时间）转换后查询 UTC 数据，分页与排序在数据库执行。
 
-流程定义查询和维护仅限系统管理员。创建/更新请求包含 `priority`（0–1000）、`departmentIds` 和请假业务可用的 `leaveTypes`，空范围分别表示全公司和全部假别；部门范围自动包含下级部门。定义由 `process_definition`、适用范围 `process_scope`、条件规则 `process_rule` 和顺序审批节点 `process_node` 组成；默认支持 `DIRECT_MANAGER`、`ROLE:{角色}` 与 `USER:{用户ID}` 三类审批人规则。运行时按优先级、具体度、版本和发布时间依次选择；同业务、同优先级、同具体度且范围相交的不同流程编码禁止同时发布。发布时归档同编码的旧发布版本，已发布/归档版本不可修改。请假和报销提交后保存流程定义 ID、编码和版本，新版本只影响后续提交。
+流程定义查询和维护仅限系统管理员。创建/更新请求包含 `priority`（0–1000）、`departmentIds` 和请假业务可用的 `leaveTypes`，空范围分别表示全公司和全部假别；部门范围自动包含下级部门。定义由 `process_definition`、适用范围 `process_scope`、条件规则 `process_rule` 和顺序审批节点 `process_node` 组成；默认支持 `DIRECT_MANAGER`、`ROLE:{角色}` 与 `USER:{用户ID}` 三类审批人规则。每个节点保存 `handlingHours`、`reminderBeforeHours`、`escalateAfterHours`、`escalationTarget`、`missingAssigneeAction` 和 `allowAutoSkip`。审批人缺失可选择阻断、跳过或转交流程管理员；仅连续节点命中同一实际审批人时应用自动跳过策略，非连续重复节点继续保留。运行时按优先级、具体度、版本和发布时间依次选择；同业务、同优先级、同具体度且范围相交的不同流程编码禁止同时发布。发布时归档同编码的旧发布版本，已发布/归档版本不可修改。五类审批业务提交后保存流程定义 ID、编码、版本和节点 SLA 快照，新版本只影响后续提交。
 
 审批委托支持 `All`、`Leave`、`Expense`、`Travel` 四种业务范围，结束时间必须晚于当前时间，单次跨度最多 180 天。同一委托人在时间重叠且业务范围相交时不得创建多条有效规则。任务创建时解析一次委托并保存实际审批人、原审批人和委托 ID；取消规则只影响此后创建的任务。
 
-请假、报销与出差每次提交都创建新的 `flow_instance`，任务绑定当前实例，单据同时返回 `currentFlowInstanceId` 和按提交次数排序的 `flowInstances`。只有当前实例中最小的未处理顺序节点进入待办；同意后激活下一节点，驳回时取消其余未处理节点并终止实例。`flow_action` 只追加提交、同意、驳回、转办和撤回事件，驳回重提不得删除旧实例或旧意见。`GET /flow/instances/{id}` 必须复用关联单据的数据权限，不得仅凭实例 ID 放行。
+请假、报销、出差、采购与用章每次提交都创建新的 `flow_instance`，任务绑定当前实例，单据同时返回 `currentFlowInstanceId` 和按提交次数排序的 `flowInstances`。只有当前实例中最小的未处理顺序节点进入待办并从激活时刻独立起算；同意后结束当前 SLA 并激活下一节点，驳回或撤回时取消其余未处理节点。后台按配置扫描临期、逾期和升级状态，`flow_sla_alert_delivery` 唯一约束保证同一任务、接收人和提醒类型不会重复发送。事项中心返回精确 `dueAt` 并据此计算紧急程度和排序。`flow_action` 只追加提交、同意、驳回、转办和撤回事件，驳回重提不得删除旧实例或旧意见。`GET /flow/instances/{id}` 必须复用关联单据的数据权限，不得仅凭实例 ID 放行。
 
 请假和报销创建/编辑请求可传 `copyRecipientIds`，最多 20 个同租户 ACTIVE 用户，自动去重且不能包含发起人。抄送记录在流程审批完成或申请撤回前不可查询，也不能赋予详情或附件权限；激活后进入 `/flow/copies/my` 并发送站内通知。`read` 接口仅记录抄送事项的独立已阅时间，其他用户调用返回 `DATA_001`。
 

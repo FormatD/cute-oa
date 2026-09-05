@@ -189,6 +189,7 @@ public sealed class LeaveService
             foreach (var (resolvedApprover, sequence) in route.Value.Approvers.Select((value, index) => (value, index + 1)))
                 item.Tasks.Add(new FlowTask { LeaveRequestId = item.Id, FlowInstanceId = instance.Id, AssigneeId = resolvedApprover.Assignee.Id, AssigneeName = resolvedApprover.Assignee.Name, OriginalAssigneeId = resolvedApprover.DelegationId is null ? null : resolvedApprover.OriginalApprover.Id, OriginalAssigneeName = resolvedApprover.DelegationId is null ? null : resolvedApprover.OriginalApprover.Name, DelegationId = resolvedApprover.DelegationId, Sequence = sequence });
             Persist(item, expectedVersion);
+            flowInstances.RegisterTasks(instance, "Leave", item.Tasks.Select(task => new ResolvedFlowTask(task.Id, task.Sequence, route.Value.Approvers[task.Sequence - 1])).ToList());
             if (balanceYear.HasValue) PersistBalance(actor.Id, item.Type, balanceYear.Value);
             if (item.Tasks.OrderBy(task => task.Sequence).FirstOrDefault() is { } firstTask)
                 notifications?.Enqueue(firstTask.AssigneeId, "TODO_CREATED", "新增请假审批待办", $"{item.ApplicantName} 提交了 {item.Number}", "LeaveRequest", item.Id);

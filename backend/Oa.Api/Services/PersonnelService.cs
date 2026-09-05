@@ -160,6 +160,9 @@ public sealed partial class PersonnelService(OaDbContext db, DemoData data, Noti
             return ServiceResult<PersonnelProfileView>.Failure("必须先进入离职办理中并完成离职清单，才能办结离职。", "PERSONNEL_CASE_003");
         if (request.PersonnelStatus == PersonnelStatuses.Terminated && !caseService.HasCompletedOffboarding(userId, request.DepartureDate!.Value))
             return ServiceResult<PersonnelProfileView>.Failure("离职办理清单尚未全部完成，不能停用员工账号。", "PERSONNEL_CASE_003");
+        if (request.PersonnelStatus == PersonnelStatuses.Terminated && user.Status == "ACTIVE" &&
+            db.FlowTaskSlas.Any(item => item.TenantId == TenantId && item.AssigneeId == userId && item.ActivatedAt != null && item.CompletedAt == null && item.CancelledAt == null))
+            return ServiceResult<PersonnelProfileView>.Failure("该员工尚有进行中的审批待办，请先转办后再办结离职。", "CONFLICT_001");
 
         using var transaction = db.Database.CurrentTransaction is null ? db.Database.BeginTransaction() : null;
         try

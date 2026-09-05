@@ -106,7 +106,7 @@ onMounted(() => { void organization.loadOrganization(); void workItems.load() })
   <section class="panel work-item-panel">
     <div class="table-wrap"><table class="data-table work-item-table"><thead><tr><th>事项</th><th>类型</th><th>申请人 / 部门</th><th>状态 / 节点</th><th>时间</th><th>操作</th></tr></thead><tbody>
       <tr v-for="item in workItems.items" :key="item.id" :class="{ unread: workItems.activeTab === 'reading' && !item.isRead }">
-        <td><strong>{{ item.title }}</strong><small>{{ item.number }}<template v-if="item.dueDate"> · 截止 {{ item.dueDate }}</template></small></td>
+        <td><strong>{{ item.title }}</strong><small>{{ item.number }}<template v-if="item.dueAt"> · 截止 {{ new Date(item.dueAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false }) }}</template><template v-else-if="item.dueDate"> · 截止 {{ item.dueDate }}</template></small></td>
         <td><span class="type-chip">{{ businessLabel(item.businessType) }}</span><em v-if="item.urgency !== 'NORMAL'" :class="{ holiday: item.urgency === 'OVERDUE' }">{{ item.urgency === 'OVERDUE' ? '已逾期' : '即将到期' }}</em></td>
         <td>{{ item.applicantName || '—' }}<small>{{ item.departmentName || '—' }}</small></td><td><em>{{ statusLabel(item.status) }}</em><small>{{ item.currentNode || '—' }}</small></td><td>{{ dateText(item.processedAt || item.occurredAt) }}</td>
         <td class="task-actions"><button class="secondary" @click="openItem(item)">{{ actionLabel(item) }}</button><template v-if="item.category === 'APPROVAL' && item.canProcess"><button @click="openDecision(item, 'approve')">同意</button><button class="secondary" @click="openDecision(item, 'reject')">驳回</button><button class="secondary" @click="openTransfer(item)">转办</button></template></td>

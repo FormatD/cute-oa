@@ -66,7 +66,9 @@ var validProductionConfiguration = new ConfigurationBuilder().AddInMemoryCollect
     ["PersonnelCaseAlerts:Enabled"] = "true",
     ["PersonnelCaseAlerts:IntervalMinutes"] = "60",
     ["PersonnelCaseAlerts:DueSoonDays"] = "1",
-    ["PersonnelCaseAlerts:EscalateAfterDays"] = "3"
+    ["PersonnelCaseAlerts:EscalateAfterDays"] = "3",
+    ["FlowSla:Enabled"] = "true",
+    ["FlowSla:IntervalMinutes"] = "15"
 }).Build();
 ProductionConfigurationPolicy.Validate(validProductionConfiguration, false);
 var invalidProductionConfiguration = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>

@@ -236,6 +236,8 @@ public sealed class IdentityAdministrationService(OaDbContext db, DemoData data,
         var permissions = PermissionsFor(request.Roles);
         if (actor.Id == id && (request.Status != "ACTIVE" || !permissions.Contains(OaPermissions.UserManage)))
             return ServiceResult<ManagedUserView>.Failure("不能停用自己或移除自己的用户管理权限。", "STATE_001");
+        if (user.Status == "ACTIVE" && request.Status != "ACTIVE" && db.FlowTaskSlas.Any(item => item.TenantId == TenantId && item.AssigneeId == id && item.ActivatedAt != null && item.CompletedAt == null && item.CancelledAt == null))
+            return ServiceResult<ManagedUserView>.Failure("该用户尚有进行中的审批待办，请先转办后再停用。", "CONFLICT_001");
 
         var previousStatus = user.Status;
         var previousDepartmentId = user.DepartmentId;

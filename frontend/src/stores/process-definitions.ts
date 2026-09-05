@@ -1,7 +1,7 @@
 import { ref } from 'vue'
 import { defineStore } from 'pinia'
 import { useApiClient } from '../api/client'
-import type { CreateProcessDefinition, ProcessDefinition, UpdateProcessDefinition } from '../api/types'
+import type { CreateProcessDefinition, ProcessDefinition, ProcessSimulation, UpdateProcessDefinition } from '../api/types'
 
 export const useProcessDefinitionStore = defineStore('process-definitions', () => {
   const api = useApiClient().system
@@ -39,7 +39,11 @@ export const useProcessDefinitionStore = defineStore('process-definitions', () =
     return runSave(() => api.publishProcessDefinition(id), '发布流程失败。')
   }
 
-  async function runSave(operation: () => Promise<ProcessDefinition>, fallback: string) {
+  async function simulate(id: string, payload: { applicantId: string; metric: number; category?: string | null }) {
+    return runSave(() => api.simulateProcessDefinition(id, payload), '流程试算失败。') as Promise<ProcessSimulation | null>
+  }
+
+  async function runSave<T>(operation: () => Promise<T>, fallback: string) {
     saving.value = true
     error.value = ''
     try {
@@ -52,5 +56,5 @@ export const useProcessDefinitionStore = defineStore('process-definitions', () =
     }
   }
 
-  return { definitions, loading, saving, error, message, load, create, update, clone, publish }
+  return { definitions, loading, saving, error, message, load, create, update, clone, publish, simulate }
 })

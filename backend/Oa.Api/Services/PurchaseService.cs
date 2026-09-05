@@ -136,15 +136,17 @@ public sealed class PurchaseService
         };
         db.FlowInstances.Add(instance);
         AddFlowAction(instance.Id, FlowActionType.Submitted, actor, comment: "提交审批");
-        foreach (var (approver, index) in route.Value.Approvers.Select((value, index) => (value, index)))
-            db.PurchaseTasks.Add(new PurchaseTaskRecord
+        var approvalTasks = route.Value.Approvers.Select((approver, index) => new PurchaseTaskRecord
             {
                 TenantId = TenantId, PurchaseRequestId = record.Id, FlowInstanceId = instance.Id,
                 AssigneeId = approver.Assignee.Id, AssigneeName = approver.Assignee.Name,
                 OriginalAssigneeId = approver.DelegationId is null ? null : approver.OriginalApprover.Id,
                 OriginalAssigneeName = approver.DelegationId is null ? null : approver.OriginalApprover.Name,
                 DelegationId = approver.DelegationId, Sequence = index + 1, Status = (int)FlowTaskStatus.Pending
-            });
+            }).ToList();
+        db.PurchaseTasks.AddRange(approvalTasks);
+        FlowInstanceService.RegisterTasks(db, instance.Id, instance.StartedAt, BusinessType,
+            approvalTasks.Select((task, index) => new ResolvedFlowTask(task.Id, task.Sequence, route.Value.Approvers[index])).ToList());
         record.Status = (int)PurchaseStatus.Approving;
         record.ProcessDefinitionId = route.Value.DefinitionId;
         record.ProcessDefinitionCode = route.Value.Code;
@@ -185,6 +187,7 @@ public sealed class PurchaseService
         task.AssigneeName = assignee.Name;
         task.Version++;
         AddFlowAction(task.FlowInstanceId!.Value, FlowActionType.Transferred, actor, task.Id, task.Sequence, request.Comment.Trim(), previousId, previousName, assignee.Id, assignee.Name);
+        FlowInstanceService.UpdateTaskSla(db, task.FlowInstanceId.Value, FlowActionType.Transferred, task.Id, assignee);
         Audit(actor, "PURCHASE_TASK_TRANSFERRED", purchase, $"将第 {task.Sequence} 节点转办给 {assignee.Name}：{request.Comment.Trim()}");
         notifications.Enqueue(assignee.Id, "TODO_TRANSFERRED", "采购审批待办已转办给你", $"{purchase.Number}：{request.Comment.Trim()}", "PurchaseRequest", purchase.Id);
         return SaveAndReload(purchase, "采购审批任务已被其他操作处理，请刷新后重试。");
@@ -207,6 +210,7 @@ public sealed class PurchaseService
         instance.Status = (int)FlowInstanceStatus.Withdrawn;
         instance.CompletedAt = DateTimeOffset.UtcNow;
         AddFlowAction(instance.Id, FlowActionType.Withdrawn, actor, comment: "申请人撤回");
+        FlowInstanceService.UpdateTaskSla(db, instance.Id, FlowActionType.Withdrawn);
         var copied = ActivateCopies(record, PurchaseStatus.Withdrawn.ToString());
         Audit(actor, "PURCHASE_WITHDRAWN", record, "撤回采购申请");
         foreach (var assignee in tasks.Select(item => item.AssigneeId).Distinct().Where(item => item != actor.Id))
@@ -333,6 +337,7 @@ public sealed class PurchaseService
         task.ProcessedAt = DateTimeOffset.UtcNow;
         task.Version++;
         AddFlowAction(task.FlowInstanceId!.Value, approve ? FlowActionType.Approved : FlowActionType.Rejected, actor, task.Id, task.Sequence, task.Comment);
+        FlowInstanceService.UpdateTaskSla(db, task.FlowInstanceId.Value, approve ? FlowActionType.Approved : FlowActionType.Rejected, task.Id);
         var instance = db.FlowInstances.Single(item => item.Id == task.FlowInstanceId);
 
         if (!approve)

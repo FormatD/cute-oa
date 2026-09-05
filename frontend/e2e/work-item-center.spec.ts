@@ -52,6 +52,8 @@ test('员工发起请假后，主管可在统一事项中心审批并进入已�
   await loginUi(page, 'u-li')
   await page.getByRole('button', { name: /事项中心/ }).click()
   await expect(page.getByRole('heading', { name: '事项中心' })).toBeVisible()
+  await page.getByLabel('关键词').fill(reason)
+  await page.getByRole('button', { name: '查询' }).click()
   const row = page.locator('tr', { hasText: reason })
   await expect(row).toBeVisible()
   await row.getByRole('button', { name: '同意' }).click()
@@ -76,6 +78,38 @@ test('角色化工作台与服务端权限范围保持一致', async ({ page, re
   await expect(page.getByText(/当前角色：员工/)).toBeVisible()
   for (const name of ['待我处理', '我的已办', '我发起的', '待阅与已阅', '风险提醒'])
     await expect(page.getByRole('button', { name: new RegExp(name) })).toBeVisible()
+})
+
+test('流程管理员可配置节点 SLA 并在发布前试算路由', async ({ page, request }) => {
+  const token = await loginApi('u-admin')
+  const code = `E2E_SLA_${crypto.randomUUID().replaceAll('-', '').slice(0, 10).toUpperCase()}`
+  const name = `E2E SLA 流程 ${code.slice(-4)}`
+  const created = await request.post(`${apiBase}/process/definitions`, {
+    headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': crypto.randomUUID() },
+    data: {
+      code, name, businessType: 'Leave', priority: 500, departmentIds: [], leaveTypes: [],
+      routes: [{ maxValue: null, approverKeys: ['DIRECT_MANAGER'], nodePolicies: [{ handlingHours: 8, reminderBeforeHours: 2, escalateAfterHours: 4, escalationTarget: 'PROCESS_ADMIN', missingAssigneeAction: 'BLOCK', allowAutoSkip: false }] }]
+    }
+  })
+  expect(created.status(), await created.text()).toBe(201)
+  const definition = await created.json()
+  const simulated = await request.post(`${apiBase}/process/definitions/${definition.id}/simulate`, {
+    headers: { Authorization: `Bearer ${token}` }, data: { applicantId: 'u-zhang', metric: 1, category: 'Personal' }
+  })
+  expect(simulated.ok(), await simulated.text()).toBeTruthy()
+  expect((await simulated.json()).approvers[0].policy.handlingHours).toBe(8)
+
+  await loginUi(page, 'u-admin')
+  await page.goto('/#/processes')
+  await expect(page.getByRole('heading', { name: '流程定义' })).toBeVisible()
+  const row = page.locator('tr', { hasText: name })
+  await expect(row).toBeVisible()
+  await row.getByRole('button', { name: '编辑' }).click()
+  await expect(page.getByText('办理时限（小时）')).toBeVisible()
+  await page.getByLabel('申请人').selectOption('u-zhang')
+  await page.getByRole('button', { name: '试算路由' }).click()
+  await expect(page.getByText(new RegExp(`命中 ${code}`))).toBeVisible()
+  await expect(page.getByText('李薇 (8h)')).toBeVisible()
 })
 
 test('手机宽度可通过折叠菜单进入事项中心且页面不产生整页横向滚动', async ({ page }) => {

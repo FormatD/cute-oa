@@ -849,6 +849,51 @@ await using (var writeDb = new OaDbContext(options))
         throw new InvalidOperationException("默认请假、报销、出差、采购和用章流程未能初始化为已发布版本。");
     if (processes.List(employee).IsSuccess)
         throw new InvalidOperationException("普通员工可以越权维护流程定义。");
+    var fallbackDefinition = new ProcessDefinitionView(Guid.NewGuid(), "FALLBACK_TEST", "异常路由验证", "Leave", 1, ProcessDefinitionStatus.Draft,
+        [new ProcessRouteView(Guid.NewGuid(), 1, null, ["DIRECT_MANAGER"], [new ProcessNodePolicyView(Guid.NewGuid(), 1, "DIRECT_MANAGER", 8, 2, 4, "PROCESS_ADMIN", "PROCESS_ADMIN", false)])],
+        administrator.Id, DateTimeOffset.UtcNow, null, null);
+    var fallbackResolved = ProcessRouting.Resolve(fallbackDefinition, data, data.GetEmployee("u-wang"), 1m);
+    if (!fallbackResolved.IsSuccess || fallbackResolved.Value!.Approvers.SingleOrDefault()?.Assignee.Id != "u-admin" || fallbackResolved.Value.RoutingNotes is not { Count: > 0 })
+        throw new InvalidOperationException("审批人缺失时未按节点策略转交流程管理员，或未记录路由说明。");
+    var duplicateDefinition = fallbackDefinition with
+    {
+        Id = Guid.NewGuid(),
+        Code = "DUPLICATE_TEST",
+        Routes = [new ProcessRouteView(Guid.NewGuid(), 1, null, ["DIRECT_MANAGER", "USER:u-li"],
+        [
+            new ProcessNodePolicyView(Guid.NewGuid(), 1, "DIRECT_MANAGER", 8, 2, 4, "PROCESS_ADMIN", "BLOCK", false),
+            new ProcessNodePolicyView(Guid.NewGuid(), 2, "USER:u-li", 8, 2, 4, "PROCESS_ADMIN", "BLOCK", true)
+        ])]
+    };
+    var duplicateResolved = ProcessRouting.Resolve(duplicateDefinition, data, employee, 1m);
+    if (!duplicateResolved.IsSuccess || duplicateResolved.Value!.Approvers.Count != 1 || duplicateResolved.Value.RoutingNotes is not { Count: > 0 })
+        throw new InvalidOperationException("连续节点命中同一审批人时未按允许自动跳过策略处理。");
+    var blockedDuplicate = duplicateDefinition with
+    {
+        Id = Guid.NewGuid(),
+        Code = "DUPLICATE_BLOCK_TEST",
+        Routes = [new ProcessRouteView(Guid.NewGuid(), 1, null, ["DIRECT_MANAGER", "USER:u-li"],
+        [
+            new ProcessNodePolicyView(Guid.NewGuid(), 1, "DIRECT_MANAGER", 8, 2, 4, "PROCESS_ADMIN", "BLOCK", false),
+            new ProcessNodePolicyView(Guid.NewGuid(), 2, "USER:u-li", 8, 2, 4, "PROCESS_ADMIN", "BLOCK", false)
+        ])]
+    };
+    if (ProcessRouting.Resolve(blockedDuplicate, data, employee, 1m).Code != "FLOW_001")
+        throw new InvalidOperationException("连续节点命中同一审批人且不允许跳过时未阻断流程。");
+    var nonConsecutiveDuplicate = duplicateDefinition with
+    {
+        Id = Guid.NewGuid(),
+        Code = "NON_CONSECUTIVE_DUPLICATE_TEST",
+        Routes = [new ProcessRouteView(Guid.NewGuid(), 1, null, ["DIRECT_MANAGER", "USER:u-wang", "USER:u-li"],
+        [
+            new ProcessNodePolicyView(Guid.NewGuid(), 1, "DIRECT_MANAGER", 8, 2, 4, "PROCESS_ADMIN", "BLOCK", false),
+            new ProcessNodePolicyView(Guid.NewGuid(), 2, "USER:u-wang", 8, 2, 4, "PROCESS_ADMIN", "BLOCK", false),
+            new ProcessNodePolicyView(Guid.NewGuid(), 3, "USER:u-li", 8, 2, 4, "PROCESS_ADMIN", "BLOCK", false)
+        ])]
+    };
+    var nonConsecutiveResolved = ProcessRouting.Resolve(nonConsecutiveDuplicate, data, employee, 1m);
+    if (!nonConsecutiveResolved.IsSuccess || nonConsecutiveResolved.Value!.Approvers.Count != 3)
+        throw new InvalidOperationException("非连续重复审批人被错误地当作连续节点阻断或跳过。");
     fileRoot = Path.Combine(Path.GetTempPath(), "cute-oa-file-test", Guid.NewGuid().ToString("N"));
     var cleanFileScanner = new TestFileMalwareScanner(FileScanStatus.Clean);
     var fileService = new FileService(writeDb, new TestWebHostEnvironment { ContentRootPath = fileRoot, WebRootPath = fileRoot }, new ConfigurationBuilder().AddInMemoryCollection().Build(), cleanFileScanner);
@@ -1264,10 +1309,18 @@ await using (var writeDb = new OaDbContext(options))
         throw new InvalidOperationException("流程定义无法复制为递增的草稿版本。");
     var updatedProcess = processes.Update(administrator, cloned.Value.Id, new UpdateProcessDefinitionRequest("默认请假审批（严格版）",
     [
-        new ProcessRouteInput(.5m, ["DIRECT_MANAGER"]),
-        new ProcessRouteInput(null, ["DIRECT_MANAGER", "ROLE:总经理"])
+        new ProcessRouteInput(.5m, ["DIRECT_MANAGER"], [new ProcessNodePolicyInput(8, 2, 3, "DIRECT_MANAGER", "BLOCK", false)]),
+        new ProcessRouteInput(null, ["DIRECT_MANAGER", "ROLE:总经理"],
+        [
+            new ProcessNodePolicyInput(8, 2, 3, "DIRECT_MANAGER", "BLOCK", false),
+            new ProcessNodePolicyInput(12, 3, 6, "PROCESS_ADMIN", "BLOCK", true)
+        ])
     ]));
-    if (!updatedProcess.IsSuccess || !processes.Publish(administrator, cloned.Value.Id).IsSuccess)
+    var simulation = updatedProcess.IsSuccess ? processes.Simulate(administrator, cloned.Value.Id, new SimulateProcessRequest(employee.Id, 1m, "Sick")) : ServiceResult<ProcessSimulationView>.Failure(updatedProcess.Error!);
+    if (!simulation.IsSuccess || simulation.Value!.Approvers.Count != 2 || simulation.Value.Approvers[0].Assignee.Id != "u-li" || simulation.Value.Approvers[0].Policy?.HandlingHours != 8 ||
+        processes.Simulate(employee, cloned.Value.Id, new SimulateProcessRequest(employee.Id, 1m, "Sick")).Code != "AUTH_002")
+        throw new InvalidOperationException(simulation.Error ?? "发布前流程试算、节点 SLA 或试算权限错误。");
+    if (!processes.Publish(administrator, cloned.Value.Id).IsSuccess)
         throw new InvalidOperationException("流程草稿无法保存或发布。");
     var versionedDate = leaveDate.AddDays(14);
     while (!calendar.IsWorkingDay(versionedDate)) versionedDate = versionedDate.AddDays(1);
@@ -1276,14 +1329,38 @@ await using (var writeDb = new OaDbContext(options))
     var versionedSubmission = leave.Submit(employee, versionedDraft.Value!.Id);
     if (!versionedSubmission.IsSuccess || versionedSubmission.Value!.ProcessDefinitionVersion != 2 || versionedSubmission.Value.Tasks.Count != 2)
         throw new InvalidOperationException("新提交请假单未使用最新发布流程版本。");
+    var submittedSlas = writeDb.FlowTaskSlas.Where(item => item.FlowInstanceId == versionedSubmission.Value.CurrentFlowInstanceId).OrderBy(item => item.Sequence).ToList();
+    if (submittedSlas.Count != 2 || submittedSlas[0].ActivatedAt is null || submittedSlas[0].DueAt is null || submittedSlas[1].ActivatedAt is not null || submittedSlas[0].HandlingHours != 8 || submittedSlas[1].HandlingHours != 12)
+        throw new InvalidOperationException($"流程节点 SLA 快照、首节点起算或后续节点延迟激活错误：count={submittedSlas.Count}, nodes={string.Join(';', submittedSlas.Select(item => $"{item.Sequence}/{item.HandlingHours}/{item.ActivatedAt}/{item.DueAt}"))}");
+    var slaService = new FlowSlaService(writeDb, data);
+    var firstDueAt = submittedSlas[0].DueAt!.Value;
+    if (slaService.DispatchAlerts(firstDueAt.AddHours(-1)) != 1 || slaService.DispatchAlerts(firstDueAt.AddHours(-1)) != 0 ||
+        slaService.DispatchAlerts(firstDueAt.AddHours(1)) != 1 || slaService.DispatchAlerts(firstDueAt.AddHours(1)) != 0 ||
+        slaService.DispatchAlerts(firstDueAt.AddHours(4)) != 1 || slaService.DispatchAlerts(firstDueAt.AddHours(4)) != 0)
+        throw new InvalidOperationException("流程即将到期、逾期、升级提醒或扫描去重错误。");
+    if (!writeDb.Notifications.Any(item => item.ResourceId == versionedSubmission.Value.Id.ToString() && item.Type == "FLOW_SLA_DUE_SOON" && item.RecipientId == "u-li") ||
+        !writeDb.Notifications.Any(item => item.ResourceId == versionedSubmission.Value.Id.ToString() && item.Type == "FLOW_SLA_OVERDUE" && item.RecipientId == "u-li") ||
+        !writeDb.Notifications.Any(item => item.ResourceId == versionedSubmission.Value.Id.ToString() && item.Type == "FLOW_SLA_ESCALATED" && item.RecipientId == "u-wang"))
+        throw new InvalidOperationException("流程 SLA 提醒或升级接收人不正确。");
+    var managerAccount = identity.List(administrator, "u-li", null, null, 1, 20).Value!.Items.Single(item => item.Id == "u-li");
+    var disableManager = identity.Update(administrator, managerAccount.Id, new UpdateManagedUserRequest(managerAccount.Name, managerAccount.DepartmentId, managerAccount.ManagerId,
+        managerAccount.CumulativeWorkYears, "DISABLED", managerAccount.Roles, managerAccount.Version, managerAccount.PositionId));
+    if (disableManager.Code != "CONFLICT_001")
+        throw new InvalidOperationException($"审批人存在活动待办时仍可停用，会生成无人可办的僵尸任务：code={disableManager.Code}, error={disableManager.Error}");
     if (leave.GetPendingTasks(data.GetEmployee("u-wang")).Any(task => task.LeaveRequestId == versionedSubmission.Value.Id))
         throw new InvalidOperationException("未来审批节点在前序节点处理前错误进入待办。");
     if (!leave.Reject(data.GetEmployee("u-li"), versionedSubmission.Value.Tasks[0].Id, "请补充工作交接").IsSuccess || versionedSubmission.Value.Tasks[1].Status != FlowTaskStatus.Cancelled)
         throw new InvalidOperationException("驳回未终止流程实例或未取消后续待办。");
+    if (writeDb.FlowTaskSlas.Single(item => item.TaskId == versionedSubmission.Value.Tasks[0].Id).CompletedAt is null || writeDb.FlowTaskSlas.Single(item => item.TaskId == versionedSubmission.Value.Tasks[1].Id).CancelledAt is null)
+        throw new InvalidOperationException("驳回后 SLA 任务未停止计时或未取消后续节点。");
     var revisedVersioned = leave.Update(employee, versionedSubmission.Value.Id, versionedSubmission.Value.Version, new CreateLeaveRequest(LeaveType.Sick, versionedDate, LeavePeriod.FullDay, versionedDate, LeavePeriod.FullDay, "已补充工作交接"));
     var resubmittedVersioned = revisedVersioned.IsSuccess ? leave.Submit(employee, revisedVersioned.Value!.Id) : ServiceResult<LeaveRequest>.Failure(revisedVersioned.Error!);
     if (!resubmittedVersioned.IsSuccess || resubmittedVersioned.Value!.FlowInstances.Count != 2 || resubmittedVersioned.Value.FlowInstances[0].Status != FlowInstanceStatus.Rejected || resubmittedVersioned.Value.FlowInstances[1].Attempt != 2)
         throw new InvalidOperationException("驳回重提未创建递增的新流程实例或旧轨迹丢失。");
+    var resubmittedSlas = writeDb.FlowTaskSlas.Where(item => item.FlowInstanceId == resubmittedVersioned.Value.CurrentFlowInstanceId).OrderBy(item => item.Sequence).ToList();
+    if (resubmittedSlas.Count != 2 || !leave.Approve(data.GetEmployee("u-li"), resubmittedVersioned.Value.Tasks[0].Id, "SLA 节点激活验证").IsSuccess ||
+        writeDb.FlowTaskSlas.Single(item => item.Id == resubmittedSlas[0].Id).CompletedAt is null || writeDb.FlowTaskSlas.Single(item => item.Id == resubmittedSlas[1].Id).ActivatedAt is null || writeDb.FlowTaskSlas.Single(item => item.Id == resubmittedSlas[1].Id).DueAt is null)
+        throw new InvalidOperationException("审批通过后当前 SLA 未结束，或下一节点未独立起算。");
     if (submitted.Value.ProcessDefinitionVersion != 1 || submitted.Value.Tasks.Count != 1)
         throw new InvalidOperationException("发布新流程版本影响了既有请假单的版本或任务。");
     versionedRequestId = resubmittedVersioned.Value.Id;
@@ -2342,12 +2419,13 @@ await using (var readDb = new OaDbContext(options))
         workCopies,
         new AnnouncementService(readDb, workDirectory),
         new KnowledgeDocumentService(workDirectory, readDb),
-        new EmploymentContractService(readDb, workDirectory, fileService, workNotifications, new ConfigurationBuilder().Build()));
+        new EmploymentContractService(readDb, workDirectory, fileService, workNotifications, new ConfigurationBuilder().Build()),
+        new FlowInstanceService(readDb));
     var employeeInitiated = workService.List(workDirectory.GetEmployee("u-zhang"), new WorkItemQuery(WorkItemTabs.Initiated, null, null, null, null, null, null, null, 1, 100));
     if (employeeInitiated.Items.All(item => item.ResourceId != requestId) || employeeInitiated.Items.Any(item => item.ApplicantId != "u-zhang"))
         throw new InvalidOperationException("事项中心未汇总员工本人发起的请假，或泄露了他人发起事项。");
     var managerPending = workService.List(workDirectory.GetEmployee("u-li"), new WorkItemQuery(WorkItemTabs.Pending, null, null, null, null, null, null, null, 1, 100));
-    if (managerPending.Summary.PendingCount < managerPending.Items.Count || managerPending.Items.Any(item => !item.CanProcess))
+    if (managerPending.Summary.PendingCount < managerPending.Items.Count || managerPending.Items.Any(item => !item.CanProcess) || managerPending.Items.Where(item => item.Category == WorkItemCategories.Approval).Any(item => item.DueAt is null))
         throw new InvalidOperationException("事项中心待办汇总、当前节点或可处理标记不正确。");
     var employeeRisks = workService.List(workDirectory.GetEmployee("u-zhang"), new WorkItemQuery(WorkItemTabs.Risk, null, null, null, null, null, null, null, 1, 100));
     if (employeeRisks.Items.Any(item => item.ApplicantId != "u-zhang"))
