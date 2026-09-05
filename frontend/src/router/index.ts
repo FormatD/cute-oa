@@ -35,6 +35,7 @@ import ContractPage from '../views/ContractPage.vue'
 import ContractDetailPage from '../views/ContractDetailPage.vue'
 import DocumentCenterPage from '../views/DocumentCenterPage.vue'
 import DocumentDetailPage from '../views/DocumentDetailPage.vue'
+import BusinessConfigurationPage from '../views/BusinessConfigurationPage.vue'
 
 export const router = createRouter({
   history: createWebHashHistory(),
@@ -75,6 +76,7 @@ export const router = createRouter({
     { path: '/roles', component: RoleManagementPage, meta: { permission: 'USER_MANAGE' } },
     { path: '/departments', component: DepartmentManagementPage, meta: { permission: 'ORG_MANAGE' } },
     { path: '/positions', component: PositionManagementPage, meta: { permission: 'ORG_MANAGE' } },
+    { path: '/business-configurations', component: BusinessConfigurationPage, meta: { permission: 'BUSINESS_CONFIG_MANAGE' } },
     { path: '/audit', component: AuditPage, meta: { permission: 'AUDIT_VIEW' } },
     { path: '/processes', component: ProcessPage, meta: { permission: 'PROCESS_MANAGE' } },
     { path: '/delegations', component: DelegationPage },

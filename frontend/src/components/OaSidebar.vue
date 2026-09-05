@@ -34,6 +34,7 @@ function hasPermission(permission: string) { return props.currentUser?.permissio
       <button :class="{ active: activeNav === 'organization' }" @click="go('organization')"><span>♙</span>组织通讯录</button>
       <button v-if="hasPermission('ORG_MANAGE')" :class="{ active: activeNav === 'departments' }" @click="go('departments')"><span>♜</span>组织架构</button>
       <button v-if="hasPermission('ORG_MANAGE')" :class="{ active: activeNav === 'positions' }" @click="go('positions')"><span>♝</span>岗位管理</button>
+      <button v-if="hasPermission('BUSINESS_CONFIG_MANAGE')" :class="{ active: activeNav === 'business-configurations' }" @click="go('business-configurations')"><span>⚙</span>业务参数配置</button>
       <button v-if="hasPermission('ANNOUNCEMENT_MANAGE')" :class="{ active: activeNav === 'announcement-admin' }" @click="go('announcement-admin')"><span>▥</span>公告管理</button>
       <button :class="{ active: activeNav === 'calendar' }" @click="go('calendar')"><span>▣</span>工作日历</button>
       <button v-if="hasPermission('USER_MANAGE')" :class="{ active: activeNav === 'users' }" @click="go('users')"><span>♟</span>用户与权限</button>
