@@ -261,3 +261,232 @@ export type DocumentDiffView = {
   contentDiff: DiffLine[]
 }
 
+// --- Business Configuration Center Types ---
+
+export type ConfigurationDomain = 'Leave' | 'Expense' | 'Travel' | 'Procurement' | 'Seal' | 'Dictionary'
+export type ConfigurationStatus = 'DRAFT' | 'SCHEDULED' | 'EFFECTIVE' | 'RETIRED'
+
+export type BusinessConfigurationRecord = {
+  id: string
+  tenantId: string
+  domain: ConfigurationDomain | string
+  code: string
+  name: string
+  description: string | null
+  version: number
+  status: ConfigurationStatus
+  effectiveFrom: string
+  effectiveTo: string | null
+  contentJson: string
+  createdBy: string
+  createdByName: string
+  createdAt: string
+  updatedBy: string
+  updatedByName: string
+  updatedAt: string
+  publishedBy?: string | null
+  publishedByName?: string | null
+  publishedAt?: string | null
+  concurrencyVersion: number
+  referenceCount: number
+}
+
+export type BusinessConfigurationListItem = {
+  id: string
+  tenantId: string
+  domain: ConfigurationDomain | string
+  code: string
+  name: string
+  description: string | null
+  version: number
+  status: ConfigurationStatus
+  effectiveFrom: string
+  effectiveTo: string | null
+  createdByName: string
+  createdAt: string
+  updatedByName: string
+  updatedAt: string
+  publishedByName?: string | null
+  publishedAt?: string | null
+  concurrencyVersion: number
+  referenceCount: number
+}
+
+export type ConfigurationVersionSummary = {
+  id: string
+  version: number
+  status: ConfigurationStatus
+  effectiveFrom: string
+  effectiveTo: string | null
+  publishedByName?: string | null
+  publishedAt?: string | null
+  createdAt: string
+  referenceCount: number
+}
+
+export type CreateBusinessConfigurationRequest = {
+  domain: string
+  code: string
+  name: string
+  description?: string | null
+  effectiveFrom: string
+  effectiveTo?: string | null
+  contentJson: string
+}
+
+export type UpdateBusinessConfigurationRequest = {
+  name: string
+  description?: string | null
+  effectiveFrom: string
+  effectiveTo?: string | null
+  contentJson: string
+  concurrencyVersion: number
+}
+
+export type PublishBusinessConfigurationRequest = {
+  effectiveFrom?: string | null
+  effectiveTo?: string | null
+  concurrencyVersion?: number | null
+}
+
+export type RetireBusinessConfigurationRequest = {
+  effectiveTo?: string | null
+  concurrencyVersion?: number | null
+}
+
+export type BusinessConfigurationFilterQuery = {
+  domain?: string
+  code?: string
+  keyword?: string
+  status?: string
+  effectiveAsOf?: string
+  page?: number
+  pageSize?: number
+}
+
+// Strongly-typed domain configurations
+export type LeaveTypePolicyConfig = {
+  type: string
+  name: string
+  isEnabled: boolean
+  minUnit: number
+  requiresAttachment: boolean
+  attachmentThresholdDays?: number | null
+}
+
+export type AnnualLeaveBonusConfig = {
+  legalMinStandardProtected: boolean
+  tier1BonusDays: number
+  tier2BonusDays: number
+  tier3BonusDays: number
+}
+
+export type LeavePolicyConfig = {
+  leaveTypes: LeaveTypePolicyConfig[]
+  allowCrossYear: boolean
+  compTimeValidityDays: number
+  annualLeaveBonus: AnnualLeaveBonusConfig
+}
+
+export type ExpenseCategoryPolicyConfig = {
+  name: string
+  isEnabled: boolean
+  singleLimit?: number | null
+  requiresReceipt: boolean
+  requiresReasonWhenExceeded: boolean
+  blockWhenExceeded: boolean
+}
+
+export type ExpensePolicyConfig = {
+  categories: ExpenseCategoryPolicyConfig[]
+}
+
+export type TravelCityTierConfig = {
+  tierName: string
+  cities: string[]
+}
+
+export type TravelStandardItemConfig = {
+  cityTier: string
+  rank: string
+  hotelDailyLimit: number
+  mealDailyAllowance: number
+  transportationStandard: string
+}
+
+export type TravelPolicyConfig = {
+  cityTiers: TravelCityTierConfig[]
+  employeeRanks: string[]
+  standards: TravelStandardItemConfig[]
+}
+
+export type ProcurementCategoryPolicyConfig = {
+  name: string
+  isEnabled: boolean
+}
+
+export type ProcurementAmountTierConfig = {
+  name: string
+  maxAmount?: number | null
+}
+
+export type ProcurementPolicyConfig = {
+  categories: ProcurementCategoryPolicyConfig[]
+  quoteAttachmentThreshold: number
+  amountTiers: ProcurementAmountTierConfig[]
+  defaultPurchaserUserId: string
+  requiresAcceptance: boolean
+  acceptanceRoleOrAssignee: string
+}
+
+export type SealRegistryItemConfig = {
+  name: string
+  sealType: string
+  custodianUserId: string
+  isEnabled: boolean
+  allowOut: boolean
+  maxOutDays: number
+}
+
+export type SealDocumentCategoryConfig = {
+  name: string
+  isEnabled: boolean
+  riskLevel: 'LOW' | 'MEDIUM' | 'HIGH' | string
+}
+
+export type SealRiskRulesConfig = {
+  highRiskMetric: number
+  mediumRiskMetric: number
+  lowRiskMetric: number
+}
+
+export type SealPolicyConfig = {
+  seals: SealRegistryItemConfig[]
+  documentCategories: SealDocumentCategoryConfig[]
+  riskRules: SealRiskRulesConfig
+}
+
+export type DictionaryItemConfig = {
+  code: string
+  name: string
+  sortOrder: number
+  isEnabled: boolean
+  description?: string | null
+  effectiveDate?: string | null
+  version?: number | null
+}
+
+export type DictionaryConfig = {
+  items: DictionaryItemConfig[]
+}
+
+export type BusinessRuleSnapshot = {
+  configVersionId: string
+  configVersionNumber: number
+  domain: string
+  code: string
+  resolvedAt: string
+  parameters: Record<string, unknown>
+}
+
+
