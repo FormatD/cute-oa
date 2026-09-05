@@ -28,6 +28,7 @@ builder.Services.AddHostedService<PersonnelCaseAlertWorker>();
 builder.Services.AddScoped<AttendanceService>();
 builder.Services.AddScoped<EmploymentContractService>();
 builder.Services.AddHostedService<ContractAlertWorker>();
+builder.Services.AddHostedService<FlowSlaWorker>();
 builder.Services.AddScoped<WorkCalendarService>();
 builder.Services.AddScoped<IWorkCalendar>(serviceProvider => serviceProvider.GetRequiredService<WorkCalendarService>());
 builder.Services.AddScoped<LeaveService>();
@@ -39,6 +40,7 @@ builder.Services.AddScoped<KnowledgeDocumentService>();
 builder.Services.AddBusinessConfigurationServices();
 builder.Services.AddScoped<IdempotencyService>();
 builder.Services.AddScoped<NotificationService>();
+builder.Services.AddScoped<FlowSlaService>();
 var fileScanningMode = FileScanningPolicy.ValidateMode(builder.Configuration["FileScanning:Mode"], builder.Environment.IsDevelopment());
 builder.Services.AddSingleton<IFileMalwareScanner>(serviceProvider =>
     fileScanningMode.Equals("ClamAv", StringComparison.OrdinalIgnoreCase)
@@ -499,6 +501,11 @@ app.MapPost("/api/v1/process/definitions", (CreateProcessDefinitionRequest body,
 app.MapPut("/api/v1/process/definitions/{id:guid}", (Guid id, UpdateProcessDefinitionRequest body, HttpRequest request, DemoAuthService auth, ProcessDefinitionService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Update(actor, id, body)); });
 app.MapPost("/api/v1/process/definitions/{id:guid}/clone", (Guid id, HttpRequest request, DemoAuthService auth, ProcessDefinitionService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Clone(actor, id), true); });
 app.MapPost("/api/v1/process/definitions/{id:guid}/publish", (Guid id, HttpRequest request, DemoAuthService auth, ProcessDefinitionService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Publish(actor, id)); });
+app.MapPost("/api/v1/process/definitions/{id:guid}/simulate", (Guid id, SimulateProcessRequest body, HttpRequest request, DemoAuthService auth, ProcessDefinitionService service) =>
+{
+    var result = service.Simulate(Actor(request, auth), id, body);
+    return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: result.Code == "AUTH_002" ? StatusCodes.Status403Forbidden : StatusCodes.Status400BadRequest);
+});
 app.MapGet("/api/v1/flow/delegations/my", (HttpRequest request, DemoAuthService auth, DelegationService service) => Results.Ok(service.ListMine(Actor(request, auth))));
 app.MapPost("/api/v1/flow/delegations", (CreateFlowDelegationRequest body, HttpRequest request, DemoAuthService auth, DelegationService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Create(actor, body), true); });
 app.MapPost("/api/v1/flow/delegations/{id:guid}/cancel", (Guid id, HttpRequest request, DemoAuthService auth, DelegationService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Cancel(actor, id)); });

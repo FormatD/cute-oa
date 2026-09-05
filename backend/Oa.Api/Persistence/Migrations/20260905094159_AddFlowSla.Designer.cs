@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using Oa.Api.Persistence;
@@ -11,9 +12,11 @@ using Oa.Api.Persistence;
 namespace Oa.Api.Persistence.Migrations
 {
     [DbContext(typeof(OaDbContext))]
-    partial class OaDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260905094159_AddFlowSla")]
+    partial class AddFlowSla
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -861,107 +864,6 @@ namespace Oa.Api.Persistence.Migrations
                     b.ToTable("auth_session", (string)null);
                 });
 
-            modelBuilder.Entity("Oa.Api.Persistence.BusinessConfigurationRecord", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uuid");
-
-                    b.Property<string>("Code")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<int>("ConcurrencyVersion")
-                        .IsConcurrencyToken()
-                        .HasColumnType("integer");
-
-                    b.Property<string>("ContentJson")
-                        .IsRequired()
-                        .HasColumnType("jsonb");
-
-                    b.Property<DateTimeOffset>("CreatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("CreatedBy")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<string>("CreatedByName")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<string>("Description")
-                        .HasMaxLength(500)
-                        .HasColumnType("character varying(500)");
-
-                    b.Property<string>("Domain")
-                        .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
-
-                    b.Property<DateTimeOffset>("EffectiveFrom")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<DateTimeOffset?>("EffectiveTo")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(100)
-                        .HasColumnType("character varying(100)");
-
-                    b.Property<DateTimeOffset?>("PublishedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("PublishedBy")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<string>("PublishedByName")
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<string>("Status")
-                        .IsRequired()
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
-
-                    b.Property<string>("TenantId")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("UpdatedBy")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<string>("UpdatedByName")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("character varying(64)");
-
-                    b.Property<int>("Version")
-                        .HasColumnType("integer");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("TenantId", "CreatedAt");
-
-                    b.HasIndex("TenantId", "Domain", "Code", "Version")
-                        .IsUnique();
-
-                    b.HasIndex("TenantId", "Domain", "Code", "Status", "EffectiveFrom");
-
-                    b.ToTable("business_configuration", (string)null);
-                });
-
             modelBuilder.Entity("Oa.Api.Persistence.ContractAlertAcknowledgementRecord", b =>
                 {
                     b.Property<Guid>("Id")
@@ -1340,18 +1242,6 @@ namespace Oa.Api.Persistence.Migrations
                     b.Property<string>("BankName")
                         .HasColumnType("text");
 
-                    b.Property<DateTimeOffset?>("ConfigResolvedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("ConfigSnapshotJson")
-                        .HasColumnType("jsonb");
-
-                    b.Property<Guid?>("ConfigVersionId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int?>("ConfigVersionNumber")
-                        .HasColumnType("integer");
-
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -1415,8 +1305,6 @@ namespace Oa.Api.Persistence.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("ConfigVersionId");
 
                     b.HasIndex("ProcessDefinitionId");
 
@@ -2082,18 +1970,6 @@ namespace Oa.Api.Persistence.Migrations
                     b.Property<int?>("BalanceYear")
                         .HasColumnType("integer");
 
-                    b.Property<DateTimeOffset?>("ConfigResolvedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("ConfigSnapshotJson")
-                        .HasColumnType("jsonb");
-
-                    b.Property<Guid?>("ConfigVersionId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int?>("ConfigVersionNumber")
-                        .HasColumnType("integer");
-
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -2154,8 +2030,6 @@ namespace Oa.Api.Persistence.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("ConfigVersionId");
 
                     b.HasIndex("ProcessDefinitionId");
 
@@ -3053,18 +2927,6 @@ namespace Oa.Api.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("jsonb");
 
-                    b.Property<DateTimeOffset?>("ConfigResolvedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("ConfigSnapshotJson")
-                        .HasColumnType("jsonb");
-
-                    b.Property<Guid?>("ConfigVersionId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int?>("ConfigVersionNumber")
-                        .HasColumnType("integer");
-
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -3084,7 +2946,6 @@ namespace Oa.Api.Persistence.Migrations
                         .HasColumnType("boolean");
 
                     b.Property<int>("ItemCount")
-                        .HasPrecision(14, 2)
                         .HasColumnType("integer");
 
                     b.Property<string>("ItemSearchText")
@@ -3142,8 +3003,6 @@ namespace Oa.Api.Persistence.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("ConfigVersionId");
 
                     b.HasIndex("ProcessDefinitionId");
 
@@ -3357,18 +3216,6 @@ namespace Oa.Api.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("jsonb");
 
-                    b.Property<DateTimeOffset?>("ConfigResolvedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("ConfigSnapshotJson")
-                        .HasColumnType("jsonb");
-
-                    b.Property<Guid?>("ConfigVersionId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int?>("ConfigVersionNumber")
-                        .HasColumnType("integer");
-
                     b.Property<int>("Copies")
                         .HasColumnType("integer");
 
@@ -3429,10 +3276,6 @@ namespace Oa.Api.Persistence.Migrations
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
 
-                    b.Property<string>("RiskLevel")
-                        .HasMaxLength(32)
-                        .HasColumnType("character varying(32)");
-
                     b.Property<string>("SealType")
                         .IsRequired()
                         .HasMaxLength(32)
@@ -3458,8 +3301,6 @@ namespace Oa.Api.Persistence.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("ConfigVersionId");
 
                     b.HasIndex("ProcessDefinitionId");
 
@@ -3620,18 +3461,6 @@ namespace Oa.Api.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("jsonb");
 
-                    b.Property<DateTimeOffset?>("ConfigResolvedAt")
-                        .HasColumnType("timestamp with time zone");
-
-                    b.Property<string>("ConfigSnapshotJson")
-                        .HasColumnType("jsonb");
-
-                    b.Property<Guid?>("ConfigVersionId")
-                        .HasColumnType("uuid");
-
-                    b.Property<int?>("ConfigVersionNumber")
-                        .HasColumnType("integer");
-
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -3694,8 +3523,6 @@ namespace Oa.Api.Persistence.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
-
-                    b.HasIndex("ConfigVersionId");
 
                     b.HasIndex("ProcessDefinitionId");
 
@@ -4074,11 +3901,6 @@ namespace Oa.Api.Persistence.Migrations
 
             modelBuilder.Entity("Oa.Api.Persistence.ExpenseRecord", b =>
                 {
-                    b.HasOne("Oa.Api.Persistence.BusinessConfigurationRecord", null)
-                        .WithMany()
-                        .HasForeignKey("ConfigVersionId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("Oa.Api.Persistence.ProcessDefinitionRecord", null)
                         .WithMany()
                         .HasForeignKey("ProcessDefinitionId")
@@ -4166,11 +3988,6 @@ namespace Oa.Api.Persistence.Migrations
 
             modelBuilder.Entity("Oa.Api.Persistence.LeaveRecord", b =>
                 {
-                    b.HasOne("Oa.Api.Persistence.BusinessConfigurationRecord", null)
-                        .WithMany()
-                        .HasForeignKey("ConfigVersionId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("Oa.Api.Persistence.ProcessDefinitionRecord", null)
                         .WithMany()
                         .HasForeignKey("ProcessDefinitionId")
@@ -4302,11 +4119,6 @@ namespace Oa.Api.Persistence.Migrations
 
             modelBuilder.Entity("Oa.Api.Persistence.PurchaseRequestRecord", b =>
                 {
-                    b.HasOne("Oa.Api.Persistence.BusinessConfigurationRecord", null)
-                        .WithMany()
-                        .HasForeignKey("ConfigVersionId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("Oa.Api.Persistence.ProcessDefinitionRecord", null)
                         .WithMany()
                         .HasForeignKey("ProcessDefinitionId")
@@ -4361,11 +4173,6 @@ namespace Oa.Api.Persistence.Migrations
 
             modelBuilder.Entity("Oa.Api.Persistence.SealRequestRecord", b =>
                 {
-                    b.HasOne("Oa.Api.Persistence.BusinessConfigurationRecord", null)
-                        .WithMany()
-                        .HasForeignKey("ConfigVersionId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("Oa.Api.Persistence.ProcessDefinitionRecord", null)
                         .WithMany()
                         .HasForeignKey("ProcessDefinitionId")
@@ -4402,11 +4209,6 @@ namespace Oa.Api.Persistence.Migrations
 
             modelBuilder.Entity("Oa.Api.Persistence.TravelRecord", b =>
                 {
-                    b.HasOne("Oa.Api.Persistence.BusinessConfigurationRecord", null)
-                        .WithMany()
-                        .HasForeignKey("ConfigVersionId")
-                        .OnDelete(DeleteBehavior.Restrict);
-
                     b.HasOne("Oa.Api.Persistence.ProcessDefinitionRecord", null)
                         .WithMany()
                         .HasForeignKey("ProcessDefinitionId")

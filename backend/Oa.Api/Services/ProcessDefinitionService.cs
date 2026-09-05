@@ -95,7 +95,7 @@ public sealed class ProcessDefinitionService(OaDbContext db, DemoData data) : IP
             return ServiceResult<ProcessDefinitionView>.Failure("该流程已有草稿版本，请先编辑或发布现有草稿。", "STATE_001");
         var version = db.ProcessDefinitions.Where(item => item.TenantId == TenantId && item.Code == source.Code).Max(item => item.Version) + 1;
         var definition = new ProcessDefinitionRecord { TenantId = TenantId, Code = source.Code, Name = source.Name, BusinessType = source.BusinessType, Version = version, Status = (int)ProcessDefinitionStatus.Draft, Priority = source.Priority, CreatedBy = actor.Id };
-        SaveAggregate(definition, source.Routes.Select(route => new ProcessRouteInput(route.MaxValue, route.ApproverKeys)).ToList(), source.DepartmentIds, source.LeaveTypes);
+        SaveAggregate(definition, source.Routes.Select(ToInput).ToList(), source.DepartmentIds, source.LeaveTypes);
         Audit(actor, "PROCESS_DEFINITION_CLONED", definition, $"从 {source.Code} v{source.Version} 复制 v{version} 草稿");
         return ServiceResult<ProcessDefinitionView>.Success(Load(definition.Id)!);
     }
@@ -157,6 +157,23 @@ public sealed class ProcessDefinitionService(OaDbContext db, DemoData data) : IP
         return resolved.IsSuccess ? ApplyDelegations(resolved.Value!, businessType) : resolved;
     }
 
+    public ServiceResult<ProcessSimulationView> Simulate(Employee actor, Guid id, SimulateProcessRequest request)
+    {
+        if (!IsAdministrator(actor)) return ServiceResult<ProcessSimulationView>.Failure("无流程维护权限。", "AUTH_002");
+        EnsureDefaults();
+        var definition = Load(id);
+        if (definition is null) return ServiceResult<ProcessSimulationView>.Failure("流程定义不存在。", "DATA_001");
+        var applicant = data.FindEmployee(request.ApplicantId);
+        if (applicant is null || applicant.Status != "ACTIVE") return ServiceResult<ProcessSimulationView>.Failure("试算申请人不存在或已停用。", "VALIDATION_001");
+        if (!Applies(definition, applicant, request.Category)) return ServiceResult<ProcessSimulationView>.Failure("该流程不适用于当前申请人或业务类别。", "FLOW_001");
+        var resolved = ProcessRouting.Resolve(definition, data, applicant, request.Metric);
+        if (!resolved.IsSuccess) return ServiceResult<ProcessSimulationView>.Failure(resolved.Error!, resolved.Code!);
+        var delegated = ApplyDelegations(resolved.Value!, definition.BusinessType);
+        if (!delegated.IsSuccess) return ServiceResult<ProcessSimulationView>.Failure(delegated.Error!, delegated.Code!);
+        var value = delegated.Value!;
+        return ServiceResult<ProcessSimulationView>.Success(new ProcessSimulationView(value.DefinitionId, value.Code, value.Version, value.Approvers, value.RoutingNotes ?? []));
+    }
+
     private ServiceResult<bool> Validate(string name, string businessType, IReadOnlyList<ProcessRouteInput> routes, int priority, IReadOnlyList<string>? departmentIds, IReadOnlyList<string>? leaveTypes)
     {
         if (string.IsNullOrWhiteSpace(name) || name.Trim().Length > 100) return ServiceResult<bool>.Failure("流程名称应为 1–100 个字符。");
@@ -173,6 +190,16 @@ public sealed class ProcessDefinitionService(OaDbContext db, DemoData data) : IP
         if (!limited.SequenceEqual(limited.OrderBy(value => value).Distinct())) return ServiceResult<bool>.Failure("条件上限必须严格递增且不能重复。");
         if (routes.Any(route => route.ApproverKeys.Count == 0 || route.ApproverKeys.Any(key => !IsValidApproverKey(key))))
             return ServiceResult<bool>.Failure("每条规则都需要有效审批人：直属上级、角色或指定用户。");
+        foreach (var route in routes)
+        {
+            var policies = route.NodePolicies;
+            if (policies is not null && policies.Count != route.ApproverKeys.Count)
+                return ServiceResult<bool>.Failure("节点时效配置数量必须与审批节点数量一致。", "VALIDATION_001");
+            if ((policies ?? []).Any(policy => policy.HandlingHours is < 1 or > 2_160 || policy.ReminderBeforeHours is < 0 or > 720 || policy.ReminderBeforeHours >= policy.HandlingHours || policy.EscalateAfterHours is < 0 or > 2_160))
+                return ServiceResult<bool>.Failure("节点办理时限应为 1–2160 小时，提前提醒必须小于办理时限，逾期升级应为 0–2160 小时。", "VALIDATION_001");
+            if ((policies ?? []).Any(policy => !IsValidEscalationTarget(policy.EscalationTarget) || !MissingAssigneeActions.All.Contains(policy.MissingAssigneeAction)))
+                return ServiceResult<bool>.Failure("节点升级对象或审批人缺失处理方式无效。", "VALIDATION_001");
+        }
         return ServiceResult<bool>.Success(true);
     }
 
@@ -184,12 +211,14 @@ public sealed class ProcessDefinitionService(OaDbContext db, DemoData data) : IP
         return false;
     }
 
+    private bool IsValidEscalationTarget(string key) => key is "DIRECT_MANAGER" or "PROCESS_ADMIN" || IsValidApproverKey(key);
+
     private void EnsureDefaults()
     {
         foreach (var source in ProcessDefaults.All.Where(source => !db.ProcessDefinitions.Any(item => item.TenantId == TenantId && item.Code == source.Code)))
         {
             var definition = new ProcessDefinitionRecord { Id = source.Id, TenantId = TenantId, Code = source.Code, Name = source.Name, BusinessType = source.BusinessType, Version = source.Version, Status = (int)source.Status, Priority = source.Priority, CreatedBy = source.CreatedBy, CreatedAt = DateTimeOffset.UtcNow, PublishedBy = source.PublishedBy, PublishedAt = DateTimeOffset.UtcNow };
-            SaveAggregate(definition, source.Routes.Select(route => new ProcessRouteInput(route.MaxValue, route.ApproverKeys)).ToList(), source.DepartmentIds, source.LeaveTypes);
+            SaveAggregate(definition, source.Routes.Select(ToInput).ToList(), source.DepartmentIds, source.LeaveTypes);
         }
     }
 
@@ -205,7 +234,8 @@ public sealed class ProcessDefinitionService(OaDbContext db, DemoData data) : IP
         var nodes = db.ProcessNodes.AsNoTracking().Where(item => ruleIds.Contains(item.ProcessRuleId)).OrderBy(item => item.Sequence).ToLookup(item => item.ProcessRuleId);
         var scopes = db.ProcessScopes.AsNoTracking().Where(item => item.ProcessDefinitionId == id).ToList();
         return new ProcessDefinitionView(definition.Id, definition.Code, definition.Name, definition.BusinessType, definition.Version, (ProcessDefinitionStatus)definition.Status,
-            rules.Select(rule => new ProcessRouteView(rule.Id, rule.Sequence, rule.MaxValue, nodes[rule.Id].Select(node => node.AssigneeKey).ToList())).ToList(),
+            rules.Select(rule => new ProcessRouteView(rule.Id, rule.Sequence, rule.MaxValue, nodes[rule.Id].Select(node => node.AssigneeKey).ToList(),
+                nodes[rule.Id].Select(node => new ProcessNodePolicyView(node.Id, node.Sequence, node.AssigneeKey, node.HandlingHours, node.ReminderBeforeHours, node.EscalateAfterHours, node.EscalationTarget, node.MissingAssigneeAction, node.AllowAutoSkip)).ToList())).ToList(),
             definition.CreatedBy, definition.CreatedAt, definition.PublishedBy, definition.PublishedAt, definition.Priority,
             scopes.Where(item => item.ScopeType == "Department").Select(item => item.Value).OrderBy(value => value).ToList(),
             scopes.Where(item => item.ScopeType == "LeaveType").Select(item => item.Value).OrderBy(value => value).ToList());
@@ -236,7 +266,22 @@ public sealed class ProcessDefinitionService(OaDbContext db, DemoData data) : IP
         {
             var rule = new ProcessRuleRecord { ProcessDefinitionId = definition.Id, Sequence = routeIndex + 1, MaxValue = route.MaxValue };
             db.ProcessRules.Add(rule);
-            db.ProcessNodes.AddRange(route.ApproverKeys.Select((key, nodeIndex) => new ProcessNodeRecord { ProcessRuleId = rule.Id, Sequence = nodeIndex + 1, AssigneeKey = key }));
+            db.ProcessNodes.AddRange(route.ApproverKeys.Select((key, nodeIndex) =>
+            {
+                var policy = route.NodePolicies is { Count: > 0 } ? route.NodePolicies[nodeIndex] : new ProcessNodePolicyInput();
+                return new ProcessNodeRecord
+                {
+                    ProcessRuleId = rule.Id,
+                    Sequence = nodeIndex + 1,
+                    AssigneeKey = key,
+                    HandlingHours = policy.HandlingHours,
+                    ReminderBeforeHours = policy.ReminderBeforeHours,
+                    EscalateAfterHours = policy.EscalateAfterHours,
+                    EscalationTarget = policy.EscalationTarget.Trim().ToUpperInvariant(),
+                    MissingAssigneeAction = policy.MissingAssigneeAction.Trim().ToUpperInvariant(),
+                    AllowAutoSkip = policy.AllowAutoSkip
+                };
+            }));
         }
     }
 
@@ -272,6 +317,9 @@ public sealed class ProcessDefinitionService(OaDbContext db, DemoData data) : IP
     private static bool ValueScopesOverlap(IReadOnlyList<string> first, IReadOnlyList<string> second) =>
         first.Count == 0 || second.Count == 0 || first.Intersect(second, StringComparer.OrdinalIgnoreCase).Any();
 
+    private static ProcessRouteInput ToInput(ProcessRouteView route) => new(route.MaxValue, route.ApproverKeys,
+        route.Nodes?.Select(node => new ProcessNodePolicyInput(node.HandlingHours, node.ReminderBeforeHours, node.EscalateAfterHours, node.EscalationTarget, node.MissingAssigneeAction, node.AllowAutoSkip)).ToList());
+
     private void Audit(Employee actor, string action, ProcessDefinitionRecord definition, string summary)
     {
         db.AuditLogs.Add(new AuditRecord { TenantId = TenantId, ActorId = actor.Id, Action = action, ResourceType = "ProcessDefinition", ResourceId = definition.Id.ToString(), Summary = summary });
@@ -293,15 +341,22 @@ public sealed class ProcessDefinitionService(OaDbContext db, DemoData data) : IP
             .GroupBy(item => item.OwnerId)
             .ToDictionary(group => group.Key, group => group.First());
         var effective = new List<ResolvedApprover>();
-        foreach (var original in process.Approvers.Select(item => item.OriginalApprover))
+        var notes = (process.RoutingNotes ?? []).ToList();
+        foreach (var node in process.Approvers)
         {
+            var original = node.OriginalApprover;
             var delegation = delegations.GetValueOrDefault(original.Id);
             var assignee = delegation is null ? original : data.FindEmployee(delegation.DelegateId);
             if (assignee is null || assignee.Status != "ACTIVE")
                 return ServiceResult<ResolvedProcess>.Failure($"审批人 {original.Name} 的代办人无法解析。", "FLOW_001");
-            if (effective.All(item => item.Assignee.Id != assignee.Id)) effective.Add(new ResolvedApprover(assignee, original, delegation?.Id));
+            if (effective.LastOrDefault()?.Assignee.Id != assignee.Id)
+                effective.Add(new ResolvedApprover(assignee, original, delegation?.Id, node.Policy));
+            else if ((node.Policy ?? ProcessNodePolicy.Default).AllowAutoSkip)
+                notes.Add($"代办后连续节点均命中 {assignee.Name}，已按节点配置自动跳过。");
+            else
+                return ServiceResult<ResolvedProcess>.Failure($"代办后连续节点均命中 {assignee.Name}，且未允许自动跳过。", "FLOW_001");
         }
-        return ServiceResult<ResolvedProcess>.Success(process with { Approvers = effective });
+        return ServiceResult<ResolvedProcess>.Success(process with { Approvers = effective, RoutingNotes = notes });
     }
 }
 
@@ -311,9 +366,14 @@ public static class ProcessRouting
     {
         var route = definition.Routes.OrderBy(item => item.Sequence).FirstOrDefault(item => item.MaxValue is null || metric <= item.MaxValue);
         if (route is null) return ServiceResult<ResolvedProcess>.Failure("没有匹配当前业务数据的流程规则。", "FLOW_001");
-        var approvers = new List<Employee>();
-        foreach (var key in route.ApproverKeys)
+        var approvers = new List<ResolvedApprover>();
+        var notes = new List<string>();
+        var nodes = route.Nodes is { Count: > 0 }
+            ? route.Nodes
+            : route.ApproverKeys.Select((key, index) => new ProcessNodePolicyView(Guid.Empty, index + 1, key, 24, 4, 24, "DIRECT_MANAGER", MissingAssigneeActions.Block, false)).ToList();
+        foreach (var node in nodes.OrderBy(item => item.Sequence))
         {
+            var key = node.ApproverKey;
             Employee? approver = key switch
             {
                 "DIRECT_MANAGER" => applicant.ManagerId is null ? null : data.FindEmployee(applicant.ManagerId),
@@ -321,10 +381,28 @@ public static class ProcessRouting
                 _ when key.StartsWith("USER:", StringComparison.Ordinal) => data.FindEmployee(key[5..]),
                 _ => null
             };
-            if (approver is null || approver.Status != "ACTIVE") return ServiceResult<ResolvedProcess>.Failure($"无法解析审批人规则 {key}。", "FLOW_001");
-            if (approvers.All(item => item.Id != approver.Id)) approvers.Add(approver);
+            if (approver is null || approver.Status != "ACTIVE")
+            {
+                if (node.MissingAssigneeAction == MissingAssigneeActions.Skip)
+                {
+                    notes.Add($"审批人规则 {key} 无法解析，已按配置跳过节点。");
+                    continue;
+                }
+                if (node.MissingAssigneeAction == MissingAssigneeActions.ProcessAdministrator)
+                {
+                    approver = data.ActiveEmployees.FirstOrDefault(item => data.HasPermission(item, OaPermissions.ProcessManage));
+                    if (approver is not null) notes.Add($"审批人规则 {key} 无法解析，已转流程管理员 {approver.Name}。");
+                }
+            }
+            if (approver is null || approver.Status != "ACTIVE") return ServiceResult<ResolvedProcess>.Failure($"无法解析审批人规则 {key}，且未找到可用的异常路由。", "FLOW_001");
+            if (approvers.LastOrDefault()?.Assignee.Id != approver.Id)
+                approvers.Add(new ResolvedApprover(approver, approver, null, new ProcessNodePolicy(node.HandlingHours, node.ReminderBeforeHours, node.EscalateAfterHours, node.EscalationTarget, node.AllowAutoSkip)));
+            else if (node.AllowAutoSkip)
+                notes.Add($"连续节点均命中 {approver.Name}，已按节点配置自动跳过。");
+            else
+                return ServiceResult<ResolvedProcess>.Failure($"连续节点均命中 {approver.Name}，且未允许自动跳过。", "FLOW_001");
         }
         if (approvers.Count == 0) return ServiceResult<ResolvedProcess>.Failure("流程未解析到有效审批人。", "FLOW_001");
-        return ServiceResult<ResolvedProcess>.Success(new ResolvedProcess(definition.Id, definition.Code, definition.Version, approvers.Select(item => new ResolvedApprover(item, item, null)).ToList()));
+        return ServiceResult<ResolvedProcess>.Success(new ResolvedProcess(definition.Id, definition.Code, definition.Version, approvers, notes));
     }
 }

@@ -7,6 +7,7 @@ namespace Oa.Api.Services;
 public sealed class FlowInstanceService(OaDbContext? db = null)
 {
     private const string TenantId = "demo";
+    private readonly List<PendingSlaAction> pendingSlaActions = [];
 
     public FlowInstance Start(
         IList<FlowInstance> history,
@@ -32,6 +33,55 @@ public sealed class FlowInstanceService(OaDbContext? db = null)
         return instance;
     }
 
+    public void RegisterTasks(FlowInstance instance, string businessType, IReadOnlyList<ResolvedFlowTask> tasks)
+    {
+        if (db is null) return;
+        RegisterTasks(db, instance.Id, instance.StartedAt, businessType, tasks);
+    }
+
+    public static void RegisterTasks(OaDbContext context, Guid flowInstanceId, DateTimeOffset startedAt, string businessType, IReadOnlyList<ResolvedFlowTask> tasks)
+    {
+        if (tasks.Count == 0) return;
+        var firstSequence = tasks.Min(item => item.Sequence);
+        foreach (var task in tasks.OrderBy(item => item.Sequence))
+        {
+            var policy = task.Approver.Policy ?? ProcessNodePolicy.Default;
+            var active = task.Sequence == firstSequence;
+            context.FlowTaskSlas.Add(new FlowTaskSlaRecord
+            {
+                TenantId = TenantId,
+                FlowInstanceId = flowInstanceId,
+                TaskId = task.TaskId,
+                BusinessType = businessType,
+                Sequence = task.Sequence,
+                AssigneeId = task.Approver.Assignee.Id,
+                AssigneeName = task.Approver.Assignee.Name,
+                HandlingHours = policy.HandlingHours,
+                ReminderBeforeHours = policy.ReminderBeforeHours,
+                EscalateAfterHours = policy.EscalateAfterHours,
+                EscalationTarget = policy.EscalationTarget,
+                AllowAutoSkip = policy.AllowAutoSkip,
+                ActivatedAt = active ? startedAt : null,
+                DueAt = active ? startedAt.AddHours(policy.HandlingHours) : null
+            });
+        }
+    }
+
+    public IReadOnlyDictionary<Guid, DateTimeOffset> GetDueTimes(IEnumerable<Guid> taskIds)
+    {
+        if (db is null) return new Dictionary<Guid, DateTimeOffset>();
+        var ids = taskIds.Distinct().ToList();
+        return db.FlowTaskSlas.AsNoTracking().Where(item => item.TenantId == TenantId && ids.Contains(item.TaskId) && item.DueAt != null)
+            .ToDictionary(item => item.TaskId, item => item.DueAt!.Value);
+    }
+
+    public IReadOnlyDictionary<Guid, DateTimeOffset> GetDueTimesForAssignee(string assigneeId)
+    {
+        if (db is null) return new Dictionary<Guid, DateTimeOffset>();
+        return db.FlowTaskSlas.AsNoTracking().Where(item => item.TenantId == TenantId && item.AssigneeId == assigneeId && item.DueAt != null && item.CompletedAt == null && item.CancelledAt == null)
+            .ToDictionary(item => item.TaskId, item => item.DueAt!.Value);
+    }
+
     public void Record(
         FlowInstance instance,
         FlowActionType action,
@@ -43,6 +93,7 @@ public sealed class FlowInstanceService(OaDbContext? db = null)
         Employee? toAssignee = null)
     {
         instance.Actions.Add(NewAction(instance.Id, action, actor, taskId, sequence, comment, fromAssignee, toAssignee));
+        if (db is not null) pendingSlaActions.Add(new PendingSlaAction(instance.Id, action, taskId, toAssignee));
         if (action is FlowActionType.Approved && instance.Status == FlowInstanceStatus.Running) return;
         instance.Status = action switch
         {
@@ -57,6 +108,39 @@ public sealed class FlowInstanceService(OaDbContext? db = null)
     {
         instance.Status = FlowInstanceStatus.Completed;
         instance.CompletedAt = DateTimeOffset.UtcNow;
+    }
+
+    public static void UpdateTaskSla(OaDbContext context, Guid flowInstanceId, FlowActionType action, Guid? taskId = null, Employee? toAssignee = null)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (action == FlowActionType.Withdrawn)
+        {
+            foreach (var sibling in context.FlowTaskSlas.Where(item => item.TenantId == TenantId && item.FlowInstanceId == flowInstanceId && item.CompletedAt == null && item.CancelledAt == null)) sibling.CancelledAt = now;
+            return;
+        }
+        if (taskId is null) return;
+        var current = context.FlowTaskSlas.Local.SingleOrDefault(item => item.TaskId == taskId) ?? context.FlowTaskSlas.SingleOrDefault(item => item.TenantId == TenantId && item.TaskId == taskId);
+        if (current is null) return;
+        if (action == FlowActionType.Transferred && toAssignee is not null)
+        {
+            current.AssigneeId = toAssignee.Id;
+            current.AssigneeName = toAssignee.Name;
+            return;
+        }
+        if (action is not (FlowActionType.Approved or FlowActionType.Rejected)) return;
+        current.CompletedAt = now;
+        if (action == FlowActionType.Rejected)
+        {
+            foreach (var sibling in context.FlowTaskSlas.Where(item => item.TenantId == TenantId && item.FlowInstanceId == flowInstanceId && item.TaskId != taskId && item.CompletedAt == null && item.CancelledAt == null)) sibling.CancelledAt = now;
+            return;
+        }
+        var next = context.FlowTaskSlas.Local.Where(item => item.FlowInstanceId == flowInstanceId && item.ActivatedAt == null && item.CompletedAt == null && item.CancelledAt == null).OrderBy(item => item.Sequence).FirstOrDefault()
+            ?? context.FlowTaskSlas.Where(item => item.TenantId == TenantId && item.FlowInstanceId == flowInstanceId && item.ActivatedAt == null && item.CompletedAt == null && item.CancelledAt == null).OrderBy(item => item.Sequence).FirstOrDefault();
+        if (next is not null)
+        {
+            next.ActivatedAt = now;
+            next.DueAt = now.AddHours(next.HandlingHours);
+        }
     }
 
     public FlowInstance? Current(IReadOnlyCollection<FlowInstance> history, Guid? id) =>
@@ -129,7 +213,12 @@ public sealed class FlowInstanceService(OaDbContext? db = null)
                 });
             }
         }
+        foreach (var pending in pendingSlaActions)
+            UpdateTaskSla(db, pending.FlowInstanceId, pending.Action, pending.TaskId, pending.ToAssignee);
+        pendingSlaActions.Clear();
     }
+
+    private sealed record PendingSlaAction(Guid FlowInstanceId, FlowActionType Action, Guid? TaskId, Employee? ToAssignee);
 
     private static FlowAction NewAction(Guid instanceId, FlowActionType action, Employee actor, Guid? taskId = null, int? sequence = null, string? comment = null, Employee? fromAssignee = null, Employee? toAssignee = null) => new()
     {

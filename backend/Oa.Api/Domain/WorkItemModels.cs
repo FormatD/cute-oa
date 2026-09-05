@@ -43,7 +43,8 @@ public sealed record WorkItemView(
     string Route,
     bool CanProcess,
     bool IsRead,
-    string ActionType);
+    string ActionType,
+    DateTimeOffset? DueAt = null);
 
 public sealed record WorkItemSummary(
     int PendingCount,

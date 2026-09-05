@@ -236,15 +236,17 @@ public sealed class SealService
         };
         db.FlowInstances.Add(instance);
         AddFlowAction(instance.Id, FlowActionType.Submitted, actor, comment: "提交审批");
-        foreach (var (approver, index) in route.Value.Approvers.Select((value, index) => (value, index)))
-            db.SealTasks.Add(new SealTaskRecord
+        var approvalTasks = route.Value.Approvers.Select((approver, index) => new SealTaskRecord
             {
                 TenantId = TenantId, SealRequestId = record.Id, FlowInstanceId = instance.Id,
                 AssigneeId = approver.Assignee.Id, AssigneeName = approver.Assignee.Name,
                 OriginalAssigneeId = approver.DelegationId is null ? null : approver.OriginalApprover.Id,
                 OriginalAssigneeName = approver.DelegationId is null ? null : approver.OriginalApprover.Name,
                 DelegationId = approver.DelegationId, Sequence = index + 1, Status = (int)FlowTaskStatus.Pending
-            });
+            }).ToList();
+        db.SealTasks.AddRange(approvalTasks);
+        FlowInstanceService.RegisterTasks(db, instance.Id, instance.StartedAt, BusinessType,
+            approvalTasks.Select((task, index) => new ResolvedFlowTask(task.Id, task.Sequence, route.Value.Approvers[index])).ToList());
         record.Status = (int)SealStatus.Approving;
         record.ProcessDefinitionId = route.Value.DefinitionId;
         record.ProcessDefinitionCode = route.Value.Code;
@@ -285,6 +287,7 @@ public sealed class SealService
         task.AssigneeName = assignee.Name;
         task.Version++;
         AddFlowAction(task.FlowInstanceId!.Value, FlowActionType.Transferred, actor, task.Id, task.Sequence, request.Comment.Trim(), previousId, previousName, assignee.Id, assignee.Name);
+        FlowInstanceService.UpdateTaskSla(db, task.FlowInstanceId.Value, FlowActionType.Transferred, task.Id, assignee);
         Audit(actor, "SEAL_TASK_TRANSFERRED", seal, $"将第 {task.Sequence} 节点转办给 {assignee.Name}：{request.Comment.Trim()}");
         notifications.Enqueue(assignee.Id, "TODO_TRANSFERRED", "用章审批待办已转办给你", $"{seal.Number}：{request.Comment.Trim()}", "SealRequest", seal.Id);
         return SaveAndReload(seal, "用章审批任务已被其他操作处理，请刷新后重试。");
@@ -307,6 +310,7 @@ public sealed class SealService
         instance.Status = (int)FlowInstanceStatus.Withdrawn;
         instance.CompletedAt = DateTimeOffset.UtcNow;
         AddFlowAction(instance.Id, FlowActionType.Withdrawn, actor, comment: "申请人撤回");
+        FlowInstanceService.UpdateTaskSla(db, instance.Id, FlowActionType.Withdrawn);
         var copied = ActivateCopies(record, SealStatus.Withdrawn.ToString());
         Audit(actor, "SEAL_WITHDRAWN", record, "撤回用章申请");
         foreach (var assignee in tasks.Select(item => item.AssigneeId).Distinct().Where(item => item != actor.Id))
@@ -463,6 +467,7 @@ public sealed class SealService
         task.ProcessedAt = DateTimeOffset.UtcNow;
         task.Version++;
         AddFlowAction(instance.Id, approve ? FlowActionType.Approved : FlowActionType.Rejected, actor, task.Id, task.Sequence, task.Comment);
+        FlowInstanceService.UpdateTaskSla(db, instance.Id, approve ? FlowActionType.Approved : FlowActionType.Rejected, task.Id);
 
         if (!approve)
         {

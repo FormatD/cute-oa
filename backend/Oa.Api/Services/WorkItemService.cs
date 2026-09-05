@@ -15,7 +15,8 @@ public sealed class WorkItemService(
     FlowCopyService copies,
     AnnouncementService announcements,
     KnowledgeDocumentService documents,
-    EmploymentContractService contracts)
+    EmploymentContractService contracts,
+    FlowInstanceService? flowInstances = null)
 {
     private const string TenantId = IdentityDefaults.TenantId;
 
@@ -54,9 +55,9 @@ public sealed class WorkItemService(
 
         var ordered = tab switch
         {
-            WorkItemTabs.Pending => filtered.OrderBy(item => UrgencyRank(item.Urgency)).ThenBy(item => item.DueDate).ThenByDescending(item => item.OccurredAt).ThenBy(item => item.Id, StringComparer.Ordinal),
+            WorkItemTabs.Pending => filtered.OrderBy(item => UrgencyRank(item.Urgency)).ThenBy(item => item.DueAt).ThenBy(item => item.DueDate).ThenByDescending(item => item.OccurredAt).ThenBy(item => item.Id, StringComparer.Ordinal),
             WorkItemTabs.Reading => filtered.OrderBy(item => item.IsRead).ThenByDescending(item => item.OccurredAt).ThenBy(item => item.Id, StringComparer.Ordinal),
-            WorkItemTabs.Risk => filtered.OrderBy(item => UrgencyRank(item.Urgency)).ThenBy(item => item.DueDate).ThenByDescending(item => item.OccurredAt).ThenBy(item => item.Id, StringComparer.Ordinal),
+            WorkItemTabs.Risk => filtered.OrderBy(item => UrgencyRank(item.Urgency)).ThenBy(item => item.DueAt).ThenBy(item => item.DueDate).ThenByDescending(item => item.OccurredAt).ThenBy(item => item.Id, StringComparer.Ordinal),
             _ => filtered.OrderByDescending(item => item.ProcessedAt ?? item.OccurredAt).ThenBy(item => item.Id, StringComparer.Ordinal)
         };
 
@@ -74,7 +75,7 @@ public sealed class WorkItemService(
         var all = Build(actor);
         var take = Math.Clamp(requestedTake, 1, 20);
         return new WorkItemOverview(
-            all.Where(item => item.Tab == WorkItemTabs.Pending).OrderBy(item => UrgencyRank(item.Urgency)).ThenBy(item => item.DueDate).ThenByDescending(item => item.OccurredAt).ThenBy(item => item.Id, StringComparer.Ordinal).Take(take).ToList(),
+            all.Where(item => item.Tab == WorkItemTabs.Pending).OrderBy(item => UrgencyRank(item.Urgency)).ThenBy(item => item.DueAt).ThenBy(item => item.DueDate).ThenByDescending(item => item.OccurredAt).ThenBy(item => item.Id, StringComparer.Ordinal).Take(take).ToList(),
             all.Where(item => item.Tab == WorkItemTabs.Initiated).OrderByDescending(item => item.OccurredAt).ThenBy(item => item.Id, StringComparer.Ordinal).Take(take).ToList(),
             all.Where(item => item.Tab == WorkItemTabs.Reading && !item.IsRead).OrderByDescending(item => item.OccurredAt).ThenBy(item => item.Id, StringComparer.Ordinal).Take(take).ToList(),
             Summarize(all));
@@ -95,10 +96,11 @@ public sealed class WorkItemService(
 
     private void AddApprovals(Employee actor, List<WorkItemView> items)
     {
+        var dueTimes = flowInstances?.GetDueTimesForAssignee(actor.Id) ?? new Dictionary<Guid, DateTimeOffset>();
         foreach (var task in leave.GetPendingTasks(actor))
         {
             var parent = leave.Get(actor, task.LeaveRequestId).Value;
-            if (parent is not null) AddApproval(items, WorkItemTabs.Pending, "leave", parent.Id, task.Id, parent.Number, $"{LeaveTypeName(parent.Type)} · {parent.Reason}", parent.ApplicantId, parent.ApplicantName, Department(parent.ApplicantId), parent.Status.ToString(), task.Sequence, parent.CreatedAt, null, $"/leave/{parent.Id}", true);
+            if (parent is not null) AddApproval(items, WorkItemTabs.Pending, "leave", parent.Id, task.Id, parent.Number, $"{LeaveTypeName(parent.Type)} · {parent.Reason}", parent.ApplicantId, parent.ApplicantName, Department(parent.ApplicantId), parent.Status.ToString(), task.Sequence, parent.CreatedAt, null, $"/leave/{parent.Id}", true, dueTimes.GetValueOrDefault(task.Id));
         }
         foreach (var task in leave.GetProcessedTasks(actor))
         {
@@ -109,7 +111,7 @@ public sealed class WorkItemService(
         foreach (var task in expense.GetPendingTasks(actor))
         {
             var parent = expense.Get(actor, task.ExpenseClaimId).Value;
-            if (parent is not null) AddApproval(items, WorkItemTabs.Pending, "expense", parent.Id, task.Id, parent.Number, parent.Description ?? $"费用报销 ¥{parent.TotalAmount:N2}", parent.ApplicantId, parent.ApplicantName, parent.DepartmentName, parent.Status.ToString(), task.Sequence, parent.CreatedAt, null, $"/expense/{parent.Id}", true);
+            if (parent is not null) AddApproval(items, WorkItemTabs.Pending, "expense", parent.Id, task.Id, parent.Number, parent.Description ?? $"费用报销 ¥{parent.TotalAmount:N2}", parent.ApplicantId, parent.ApplicantName, parent.DepartmentName, parent.Status.ToString(), task.Sequence, parent.CreatedAt, null, $"/expense/{parent.Id}", true, dueTimes.GetValueOrDefault(task.Id));
         }
         foreach (var task in expense.GetProcessedTasks(actor))
         {
@@ -120,7 +122,7 @@ public sealed class WorkItemService(
         foreach (var task in travel.GetPendingTasks(actor))
         {
             var parent = travel.Get(actor, task.TravelRequestId).Value;
-            if (parent is not null) AddApproval(items, WorkItemTabs.Pending, "travel", parent.Id, task.Id, parent.Number, parent.Purpose, parent.ApplicantId, parent.ApplicantName, parent.DepartmentName, parent.Status.ToString(), task.Sequence, parent.CreatedAt, null, $"/travel/{parent.Id}", true);
+            if (parent is not null) AddApproval(items, WorkItemTabs.Pending, "travel", parent.Id, task.Id, parent.Number, parent.Purpose, parent.ApplicantId, parent.ApplicantName, parent.DepartmentName, parent.Status.ToString(), task.Sequence, parent.CreatedAt, null, $"/travel/{parent.Id}", true, dueTimes.GetValueOrDefault(task.Id));
         }
         foreach (var task in travel.GetProcessedTasks(actor))
         {
@@ -131,7 +133,7 @@ public sealed class WorkItemService(
         foreach (var task in purchase.GetPendingTasks(actor))
         {
             var parent = purchase.Get(actor, task.PurchaseRequestId).Value;
-            if (parent is not null) AddApproval(items, WorkItemTabs.Pending, "purchase", parent.Id, task.Id, parent.Number, parent.Title, parent.ApplicantId, parent.ApplicantName, parent.DepartmentName, parent.Status.ToString(), task.Sequence, parent.CreatedAt, null, $"/purchase/{parent.Id}", true);
+            if (parent is not null) AddApproval(items, WorkItemTabs.Pending, "purchase", parent.Id, task.Id, parent.Number, parent.Title, parent.ApplicantId, parent.ApplicantName, parent.DepartmentName, parent.Status.ToString(), task.Sequence, parent.CreatedAt, null, $"/purchase/{parent.Id}", true, dueTimes.GetValueOrDefault(task.Id));
         }
         foreach (var task in purchase.GetProcessedTasks(actor))
         {
@@ -142,7 +144,7 @@ public sealed class WorkItemService(
         foreach (var task in seal.GetPendingTasks(actor))
         {
             var parent = seal.Get(actor, task.SealRequestId).Value;
-            if (parent is not null) AddApproval(items, WorkItemTabs.Pending, "seal", parent.Id, task.Id, parent.Number, parent.Title, parent.ApplicantId, parent.ApplicantName, parent.DepartmentName, parent.Status.ToString(), task.Sequence, parent.CreatedAt, null, $"/seal/{parent.Id}", true);
+            if (parent is not null) AddApproval(items, WorkItemTabs.Pending, "seal", parent.Id, task.Id, parent.Number, parent.Title, parent.ApplicantId, parent.ApplicantName, parent.DepartmentName, parent.Status.ToString(), task.Sequence, parent.CreatedAt, null, $"/seal/{parent.Id}", true, dueTimes.GetValueOrDefault(task.Id));
         }
         foreach (var task in seal.GetProcessedTasks(actor))
         {
@@ -264,9 +266,9 @@ public sealed class WorkItemService(
     }
 
     private static void AddApproval(List<WorkItemView> items, string tab, string businessType, Guid resourceId, Guid taskId, string number, string title,
-        string applicantId, string applicantName, string departmentName, string status, int sequence, DateTimeOffset occurredAt, DateTimeOffset? processedAt, string route, bool canProcess)
+        string applicantId, string applicantName, string departmentName, string status, int sequence, DateTimeOffset occurredAt, DateTimeOffset? processedAt, string route, bool canProcess, DateTimeOffset? dueAt = null)
         => items.Add(new WorkItemView($"approval:{businessType}:{taskId}", tab, WorkItemCategories.Approval, businessType, resourceId, taskId, number, title,
-            applicantId, applicantName, departmentName, status, $"第 {sequence} 级审批", occurredAt, processedAt, null, "NORMAL", route, canProcess, true, canProcess ? "APPROVE" : "VIEW"));
+            applicantId, applicantName, departmentName, status, $"第 {sequence} 级审批", occurredAt, processedAt, null, dueAt is null ? "NORMAL" : Urgency(dueAt.Value), route, canProcess, true, canProcess ? "APPROVE" : "VIEW", dueAt));
 
     private static WorkItemView Initiated(string businessType, Guid id, string number, string title, Employee actor, string status, DateTimeOffset occurredAt, string route)
         => new($"initiated:{businessType}:{id}", WorkItemTabs.Initiated, WorkItemCategories.Approval, businessType, id, null, number, title, actor.Id, actor.Name,
@@ -291,6 +293,11 @@ public sealed class WorkItemService(
     {
         var days = dueDate.DayNumber - BusinessTime.ChinaToday().DayNumber;
         return days < 0 ? "OVERDUE" : days <= 1 ? "DUE_SOON" : "NORMAL";
+    }
+    private static string Urgency(DateTimeOffset dueAt)
+    {
+        var remaining = dueAt - DateTimeOffset.UtcNow;
+        return remaining < TimeSpan.Zero ? "OVERDUE" : remaining <= TimeSpan.FromHours(4) ? "DUE_SOON" : "NORMAL";
     }
     private static bool IsContractRisk(EmploymentContractView item) => item.OpenEndedReviewRequired
         || item.DisplayStatus is EmploymentContractStatuses.Expired or EmploymentContractStatuses.Expiring

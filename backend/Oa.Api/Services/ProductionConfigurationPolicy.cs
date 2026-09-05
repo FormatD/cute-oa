@@ -21,6 +21,7 @@ public static class ProductionConfigurationPolicy
         ValidateForwardedHeaders(configuration, errors);
         ValidateBootstrap(configuration, errors);
         ValidatePersonnelCases(configuration, errors);
+        ValidateFlowSla(configuration, errors);
         if (configuration.GetValue<bool>("DemoFeatures:AllowDataGeneration"))
             errors.Add("DemoFeatures:AllowDataGeneration 必须为 false");
 
@@ -194,5 +195,12 @@ public static class ProductionConfigurationPolicy
         if (dueSoon is < 0 or > 30) errors.Add("PersonnelCaseAlerts:DueSoonDays 必须为 0–30");
         if (escalation is < 1 or > 90) errors.Add("PersonnelCaseAlerts:EscalateAfterDays 必须为 1–90");
         if (maximumExportRows is < 1 or > 10_000) errors.Add("PersonnelExport:MaxRows 必须为 1–10000");
+    }
+
+    private static void ValidateFlowSla(IConfiguration configuration, ICollection<string> errors)
+    {
+        if (!configuration.GetValue<bool>("FlowSla:Enabled")) errors.Add("FlowSla:Enabled 必须为 true");
+        var interval = configuration.GetValue("FlowSla:IntervalMinutes", 15);
+        if (interval is < 1 or > 1_440) errors.Add("FlowSla:IntervalMinutes 必须为 1–1440");
     }
 }
