@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import type { ProcessDefinition, ProcessNodePolicy, ProcessSimulation } from '../api/types'
+import OaDialog from '../components/OaDialog.vue'
 import { useOrganizationStore } from '../stores/organization'
 import { paginate } from '../stores/pagination'
 import { useProcessDefinitionStore } from '../stores/process-definitions'
@@ -99,11 +100,9 @@ async function save() {
     ? await processDefinitions.create({ ...payload, code: editCode.value, businessType: editBusinessType.value })
     : await processDefinitions.update(editingId.value, payload)
   if (saved) {
-    editingId.value = saved.id
+    editingId.value = ''
     message.value = creating ? '流程草稿已创建。' : '流程草稿已保存。'
     await load()
-    const refreshed = definitions.value.find(item => item.id === saved.id)
-    if (refreshed) edit(refreshed)
     return true
   }
   return false
@@ -144,5 +143,133 @@ onMounted(async () => {
   <p v-if="message" class="notice success">{{ message }}</p><p v-if="error" class="notice error">{{ error }}</p>
   <section class="panel"><p v-if="loading" class="empty">正在加载流程定义…</p><template v-else-if="definitions.length"><div class="table-wrap"><table class="data-table process-table"><thead><tr><th>流程</th><th>业务</th><th>优先级</th><th>适用范围</th><th>版本</th><th>状态</th><th>路由规则</th><th class="action-cell">操作</th></tr></thead><tbody><tr v-for="definition in paged.items" :key="definition.id"><td><strong>{{ definition.name }}</strong><small>{{ definition.code }}</small></td><td>{{ businessLabel(definition.businessType) }}</td><td>{{ definition.priority }}</td><td><small>{{ scopeLabel(definition) }}</small></td><td>v{{ definition.version }}</td><td><em :class="{ archived: definition.status === 2 }">{{ statusLabel(definition.status) }}</em></td><td><small v-for="route in definition.routes" :key="route.id" class="process-route-summary">{{ routeLabel(route) }}</small></td><td class="task-actions"><button v-if="definition.status === 0" class="secondary" @click="edit(definition)">编辑</button><button v-if="definition.status === 0" @click="publish(definition)">发布</button><button v-else class="secondary" :disabled="saving" @click="clone(definition)">复制新版本</button></td></tr></tbody></table></div><div class="pagination"><span>共 {{ paged.total }} 条</span><div><button class="secondary" :disabled="paged.currentPage === 1" @click="page--">上一页</button><b>{{ paged.currentPage }} / {{ paged.totalPages }}</b><button class="secondary" :disabled="paged.currentPage === paged.totalPages" @click="page++">下一页</button></div></div></template><p v-else class="empty">暂无流程定义。</p></section>
 
-  <section v-if="editingId" class="panel process-editor"><div class="section-title"><div><p class="eyebrow">DRAFT EDITOR</p><h2>{{ editingId === 'new' ? '新建流程草稿' : '编辑流程草稿' }}</h2></div><button class="secondary" @click="editingId = ''">关闭</button></div><div class="process-basic-grid"><label class="process-name">流程编码<input v-model="editCode" maxlength="64" :disabled="editingId !== 'new'" placeholder="例如 LEAVE_ENGINEERING"></label><label class="process-name">流程名称<input v-model="editName" maxlength="100"></label><label class="process-name">业务类型<select v-model="editBusinessType" :disabled="editingId !== 'new'"><option value="Leave">请假</option><option value="Expense">报销</option><option value="Travel">出差</option><option value="Purchase">采购</option><option value="Seal">用章</option></select></label><label class="process-name">优先级<input v-model.number="editPriority" min="0" max="1000" type="number"><small>数值越大越优先；默认流程为 0。</small></label></div><fieldset class="process-scope"><legend>适用部门（不选表示全公司，包含下级部门）</legend><label v-for="department in departments" :key="department.id"><input v-model="editDepartmentIds" type="checkbox" :value="department.id">{{ department.name }}</label></fieldset><fieldset v-if="editBusinessType === 'Leave'" class="process-scope"><legend>适用假别（不选表示全部假别）</legend><label v-for="type in leaveTypeOptions" :key="type.value"><input v-model="editLeaveTypes" type="checkbox" :value="type.value">{{ type.label }}</label></fieldset><div v-for="(route, index) in editRoutes" :key="index" class="process-route-editor"><div class="route-heading"><strong>条件规则 {{ index + 1 }}</strong><button class="secondary" type="button" @click="removeRoute(index)">删除</button></div><label>指标上限（最后一条留空表示无上限）<input v-model="route.maxValue" min="0" step="0.01" type="number" placeholder="无上限"></label><fieldset><legend>审批节点（按所选顺序显示）</legend><label v-for="option in approverOptions" :key="option.key"><input v-model="route.approverKeys" type="checkbox" :value="option.key">{{ option.label }}</label></fieldset><p class="route-order">当前顺序：{{ route.approverKeys.map(key => approverOptions.find(option => option.key === key)?.label).join(' → ') || '未选择' }}</p><div v-for="key in route.approverKeys" :key="key" class="process-node-policy"><strong>{{ approverOptions.find(option => option.key === key)?.label ?? key }}</strong><label>办理时限（小时）<input v-model.number="policyFor(route, key).handlingHours" min="1" max="2160" type="number"></label><label>提前提醒（小时）<input v-model.number="policyFor(route, key).reminderBeforeHours" min="0" max="720" type="number"></label><label>逾期后升级（小时）<input v-model.number="policyFor(route, key).escalateAfterHours" min="0" max="2160" type="number"></label><label>升级对象<select v-model="policyFor(route, key).escalationTarget"><option value="DIRECT_MANAGER">办理人直属上级</option><option value="PROCESS_ADMIN">流程管理员</option><option value="ROLE:总经理">总经理</option></select></label><label>审批人缺失<select v-model="policyFor(route, key).missingAssigneeAction"><option value="BLOCK">阻断提交</option><option value="SKIP">跳过节点</option><option value="PROCESS_ADMIN">转流程管理员</option></select></label><label class="checkbox-label"><input v-model="policyFor(route, key).allowAutoSkip" type="checkbox">连续节点同人时允许自动跳过</label></div></div><div class="process-editor-actions"><button class="secondary" type="button" @click="addRoute">＋ 添加条件规则</button><button type="button" :disabled="saving" @click="save">{{ saving ? '保存中…' : '保存草稿' }}</button></div><div v-if="editingId !== 'new'" class="process-simulation"><h3>发布前流程试算</h3><div class="filter-bar"><label>申请人<select v-model="simulationApplicantId"><option value="">请选择</option><option v-for="employee in employees" :key="employee.id" :value="employee.id">{{ employee.name }} · {{ employee.departmentName }}</option></select></label><label>业务指标<input v-model.number="simulationMetric" min="0" step="0.5" type="number"></label><button type="button" :disabled="saving || !simulationApplicantId" @click="simulate">试算路由</button></div><div v-if="simulation" class="notice success"><strong>命中 {{ simulation.code }} v{{ simulation.version }}</strong><p>{{ simulation.approvers.map(item => `${item.assignee.name} (${item.policy.handlingHours}h)`).join(' → ') }}</p><small v-for="note in simulation.routingNotes" :key="note">{{ note }}</small></div></div></section>
+  <OaDialog
+    :open="Boolean(editingId)"
+    :title="editingId === 'new' ? '新建流程草稿' : '编辑流程草稿'"
+    description="配置流程基本信息、适用范围、条件规则与审批节点超时策略。"
+    submit-label="保存草稿"
+    :busy="saving"
+    width="960px"
+    @close="editingId = ''"
+    @submit="save"
+  >
+    <div class="process-basic-grid">
+      <label class="process-name">
+        流程编码
+        <input v-model="editCode" maxlength="64" :disabled="editingId !== 'new'" placeholder="例如 LEAVE_ENGINEERING">
+      </label>
+      <label class="process-name">
+        流程名称
+        <input v-model="editName" maxlength="100">
+      </label>
+      <label class="process-name">
+        业务类型
+        <select v-model="editBusinessType" :disabled="editingId !== 'new'">
+          <option value="Leave">请假</option>
+          <option value="Expense">报销</option>
+          <option value="Travel">出差</option>
+          <option value="Purchase">采购</option>
+          <option value="Seal">用章</option>
+        </select>
+      </label>
+      <label class="process-name">
+        优先级
+        <input v-model.number="editPriority" min="0" max="1000" type="number">
+        <small>数值越大越优先；默认流程为 0。</small>
+      </label>
+    </div>
+    <fieldset class="process-scope" style="margin-top: 12px;">
+      <legend>适用部门（不选表示全公司，包含下级部门）</legend>
+      <label v-for="department in departments" :key="department.id">
+        <input v-model="editDepartmentIds" type="checkbox" :value="department.id">
+        {{ department.name }}
+      </label>
+    </fieldset>
+    <fieldset v-if="editBusinessType === 'Leave'" class="process-scope" style="margin-top: 12px;">
+      <legend>适用假别（不选表示全部假别）</legend>
+      <label v-for="type in leaveTypeOptions" :key="type.value">
+        <input v-model="editLeaveTypes" type="checkbox" :value="type.value">
+        {{ type.label }}
+      </label>
+    </fieldset>
+    <div v-for="(route, index) in editRoutes" :key="index" class="process-route-editor" style="margin-top: 14px;">
+      <div class="route-heading">
+        <strong>条件规则 {{ index + 1 }}</strong>
+        <button class="secondary" type="button" @click="removeRoute(index)">删除</button>
+      </div>
+      <label>
+        指标上限（最后一条留空表示无上限）
+        <input v-model="route.maxValue" min="0" step="0.01" type="number" placeholder="无上限">
+      </label>
+      <fieldset>
+        <legend>审批节点（按所选顺序显示）</legend>
+        <label v-for="option in approverOptions" :key="option.key">
+          <input v-model="route.approverKeys" type="checkbox" :value="option.key">
+          {{ option.label }}
+        </label>
+      </fieldset>
+      <p class="route-order">当前顺序：{{ route.approverKeys.map(key => approverOptions.find(option => option.key === key)?.label).join(' → ') || '未选择' }}</p>
+      <div v-for="key in route.approverKeys" :key="key" class="process-node-policy">
+        <strong>{{ approverOptions.find(option => option.key === key)?.label ?? key }}</strong>
+        <label>
+          办理时限（小时）
+          <input v-model.number="policyFor(route, key).handlingHours" min="1" max="2160" type="number">
+        </label>
+        <label>
+          提前提醒（小时）
+          <input v-model.number="policyFor(route, key).reminderBeforeHours" min="0" max="720" type="number">
+        </label>
+        <label>
+          逾期后升级（小时）
+          <input v-model.number="policyFor(route, key).escalateAfterHours" min="0" max="2160" type="number">
+        </label>
+        <label>
+          升级对象
+          <select v-model="policyFor(route, key).escalationTarget">
+            <option value="DIRECT_MANAGER">办理人直属上级</option>
+            <option value="PROCESS_ADMIN">流程管理员</option>
+            <option value="ROLE:总经理">总经理</option>
+          </select>
+        </label>
+        <label>
+          审批人缺失
+          <select v-model="policyFor(route, key).missingAssigneeAction">
+            <option value="BLOCK">阻断提交</option>
+            <option value="SKIP">跳过节点</option>
+            <option value="PROCESS_ADMIN">转流程管理员</option>
+          </select>
+        </label>
+        <label class="checkbox-label">
+          <input v-model="policyFor(route, key).allowAutoSkip" type="checkbox">
+          连续节点同人时允许自动跳过
+        </label>
+      </div>
+    </div>
+    <div style="margin: 14px 0;">
+      <button class="secondary" type="button" @click="addRoute">＋ 添加条件规则</button>
+    </div>
+    <div v-if="editingId !== 'new'" class="process-simulation">
+      <h3>发布前流程试算</h3>
+      <div class="filter-bar">
+        <label>
+          申请人
+          <select v-model="simulationApplicantId">
+            <option value="">请选择</option>
+            <option v-for="employee in employees" :key="employee.id" :value="employee.id">{{ employee.name }} · {{ employee.departmentName }}</option>
+          </select>
+        </label>
+        <label>
+          业务指标
+          <input v-model.number="simulationMetric" min="0" step="0.5" type="number">
+        </label>
+        <button type="button" :disabled="saving || !simulationApplicantId" @click="simulate">试算路由</button>
+      </div>
+      <div v-if="simulation" class="notice success">
+        <strong>命中 {{ simulation.code }} v{{ simulation.version }}</strong>
+        <p>{{ simulation.approvers.map(item => `${item.assignee.name} (${item.policy.handlingHours}h)`).join(' → ') }}</p>
+        <small v-for="note in simulation.routingNotes" :key="note">{{ note }}</small>
+      </div>
+    </div>
+    <p v-if="error" class="dialog-error">{{ error }}</p>
+  </OaDialog>
 </template>

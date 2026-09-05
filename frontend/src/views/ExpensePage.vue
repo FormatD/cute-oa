@@ -324,98 +324,10 @@ async function exportExpenseCsv() {
         <p class="eyebrow">EXPENSE</p>
         <h2>报销申请</h2>
       </div>
-      <button @click="expenseStore.showExpenseForm = !expenseStore.showExpenseForm">
-        {{ expenseStore.showExpenseForm ? '收起表单' : '新建报销' }}
+      <button class="secondary" @click="expenseStore.showExpenseForm = true">
+        新建报销
       </button>
     </div>
-
-    <!-- 部门预算卡片 -->
-    <div v-if="currentDeptBudget && expenseStore.showExpenseForm" class="budget-summary-card">
-      <h4>📊 部门预算水位池（{{ currentDeptBudget.departmentId }} · {{ currentDeptBudget.year }} 年度）</h4>
-      <div class="budget-stat-grid">
-        <div><span>年度编制总额</span><strong>¥{{ currentDeptBudget.allocatedAmount.toFixed(2) }}</strong></div>
-        <div><span>审批预占额度</span><strong>¥{{ currentDeptBudget.committedAmount.toFixed(2) }}</strong></div>
-        <div><span>累计实支结转</span><strong>¥{{ currentDeptBudget.actualAmount.toFixed(2) }}</strong></div>
-        <div><span>当前可用额度</span><strong :class="{ 'warning-text': isOverBudget }">¥{{ currentDeptBudget.availableAmount.toFixed(2) }}</strong></div>
-      </div>
-      <p v-if="isOverBudget" class="dialog-error" style="margin-top: 10px;">
-        ⚠️ 提示：当前填写的报销金额（¥{{ Number(expenseStore.expenseForm.amount || 0).toFixed(2) }}）已超出部门可用预算池剩余额度（¥{{ currentDeptBudget.availableAmount.toFixed(2) }}）。
-      </p>
-    </div>
-
-    <form v-if="expenseStore.showExpenseForm" class="leave-form" @submit.prevent="handleExpenseSubmit">
-      <label class="wide">关联出差申请（可选）
-        <select v-model="expenseStore.expenseForm.travelRequestId">
-          <option value="">不关联出差</option>
-          <option v-for="item in travel.approvedTravels" :key="item.id" :value="item.id">
-            {{ item.number }} · {{ item.startDate }} 至 {{ item.endDate }} · {{ item.itinerary.map(line => line.destination).join('、') }}
-          </option>
-        </select>
-        <small>仅显示本人已批准的出差申请，关联后可从报销详情追溯原申请。</small>
-      </label>
-      <label>费用类别
-        <select v-model="expenseStore.expenseForm.category">
-          <option>交通</option>
-          <option>住宿</option>
-          <option>餐饮招待</option>
-          <option>办公</option>
-          <option>通讯</option>
-          <option>培训</option>
-          <option>其他</option>
-        </select>
-      </label>
-      <label>费用日期<input v-model="expenseStore.expenseForm.expenseDate" type="date"></label>
-      <label>金额（元）<input v-model="expenseStore.expenseForm.amount" min="0.01" step="0.01" type="number"></label>
-      <label>手工票据号（可选）<input v-model="expenseStore.expenseForm.receiptNumber" placeholder="纸质票据编号"></label>
-      <label class="wide">费用说明<textarea v-model="expenseStore.expenseForm.description" maxlength="500" placeholder="请填写费用用途"></textarea></label>
-
-      <!-- 结构化发票录入 -->
-      <fieldset class="wide itinerary-editor">
-        <legend>结构化发票清单（支持即时防重查验）</legend>
-        <div v-for="(inv, idx) in invoiceList" :key="idx" class="invoice-row">
-          <select v-model="inv.invoiceType" title="发票类型">
-            <option value="VatElectronic">数电/电子普票</option>
-            <option value="VatSpecial">增值税专用发票</option>
-            <option value="VatNormal">增值税普通发票</option>
-            <option value="TrainTicket">铁路车票</option>
-            <option value="AirItinerary">机票行程单</option>
-            <option value="QuotaInvoice">定额发票</option>
-            <option value="OtherReceipt">其他合规凭证</option>
-          </select>
-          <input v-model="inv.invoiceCode" placeholder="发票代码" maxlength="32">
-          <input v-model="inv.invoiceNumber" placeholder="发票号码 *" maxlength="64" required @blur="validateInvoiceFingerprint(inv)">
-          <input v-model="inv.billingDate" type="date" title="开票日期 *" required>
-          <input v-model.number="inv.amountWithoutTax" type="number" step="0.01" min="0" placeholder="不含税金额" @input="updateInvoiceAmounts(inv)">
-          <input v-model.number="inv.taxRate" type="number" step="0.01" min="0" max="1" placeholder="税率(如0.06)" @input="updateInvoiceAmounts(inv)">
-          <input v-model.number="inv.totalAmount" type="number" step="0.01" min="0" placeholder="价税合计 *" required>
-          <button class="secondary" type="button" @click="removeInvoiceRow(idx)">删除</button>
-          <div v-if="inv.duplicateError" class="invoice-error">❌ {{ inv.duplicateError }}</div>
-        </div>
-        <div style="margin-top: 8px;">
-          <button class="secondary" type="button" @click="addInvoiceRow">＋ 添加发票明细</button>
-          <small style="margin-left: 12px; color: #64748b;">支持发票号码失焦自动查重；开票日期不得超过 180 天。</small>
-        </div>
-      </fieldset>
-
-      <fieldset class="wide copy-selector">
-        <legend>抄送人（流程审批完成或撤回后通知）</legend>
-        <label v-for="employee in employeeDirectory.employees.filter(item => item.id !== auth.currentUserId)" :key="employee.id">
-          <input v-model="expenseStore.expenseForm.copyRecipientIds" type="checkbox" :value="employee.id">
-          {{ employee.name }} · {{ employee.role }}
-        </label>
-      </fieldset>
-
-      <label class="wide">票据附件
-        <input accept=".pdf,.jpg,.jpeg,.png,.xls,.xlsx,.doc,.docx" multiple type="file" @change="selectAttachments">
-        <small>支持 PDF、图片和 Office 文档，单个文件不超过 20MB。</small>
-      </label>
-      <div v-if="expenseStore.expenseForm.attachments.length" class="wide attachment-list">
-        已上传 {{ expenseStore.expenseForm.attachments.length }} 个附件
-      </div>
-      <div class="wide form-actions">
-        <button :disabled="ui.submitting" type="submit">{{ ui.submitting ? '提交中…' : '保存并提交' }}</button>
-      </div>
-    </form>
 
     <template v-if="expenseStore.expenses.length">
       <div class="table-wrap">
@@ -530,5 +442,105 @@ async function exportExpenseCsv() {
       <input v-model="paymentForm.remarks" maxlength="200" placeholder="选填">
     </label>
     <p v-if="paymentError" class="dialog-error">{{ paymentError }}</p>
+  </OaDialog>
+
+  <!-- 新建报销弹窗 -->
+  <OaDialog
+    :open="expenseStore.showExpenseForm"
+    title="新建报销申请"
+    description="录入报销项目、结构化发票与关联出差单，支持防重查验与预算预警。"
+    submit-label="保存并提交"
+    :busy="ui.submitting"
+    width="920px"
+    @close="expenseStore.showExpenseForm = false"
+    @submit="handleExpenseSubmit"
+  >
+    <!-- 部门预算卡片 -->
+    <div v-if="currentDeptBudget" class="budget-summary-card" style="margin-bottom: 8px;">
+      <h4>📊 部门预算水位池（{{ currentDeptBudget.departmentId }} · {{ currentDeptBudget.year }} 年度）</h4>
+      <div class="budget-stat-grid">
+        <div><span>年度编制总额</span><strong>¥{{ currentDeptBudget.allocatedAmount.toFixed(2) }}</strong></div>
+        <div><span>审批预占额度</span><strong>¥{{ currentDeptBudget.committedAmount.toFixed(2) }}</strong></div>
+        <div><span>累计实支结转</span><strong>¥{{ currentDeptBudget.actualAmount.toFixed(2) }}</strong></div>
+        <div><span>当前可用额度</span><strong :class="{ 'warning-text': isOverBudget }">¥{{ currentDeptBudget.availableAmount.toFixed(2) }}</strong></div>
+      </div>
+      <p v-if="isOverBudget" class="dialog-error" style="margin-top: 10px;">
+        ⚠️ 提示：当前填写的报销金额（¥{{ Number(expenseStore.expenseForm.amount || 0).toFixed(2) }}）已超出部门可用预算池剩余额度（¥{{ currentDeptBudget.availableAmount.toFixed(2) }}）。
+      </p>
+    </div>
+
+    <label class="dialog-field">关联出差申请（可选）
+      <select v-model="expenseStore.expenseForm.travelRequestId">
+        <option value="">不关联出差</option>
+        <option v-for="item in travel.approvedTravels" :key="item.id" :value="item.id">
+          {{ item.number }} · {{ item.startDate }} 至 {{ item.endDate }} · {{ item.itinerary.map(line => line.destination).join('、') }}
+        </option>
+      </select>
+      <small>仅显示本人已批准的出差申请，关联后可从报销详情追溯原申请。</small>
+    </label>
+
+    <div class="dialog-grid">
+      <label class="dialog-field">费用类别
+        <select v-model="expenseStore.expenseForm.category">
+          <option>交通</option>
+          <option>住宿</option>
+          <option>餐饮招待</option>
+          <option>办公</option>
+          <option>通讯</option>
+          <option>培训</option>
+          <option>其他</option>
+        </select>
+      </label>
+      <label class="dialog-field">费用日期<input v-model="expenseStore.expenseForm.expenseDate" type="date"></label>
+      <label class="dialog-field">金额（元）<input v-model="expenseStore.expenseForm.amount" min="0.01" step="0.01" type="number"></label>
+      <label class="dialog-field">手工票据号（可选）<input v-model="expenseStore.expenseForm.receiptNumber" placeholder="纸质票据编号"></label>
+    </div>
+
+    <label class="dialog-field">费用说明<textarea v-model="expenseStore.expenseForm.description" maxlength="500" placeholder="请填写费用用途"></textarea></label>
+
+    <!-- 结构化发票录入 -->
+    <fieldset class="itinerary-editor">
+      <legend>结构化发票清单（支持即时防重查验）</legend>
+      <div v-for="(inv, idx) in invoiceList" :key="idx" class="invoice-row">
+        <select v-model="inv.invoiceType" title="发票类型">
+          <option value="VatElectronic">数电/电子普票</option>
+          <option value="VatSpecial">增值税专用发票</option>
+          <option value="VatNormal">增值税普通发票</option>
+          <option value="TrainTicket">铁路车票</option>
+          <option value="AirItinerary">机票行程单</option>
+          <option value="QuotaInvoice">定额发票</option>
+          <option value="OtherReceipt">其他合规凭证</option>
+        </select>
+        <input v-model="inv.invoiceCode" placeholder="发票代码" maxlength="32">
+        <input v-model="inv.invoiceNumber" placeholder="发票号码 *" maxlength="64" required @blur="validateInvoiceFingerprint(inv)">
+        <input v-model="inv.billingDate" type="date" title="开票日期 *" required>
+        <input v-model.number="inv.amountWithoutTax" type="number" step="0.01" min="0" placeholder="不含税金额" @input="updateInvoiceAmounts(inv)">
+        <input v-model.number="inv.taxRate" type="number" step="0.01" min="0" max="1" placeholder="税率(如0.06)" @input="updateInvoiceAmounts(inv)">
+        <input v-model.number="inv.totalAmount" type="number" step="0.01" min="0" placeholder="价税合计 *" required>
+        <button class="secondary" type="button" @click="removeInvoiceRow(idx)">删除</button>
+        <div v-if="inv.duplicateError" class="invoice-error">❌ {{ inv.duplicateError }}</div>
+      </div>
+      <div style="margin-top: 8px;">
+        <button class="secondary" type="button" @click="addInvoiceRow">＋ 添加发票明细</button>
+        <small style="margin-left: 12px; color: #64748b;">支持发票号码失焦自动查重；开票日期不得超过 180 天。</small>
+      </div>
+    </fieldset>
+
+    <fieldset class="copy-selector">
+      <legend>抄送人（流程审批完成或撤回后通知）</legend>
+      <label v-for="employee in employeeDirectory.employees.filter(item => item.id !== auth.currentUserId)" :key="employee.id">
+        <input v-model="expenseStore.expenseForm.copyRecipientIds" type="checkbox" :value="employee.id">
+        {{ employee.name }} · {{ employee.role }}
+      </label>
+    </fieldset>
+
+    <label class="dialog-field">票据附件
+      <input accept=".pdf,.jpg,.jpeg,.png,.xls,.xlsx,.doc,.docx" multiple type="file" @change="selectAttachments">
+      <small>支持 PDF、图片和 Office 文档，单个文件不超过 20MB。</small>
+    </label>
+    <div v-if="expenseStore.expenseForm.attachments.length" class="attachment-list">
+      已上传 {{ expenseStore.expenseForm.attachments.length }} 个附件
+    </div>
+    <p v-if="ui.error" class="dialog-error">{{ ui.error }}</p>
   </OaDialog>
 </template>

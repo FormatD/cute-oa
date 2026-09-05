@@ -60,6 +60,64 @@ watch([balanceType, balanceYear], () => { void loadBalance() })
     <section class="panel"><div class="section-title"><div><p class="eyebrow">LEAVE BALANCE</p><h2>年度假期余额</h2></div><div class="heading-actions"><select v-model="balanceType"><option value="Annual">年假</option><option value="CompTime">调休</option></select><input v-model.number="balanceYear" type="number" min="2000" max="2100"><button v-if="canManage && personnel.leaveBalance" class="secondary" @click="openBalanceAdjustment">调整余额</button></div></div><dl v-if="personnel.leaveBalance" class="detail-grid"><div><dt>法定基线</dt><dd>{{ personnel.leaveBalance.statutoryEntitled }} 天</dd></div><div><dt>人工调整</dt><dd>{{ personnel.leaveBalance.adjustment }} 天</dd></div><div><dt>年度总额</dt><dd>{{ personnel.leaveBalance.entitled }} 天</dd></div><div><dt>可用</dt><dd>{{ personnel.leaveBalance.available }} 天</dd></div><div><dt>已冻结</dt><dd>{{ personnel.leaveBalance.frozen }} 天</dd></div><div><dt>已使用</dt><dd>{{ personnel.leaveBalance.used }} 天</dd></div></dl><p v-else class="empty">暂无该年度余额。</p><p class="muted">年假按社会工龄法定档位计算；当年新入职按本单位剩余日历天数向下折算。人工调整不会覆盖法定基线。</p></section>
     <section class="panel"><div class="section-title"><div><p class="eyebrow">LIFECYCLE HISTORY</p><h2>员工生命周期记录</h2></div></div><div v-if="personnel.detail.events.length" class="timeline"><p v-for="event in personnel.detail.events" :key="event.id"><strong>{{ event.effectiveDate }} · {{ eventLabel(event.eventType) }}</strong><span>{{ event.summary }}</span><small>{{ event.changedByName }} · {{ new Date(event.createdAt).toLocaleString('zh-CN') }}</small></p></div><p v-else class="empty">暂无变更历史。</p></section>
   </template>
-  <section v-if="editing && personnel.detail" class="panel user-editor"><div class="section-title"><div><p class="eyebrow">HR EDITOR</p><h2>编辑档案 · {{ personnel.detail.name }}</h2></div><button class="secondary" @click="editing = false">关闭</button></div><form class="user-form" @submit.prevent="save"><label>工号<input :value="personnel.detail.employeeNumber" disabled><small>工号创建后不可修改。</small></label><label>用工类型<select v-model="form.employmentType"><option value="FULL_TIME">全职</option><option value="PART_TIME">兼职</option><option value="INTERN">实习</option><option value="CONTRACTOR">外包/顾问</option></select></label><label>人事状态<select v-model="form.personnelStatus"><option value="PROBATION">试用</option><option value="ACTIVE">在职</option><option value="OFFBOARDING">离职办理中</option><option value="TERMINATED">已离职</option></select></label><label>入职日期<input v-model="form.hireDate" type="date"></label><label>所属部门<select v-model="form.departmentId" @change="departmentChanged"><option v-for="department in organization.departments" :key="department.id" :value="department.id">{{ department.name }}</option></select></label><label>主岗位<select v-model="form.positionId"><option :value="null">未分配</option><option v-for="position in availablePositions" :key="position.id" :value="position.id">{{ position.name }}</option></select></label><label>直属上级<select v-model="form.managerId"><option :value="null">无</option><option v-for="manager in managers" :key="manager.id" :value="manager.id">{{ manager.name }} · {{ manager.positionName || manager.role }}</option></select></label><label>办公地点<input v-model="form.workLocation" maxlength="100"></label><label>工作邮箱<input v-model="form.workEmail" maxlength="128" type="email"></label><label>工作电话<input v-model="form.workPhone" maxlength="32"></label><label>试用期结束日期<input v-model="form.probationEndDate" type="date"></label><label>转正日期<input v-model="form.regularizedDate" type="date"></label><label>累计工作起始日期<input v-model="form.cumulativeWorkStartDate" type="date"><small>用于计算社会工龄和后续年假配额。</small></label><label>离职日期<input v-model="form.departureDate" type="date"></label><label class="wide">离职原因<textarea v-model="form.departureReason" maxlength="500"></textarea></label><label>变更生效日期<input v-model="form.effectiveDate" type="date"></label><label class="wide">本次变更说明<textarea v-model="form.changeReason" maxlength="500" placeholder="例如：试用期考核通过，2026-09-01 起转正"></textarea></label><div class="form-actions wide"><button :disabled="personnel.saving" type="submit">{{ personnel.saving ? '保存中…' : '保存并记录历史' }}</button></div></form></section>
+  <OaDialog
+    :open="editing && Boolean(personnel.detail)"
+    :title="`编辑档案 · ${personnel.detail?.name}`"
+    description="修改任职信息并记录人事变更历史留痕。"
+    submit-label="保存并记录历史"
+    :busy="personnel.saving"
+    width="860px"
+    @close="editing = false"
+    @submit="save"
+  >
+    <div class="dialog-grid">
+      <label class="dialog-field">工号<input :value="personnel.detail?.employeeNumber" disabled><small>工号创建后不可修改。</small></label>
+      <label class="dialog-field">用工类型
+        <select v-model="form.employmentType">
+          <option value="FULL_TIME">全职</option>
+          <option value="PART_TIME">兼职</option>
+          <option value="INTERN">实习</option>
+          <option value="CONTRACTOR">外包/顾问</option>
+        </select>
+      </label>
+      <label class="dialog-field">人事状态
+        <select v-model="form.personnelStatus">
+          <option value="PROBATION">试用</option>
+          <option value="ACTIVE">在职</option>
+          <option value="OFFBOARDING">离职办理中</option>
+          <option value="TERMINATED">已离职</option>
+        </select>
+      </label>
+      <label class="dialog-field">入职日期<input v-model="form.hireDate" type="date"></label>
+      <label class="dialog-field">所属部门
+        <select v-model="form.departmentId" @change="departmentChanged">
+          <option v-for="department in organization.departments" :key="department.id" :value="department.id">{{ department.name }}</option>
+        </select>
+      </label>
+      <label class="dialog-field">主岗位
+        <select v-model="form.positionId">
+          <option :value="null">未分配</option>
+          <option v-for="position in availablePositions" :key="position.id" :value="position.id">{{ position.name }}</option>
+        </select>
+      </label>
+      <label class="dialog-field">直属上级
+        <select v-model="form.managerId">
+          <option :value="null">无</option>
+          <option v-for="manager in managers" :key="manager.id" :value="manager.id">{{ manager.name }} · {{ manager.positionName || manager.role }}</option>
+        </select>
+      </label>
+      <label class="dialog-field">办公地点<input v-model="form.workLocation" maxlength="100"></label>
+      <label class="dialog-field">工作邮箱<input v-model="form.workEmail" maxlength="128" type="email"></label>
+      <label class="dialog-field">工作电话<input v-model="form.workPhone" maxlength="32"></label>
+      <label class="dialog-field">试用期结束日期<input v-model="form.probationEndDate" type="date"></label>
+      <label class="dialog-field">转正日期<input v-model="form.regularizedDate" type="date"></label>
+      <label class="dialog-field">累计工作起始日期<input v-model="form.cumulativeWorkStartDate" type="date"><small>用于计算社会工龄和后续年假配额。</small></label>
+      <label class="dialog-field">离职日期<input v-model="form.departureDate" type="date"></label>
+      <label class="dialog-field">变更生效日期<input v-model="form.effectiveDate" type="date"></label>
+    </div>
+    <label class="dialog-field">离职原因<textarea v-model="form.departureReason" maxlength="500"></textarea></label>
+    <label class="dialog-field">本次变更说明<textarea v-model="form.changeReason" maxlength="500" placeholder="例如：试用期考核通过，2026-09-01 起转正"></textarea></label>
+    <p v-if="personnel.error" class="dialog-error">{{ personnel.error }}</p>
+  </OaDialog>
   <OaDialog :open="balanceOpen" title="调整年度假期余额" description="调整值是相对于法定基线的年度增减量，支持 0.5 天粒度。" submit-label="保存调整" :busy="personnel.saving" @close="balanceOpen = false" @submit="adjustBalance"><div class="dialog-grid"><label class="dialog-field">年度<input :value="balanceYear" disabled></label><label class="dialog-field">假别<input :value="balanceType === 'Annual' ? '年假' : '调休'" disabled></label><label class="dialog-field">调整值（天）<input v-model.number="balanceAdjustment" type="number" min="-100" max="100" step="0.5"></label><label class="dialog-field wide">调整原因<textarea v-model="balanceReason" maxlength="500" placeholder="例如：根据公司福利制度增加 2 天年假"></textarea></label></div></OaDialog>
 </template>

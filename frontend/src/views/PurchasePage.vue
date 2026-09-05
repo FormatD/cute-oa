@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApiClient } from '../api/client'
 import type { Budget } from '../api/types'
+import OaDialog from '../components/OaDialog.vue'
 import { useAppStore } from '../stores/app'
 import { useAuthStore } from '../stores/auth'
 import { useEmployeeDirectoryStore } from '../stores/employee-directory'
@@ -149,76 +150,10 @@ async function exportPurchaseCsv() {
         <p class="eyebrow">PURCHASE REQUESTS</p>
         <h2>采购申请</h2>
       </div>
-      <button @click="purchase.showPurchaseForm = !purchase.showPurchaseForm">
-        {{ purchase.showPurchaseForm ? '收起表单' : '新建采购' }}
+      <button class="secondary" @click="purchase.showPurchaseForm = true">
+        新建采购
       </button>
     </div>
-
-    <!-- 部门采购预算水位卡片 -->
-    <div v-if="currentDeptBudget && purchase.showPurchaseForm" class="budget-summary-card">
-      <h4>📊 部门可用预算池（{{ currentDeptBudget.departmentId }} · {{ currentDeptBudget.year }} 年度）</h4>
-      <div class="budget-stat-grid">
-        <div><span>年度编制总额</span><strong>¥{{ currentDeptBudget.allocatedAmount.toFixed(2) }}</strong></div>
-        <div><span>审批预占额度</span><strong>¥{{ currentDeptBudget.committedAmount.toFixed(2) }}</strong></div>
-        <div><span>累计实支结转</span><strong>¥{{ currentDeptBudget.actualAmount.toFixed(2) }}</strong></div>
-        <div><span>当前可用额度</span><strong :class="{ 'warning-text': isOverBudget }">¥{{ currentDeptBudget.availableAmount.toFixed(2) }}</strong></div>
-      </div>
-      <p v-if="isOverBudget" class="dialog-error" style="margin-top: 10px;">
-        ⚠️ 提示：预估采购总额（¥{{ purchase.estimatedTotal.toFixed(2) }}）已超出部门可用预算池剩余额度（¥{{ currentDeptBudget.availableAmount.toFixed(2) }}）。
-      </p>
-    </div>
-
-    <form v-if="purchase.showPurchaseForm" class="leave-form purchase-form" @submit.prevent="app.submitPurchase">
-      <label>采购主题<input v-model="purchase.purchaseForm.title" maxlength="100" placeholder="例如 研发部办公设备采购"></label>
-      <label>期望到货日期<input v-model="purchase.purchaseForm.requiredDate" type="date"></label>
-      <label>建议供应商（可选）<input v-model="purchase.purchaseForm.suggestedSupplier" maxlength="100" placeholder="供应商名称"></label>
-      <label class="wide">采购用途<textarea v-model="purchase.purchaseForm.purpose" maxlength="500" placeholder="说明采购背景、用途和必要性"></textarea></label>
-
-      <fieldset class="wide itinerary-editor">
-        <legend>采购明细（{{ purchase.purchaseForm.items.length }}/50）</legend>
-        <div v-for="(item, index) in purchase.purchaseForm.items" :key="index" class="itinerary-row purchase-item-row">
-          <label>品类
-            <select v-model="item.category">
-              <option v-for="category in categories" :key="category">{{ category }}</option>
-            </select>
-          </label>
-          <label>物品或服务名称<input v-model="item.name" maxlength="100" placeholder="名称"></label>
-          <label>规格型号<input v-model="item.specification" maxlength="100" placeholder="可选"></label>
-          <label>数量<input v-model="item.quantity" min="0.01" max="1000000" step="0.01" type="number"></label>
-          <label>单位<input v-model="item.unit" maxlength="20" placeholder="件"></label>
-          <label>预估单价（元）<input v-model="item.estimatedUnitPrice" min="0" max="100000000" step="0.01" type="number"></label>
-          <label class="wide">备注<input v-model="item.remark" maxlength="200" placeholder="可选"></label>
-          <div class="line-amount">
-            小计 <strong>¥{{ (Number(item.quantity || 0) * Number(item.estimatedUnitPrice || 0)).toFixed(2) }}</strong>
-          </div>
-          <button class="secondary" type="button" :disabled="purchase.purchaseForm.items.length === 1" @click="removeItem(index)">删除明细</button>
-        </div>
-        <div class="purchase-total">
-          <button class="secondary" type="button" @click="addItem">＋ 添加明细</button>
-          <strong>预估合计：¥{{ purchase.estimatedTotal.toFixed(2) }}</strong>
-        </div>
-      </fieldset>
-
-      <fieldset class="wide copy-selector">
-        <legend>抄送人（审批完成或撤回后通知）</legend>
-        <label v-for="employee in employees.employees.filter(item => item.id !== auth.currentUserId)" :key="employee.id">
-          <input v-model="purchase.purchaseForm.copyRecipientIds" type="checkbox" :value="employee.id">
-          {{ employee.name }} · {{ employee.role }}
-        </label>
-      </fieldset>
-
-      <label class="wide">报价或采购依据附件
-        <input accept=".pdf,.jpg,.jpeg,.png,.xls,.xlsx,.doc,.docx" multiple type="file" @change="selectAttachments">
-        <small>5000 元及以上至少 1 份，5 万元及以上至少 2 份；单个文件不超过 20MB。</small>
-      </label>
-      <div v-if="purchase.purchaseForm.attachments.length" class="wide attachment-list">
-        已上传 {{ purchase.purchaseForm.attachments.length }} 个附件
-        <button class="secondary" type="button" @click="purchase.purchaseForm.attachments = []">清空</button>
-      </div>
-      <div class="wide form-actions">
-        <button :disabled="purchase.submitting" type="submit">{{ purchase.submitting ? '提交中…' : '保存并提交' }}</button>
-      </div>
-    </form>
 
     <template v-if="purchase.paged.items.length">
       <div class="table-wrap">
@@ -277,4 +212,78 @@ async function exportPurchaseCsv() {
     </template>
     <p v-else class="empty">当前筛选条件下暂无采购记录。</p>
   </section>
+
+  <OaDialog
+    :open="purchase.showPurchaseForm"
+    title="新建采购申请"
+    description="按金额分级审批，填写采购主题、到货时间与采购明细清单。"
+    submit-label="保存并提交"
+    :busy="purchase.submitting"
+    width="920px"
+    @close="purchase.showPurchaseForm = false"
+    @submit="app.submitPurchase"
+  >
+    <!-- 部门采购预算水位卡片 -->
+    <div v-if="currentDeptBudget" class="budget-summary-card" style="margin-bottom: 8px;">
+      <h4>📊 部门可用预算池（{{ currentDeptBudget.departmentId }} · {{ currentDeptBudget.year }} 年度）</h4>
+      <div class="budget-stat-grid">
+        <div><span>年度编制总额</span><strong>¥{{ currentDeptBudget.allocatedAmount.toFixed(2) }}</strong></div>
+        <div><span>审批预占额度</span><strong>¥{{ currentDeptBudget.committedAmount.toFixed(2) }}</strong></div>
+        <div><span>累计实支结转</span><strong>¥{{ currentDeptBudget.actualAmount.toFixed(2) }}</strong></div>
+        <div><span>当前可用额度</span><strong :class="{ 'warning-text': isOverBudget }">¥{{ currentDeptBudget.availableAmount.toFixed(2) }}</strong></div>
+      </div>
+      <p v-if="isOverBudget" class="dialog-error" style="margin-top: 10px;">
+        ⚠️ 提示：预估采购总额（¥{{ purchase.estimatedTotal.toFixed(2) }}）已超出部门可用预算池剩余额度（¥{{ currentDeptBudget.availableAmount.toFixed(2) }}）。
+      </p>
+    </div>
+
+    <div class="dialog-grid">
+      <label class="dialog-field">采购主题<input v-model="purchase.purchaseForm.title" maxlength="100" placeholder="例如 研发部办公设备采购"></label>
+      <label class="dialog-field">期望到货日期<input v-model="purchase.purchaseForm.requiredDate" type="date"></label>
+    </div>
+    <label class="dialog-field">建议供应商（可选）<input v-model="purchase.purchaseForm.suggestedSupplier" maxlength="100" placeholder="供应商名称"></label>
+    <label class="dialog-field">采购用途<textarea v-model="purchase.purchaseForm.purpose" maxlength="500" placeholder="说明采购背景、用途和必要性"></textarea></label>
+
+    <fieldset class="itinerary-editor">
+      <legend>采购明细（{{ purchase.purchaseForm.items.length }}/50）</legend>
+      <div v-for="(item, index) in purchase.purchaseForm.items" :key="index" class="itinerary-row purchase-item-row">
+        <label>品类
+          <select v-model="item.category">
+            <option v-for="category in categories" :key="category">{{ category }}</option>
+          </select>
+        </label>
+        <label>物品或服务名称<input v-model="item.name" maxlength="100" placeholder="名称"></label>
+        <label>规格型号<input v-model="item.specification" maxlength="100" placeholder="可选"></label>
+        <label>数量<input v-model="item.quantity" min="0.01" max="1000000" step="0.01" type="number"></label>
+        <label>单位<input v-model="item.unit" maxlength="20" placeholder="件"></label>
+        <label>预估单价（元）<input v-model="item.estimatedUnitPrice" min="0" max="100000000" step="0.01" type="number"></label>
+        <label class="wide">备注<input v-model="item.remark" maxlength="200" placeholder="可选"></label>
+        <div class="line-amount">
+          小计 <strong>¥{{ (Number(item.quantity || 0) * Number(item.estimatedUnitPrice || 0)).toFixed(2) }}</strong>
+        </div>
+        <button class="secondary" type="button" :disabled="purchase.purchaseForm.items.length === 1" @click="removeItem(index)">删除明细</button>
+      </div>
+      <div class="purchase-total">
+        <button class="secondary" type="button" @click="addItem">＋ 添加明细</button>
+        <strong>预估合计：¥{{ purchase.estimatedTotal.toFixed(2) }}</strong>
+      </div>
+    </fieldset>
+
+    <fieldset class="copy-selector">
+      <legend>抄送人（审批完成或撤回后通知）</legend>
+      <label v-for="employee in employees.employees.filter(item => item.id !== auth.currentUserId)" :key="employee.id">
+        <input v-model="purchase.purchaseForm.copyRecipientIds" type="checkbox" :value="employee.id">
+        {{ employee.name }} · {{ employee.role }}
+      </label>
+    </fieldset>
+
+    <label class="dialog-field">报价或采购依据附件
+      <input accept=".pdf,.jpg,.jpeg,.png,.xls,.xlsx,.doc,.docx" multiple type="file" @change="selectAttachments">
+      <small>5000 元及以上至少 1 份，5 万元及以上至少 2 份；单个文件不超过 20MB。</small>
+    </label>
+    <div v-if="purchase.purchaseForm.attachments.length" class="attachment-list">
+      已上传 {{ purchase.purchaseForm.attachments.length }} 个附件
+      <button class="secondary" type="button" @click="purchase.purchaseForm.attachments = []">清空</button>
+    </div>
+  </OaDialog>
 </template>
