@@ -122,3 +122,58 @@ test('手机宽度可通过折叠菜单进入事项中心且页面不产生整�
   const hasPageOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)
   expect(hasPageOverflow).toBeFalsy()
 })
+
+test('管理员可在业务参数配置中心查看规则、切换UI与JSON快照、新建草稿并发布生效与升版', async ({ page }) => {
+  await loginUi(page, 'u-admin')
+  await page.goto('/#/business-configurations')
+  await expect(page.getByRole('heading', { name: '业务参数配置中心' })).toBeVisible()
+
+  // 1. 业务域标签切换与默认生效配置核验
+  await expect(page.getByRole('button', { name: '全部域' })).toBeVisible()
+  await page.getByRole('button', { name: '休假规则' }).click()
+  const leaveRow = page.locator('tr', { hasText: 'LeavePolicy' }).first()
+  await expect(leaveRow).toBeVisible()
+
+  // 2. 查看配置详情，测试结构化 UI 回显与原始 JSON 快照双模式切换
+  await leaveRow.getByRole('button', { name: '详情' }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await expect(page.getByText('业务参数生效配置')).toBeVisible()
+  await expect(page.getByRole('button', { name: '结构化 UI 回显' })).toBeVisible()
+  await page.getByRole('button', { name: '原始 JSON 快照' }).click()
+  await expect(page.locator('pre.json-code-block')).toBeVisible()
+  await page.getByRole('dialog').getByLabel('关闭').click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+
+  // 3. 新建业务配置草稿
+  const uniqueCode = `E2E_CFG_${crypto.randomUUID().replaceAll('-', '').slice(0, 8).toUpperCase()}`
+  const uniqueName = `E2E 休假规则 ${uniqueCode.slice(-4)}`
+  await page.getByRole('button', { name: '＋ 新建配置草稿' }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await page.getByPlaceholder('例如: LeavePolicy, ExpensePolicy').fill(uniqueCode)
+  await page.getByPlaceholder('请输入直观名称，如：全员休假规则').fill(uniqueName)
+  await page.getByRole('dialog').getByRole('button', { name: '保存草稿' }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+
+  // 4. 列表查询新草稿并核对草稿状态
+  await page.getByRole('button', { name: '全部域' }).click()
+  await page.getByPlaceholder('搜索配置标识 / 名称 / 描述').fill(uniqueCode)
+  await page.getByRole('button', { name: '查询' }).click()
+  const draftRow = page.locator('tr', { hasText: uniqueCode })
+  await expect(draftRow).toBeVisible()
+  await expect(draftRow.getByText('草稿')).toBeVisible()
+
+  // 5. 发布草稿使其立即生效
+  await draftRow.getByRole('button', { name: '发布' }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await page.getByRole('dialog').getByRole('button', { name: '确认发布' }).click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(draftRow.getByText('生效中')).toBeVisible()
+
+  // 6. 基于生效版本创建新版本升版草稿
+  await draftRow.getByRole('button', { name: '新版本' }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await expect(page.getByRole('dialog').getByText(/编辑配置草稿 \(v2\)/)).toBeVisible()
+  await page.getByRole('dialog').getByLabel('关闭').click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+})
+
