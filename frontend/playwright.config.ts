@@ -18,7 +18,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: 'dotnet run --no-build --project backend/Oa.Api/Oa.Api.csproj --urls http://127.0.0.1:5235',
+      command: 'dotnet run --project backend/Oa.Api/Oa.Api.csproj --urls http://127.0.0.1:5235',
       cwd: repositoryDirectory,
       env: { ...process.env, ASPNETCORE_ENVIRONMENT: 'Development', Cors__AllowedOrigins__0: 'http://127.0.0.1:5174' },
       url: 'http://127.0.0.1:5235/health/ready',
