@@ -39,3 +39,13 @@ jobs:
         env:
           OA_TEST_CONNECTION: Host=localhost;Port=5432;Database=oa_test;Username=oa;Password=oa_dev_password
         run: dotnet run --project tests/Oa.Postgres.Tests/Oa.Postgres.Tests.csproj
+      - name: Install browser for core end-to-end tests
+        run: npx --prefix frontend playwright install --with-deps chromium
+      - name: Core browser end-to-end tests
+        env:
+          CI: true
+          ConnectionStrings__OaDatabase: Host=localhost;Port=5432;Database=oa_test;Username=oa;Password=oa_dev_password
+          Persistence__UsePostgreSql: true
+          DemoFeatures__AllowDataGeneration: true
+          FileScanning__Mode: Disabled
+        run: npm run test:e2e --prefix frontend

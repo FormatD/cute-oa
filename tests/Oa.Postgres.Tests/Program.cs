@@ -1701,6 +1701,10 @@ await using (var writeDb = new OaDbContext(options))
     if (!reviseResult.IsSuccess || reviseResult.Value!.Version != 2 || reviseResult.Value.Status != DocumentStatus.Published)
         throw new InvalidOperationException("制度版本修订升级失败：" + reviseResult.Error);
 
+    var pendingAfterRevision = docService.ListDocuments(employee, mustReadOnly: true, pendingAckOnly: true);
+    if (!pendingAfterRevision.IsSuccess || pendingAfterRevision.Value!.Items.All(item => item.Id != testDocId))
+        throw new InvalidOperationException("员工已签署旧版本后，新发布版本没有重新进入待签收列表。");
+
     var versionsList = docService.ListVersions(employee, testDocId);
     if (!versionsList.IsSuccess || versionsList.Value!.Count < 2)
         throw new InvalidOperationException("版本历史列表未包含升级记录。");
@@ -2323,6 +2327,34 @@ await using (var readDb = new OaDbContext(options))
         throw new InvalidOperationException("抄送事项及其独立已阅/未读状态未跨 DbContext 保留。");
     if (!new LeaveService(data, readDb).Get(data.GetEmployee("u-sun"), requestId).IsSuccess || !new ExpenseService(data, readDb).Get(data.GetEmployee("u-sun"), expenseId).IsSuccess)
         throw new InvalidOperationException("抄送人的请假或报销只读数据权限未跨 DbContext 保留。");
+
+    var workDirectory = new DemoData(readDb);
+    var workNotifications = new NotificationService(readDb);
+    var workCopies = new FlowCopyService(workDirectory, readDb);
+    var workService = new WorkItemService(
+        readDb,
+        workDirectory,
+        new LeaveService(workDirectory, readDb),
+        new ExpenseService(workDirectory, readDb),
+        new TravelService(workDirectory, readDb),
+        new PurchaseService(workDirectory, readDb),
+        new SealService(workDirectory, readDb),
+        workCopies,
+        new AnnouncementService(readDb, workDirectory),
+        new KnowledgeDocumentService(workDirectory, readDb),
+        new EmploymentContractService(readDb, workDirectory, fileService, workNotifications, new ConfigurationBuilder().Build()));
+    var employeeInitiated = workService.List(workDirectory.GetEmployee("u-zhang"), new WorkItemQuery(WorkItemTabs.Initiated, null, null, null, null, null, null, null, 1, 100));
+    if (employeeInitiated.Items.All(item => item.ResourceId != requestId) || employeeInitiated.Items.Any(item => item.ApplicantId != "u-zhang"))
+        throw new InvalidOperationException("事项中心未汇总员工本人发起的请假，或泄露了他人发起事项。");
+    var managerPending = workService.List(workDirectory.GetEmployee("u-li"), new WorkItemQuery(WorkItemTabs.Pending, null, null, null, null, null, null, null, 1, 100));
+    if (managerPending.Summary.PendingCount < managerPending.Items.Count || managerPending.Items.Any(item => !item.CanProcess))
+        throw new InvalidOperationException("事项中心待办汇总、当前节点或可处理标记不正确。");
+    var employeeRisks = workService.List(workDirectory.GetEmployee("u-zhang"), new WorkItemQuery(WorkItemTabs.Risk, null, null, null, null, null, null, null, 1, 100));
+    if (employeeRisks.Items.Any(item => item.ApplicantId != "u-zhang"))
+        throw new InvalidOperationException("普通员工在事项中心看到了权限范围外的劳动合同风险。");
+    var hrReading = workService.List(workDirectory.GetEmployee("u-sun"), new WorkItemQuery(WorkItemTabs.Reading, null, null, null, null, null, null, null, 1, 1));
+    if (hrReading.Total < hrReading.Items.Count || hrReading.PageSize != 1 || hrReading.Summary.PendingReadCount < 1)
+        throw new InvalidOperationException("事项中心阅读事项未按服务端分页，或未汇总未读抄送、公告和制度。");
     var auditService = new AuditService(readDb, data);
     var auditResult = auditService.List(data.GetEmployee("u-admin"), new AuditLogQuery("提交", "u-zhang", "LeaveRequest", null, null, 1, 1));
     if (!auditResult.IsSuccess || auditResult.Value is null || auditResult.Value.Total < 1 || auditResult.Value.Items.Count != 1 || auditResult.Value.PageSize != 1)

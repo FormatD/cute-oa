@@ -6,7 +6,13 @@ export type MfaSetup = { challengeToken: string; secret: string; provisioningUri
 export type MfaEnrollmentResult = { status: 'AUTHENTICATED'; session: LoginSession; recoveryCodes: string[] }
 export type MfaStatus = { enabled: boolean; required: boolean; enabledAt?: string | null; recoveryCodesRemaining: number }
 export type AuthSession = { id: string; device: string; ipAddress?: string | null; createdAt: string; lastUsedAt: string; expiresAt: string; status: 'ACTIVE' | 'EXPIRED' | 'REVOKED'; isCurrent: boolean }
-export type Summary = { tenant: string; currentUser: Employee; pendingTaskCount: number; pendingReadCount: number; contractRiskCount: number; leaveBalance: LeaveBalance }
+export type WorkItemSummary = { pendingCount: number; pendingApprovalCount: number; pendingPersonnelCount: number; pendingAttendanceCount: number; pendingFinanceCount: number; processedCount: number; initiatedCount: number; pendingReadCount: number; riskCount: number }
+export type Summary = { tenant: string; currentUser: Employee; pendingTaskCount: number; pendingReadCount: number; contractRiskCount: number; leaveBalance: LeaveBalance; workItems: WorkItemSummary }
+export type WorkItemTab = 'pending' | 'processed' | 'initiated' | 'reading' | 'risk'
+export type WorkItem = { id: string; tab: WorkItemTab; category: 'APPROVAL' | 'PERSONNEL' | 'ATTENDANCE' | 'FINANCE' | 'COPY' | 'ANNOUNCEMENT' | 'DOCUMENT' | 'CONTRACT'; businessType: string; resourceId: string; taskId?: string | null; number: string; title: string; applicantId?: string | null; applicantName: string; departmentName: string; status: string; currentNode?: string | null; occurredAt: string; processedAt?: string | null; dueDate?: string | null; urgency: 'NORMAL' | 'DUE_SOON' | 'OVERDUE'; route: string; canProcess: boolean; isRead: boolean; actionType: 'APPROVE' | 'COMPLETE' | 'REVIEW' | 'PAYMENT' | 'ACKNOWLEDGE' | 'READ' | 'VIEW' }
+export type WorkItemResponse = PagedResponse<WorkItem> & { summary: WorkItemSummary }
+export type WorkItemOverview = { pending: WorkItem[]; initiated: WorkItem[]; reading: WorkItem[]; summary: WorkItemSummary }
+export type WorkItemFilters = { businessType: string; keyword: string; status: string; applicantId: string; departmentId: string; startDate: string; endDate: string }
 export type FlowAction = { id: string; flowInstanceId: string; taskId?: string | null; sequence?: number | null; action: number; actorId: string; actorName: string; fromAssigneeId?: string | null; fromAssigneeName?: string | null; toAssigneeId?: string | null; toAssigneeName?: string | null; comment?: string | null; occurredAt: string }
 export type FlowInstance = { id: string; businessType: 'Leave' | 'Expense' | 'Travel' | 'Purchase' | 'Seal'; businessId: string; businessNumber: string; applicantId: string; processDefinitionId: string; processDefinitionCode: string; processDefinitionVersion: number; attempt: number; status: number; startedAt: string; completedAt?: string | null; actions: FlowAction[] }
 export type LeaveRequest = { id: string; number: string; type: string; startDate: string; endDate: string; startPeriod?: string; endPeriod?: string; days: number; reason: string; status: string; applicantName?: string; createdAt?: string; attachments?: string[]; copyRecipientIds?: string[]; tasks?: FlowTask[]; processDefinitionCode?: string | null; processDefinitionVersion?: number | null; currentFlowInstanceId?: string | null; flowInstances?: FlowInstance[] }
@@ -260,4 +266,3 @@ export type DocumentDiffView = {
   unchangedLines: number
   contentDiff: DiffLine[]
 }
-
