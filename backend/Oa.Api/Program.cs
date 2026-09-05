@@ -36,6 +36,7 @@ builder.Services.AddScoped<TravelService>();
 builder.Services.AddScoped<PurchaseService>();
 builder.Services.AddScoped<SealService>();
 builder.Services.AddScoped<KnowledgeDocumentService>();
+builder.Services.AddBusinessConfigurationServices();
 builder.Services.AddScoped<IdempotencyService>();
 builder.Services.AddScoped<NotificationService>();
 var fileScanningMode = FileScanningPolicy.ValidateMode(builder.Configuration["FileScanning:Mode"], builder.Environment.IsDevelopment());
@@ -784,6 +785,8 @@ app.MapPost("/api/v1/documents/demo-data", (HttpRequest request, DemoAuthService
     var actor = Actor(request, auth);
     return Write(request, actor, idempotency, () => service.GenerateDemoData(actor), atomic: true, fingerprintPayload: new { operation = "document-demo-data" });
 });
+
+app.MapBusinessConfigurationEndpoints();
 
 app.Run();
 

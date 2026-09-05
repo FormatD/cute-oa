@@ -32,8 +32,9 @@ public static class OaPermissions
     public const string DocumentScopeView = "DOCUMENT_SCOPE_VIEW";
     public const string DocumentDeptManage = "DOCUMENT_DEPT_MANAGE";
     public const string DocumentManage = "DOCUMENT_MANAGE";
+    public const string BusinessConfigManage = "BUSINESS_CONFIG_MANAGE";
 
-    public static IReadOnlyList<string> All { get; } = [UserManage, ProcessManage, AuditView, CalendarManage, ExpensePay, ExpenseAllView, LeaveScopeView, ExpenseScopeView, OrgManage, AnnouncementManage, TravelScopeView, PersonnelScopeView, PersonnelExport, PersonnelManage, AttendanceScopeView, AttendanceManage, ContractScopeView, ContractManage, PurchaseScopeView, PurchaseManage, SealScopeView, SealManage, DocumentScopeView, DocumentDeptManage, DocumentManage];
+    public static IReadOnlyList<string> All { get; } = [UserManage, ProcessManage, AuditView, CalendarManage, ExpensePay, ExpenseAllView, LeaveScopeView, ExpenseScopeView, OrgManage, AnnouncementManage, TravelScopeView, PersonnelScopeView, PersonnelExport, PersonnelManage, AttendanceScopeView, AttendanceManage, ContractScopeView, ContractManage, PurchaseScopeView, PurchaseManage, SealScopeView, SealManage, DocumentScopeView, DocumentDeptManage, DocumentManage, BusinessConfigManage];
     public static IReadOnlyList<PermissionView> Definitions { get; } =
     [
         new(UserManage, "用户管理", "维护用户、账号、角色和权限配置"),
@@ -60,7 +61,8 @@ public static class OaPermissions
         new(SealManage, "印章管理", "执行在司用印登记、外借出库与归还核验"),
         new(DocumentScopeView, "知识库范围查看", "按角色配置的数据范围查看跨部门文档及签收记录"),
         new(DocumentDeptManage, "部门文档管理", "维护所属部门目录、编制发布部门专属规章制度、修订部门文档及查看部门签收进度"),
-        new(DocumentManage, "知识库全局管理", "维护全公司与各部门目录分类、发布/修订/归档文档与查看全员签收看板")
+        new(DocumentManage, "知识库全局管理", "维护全公司与各部门目录分类、发布/修订/归档文档与查看全员签收看板"),
+        new(BusinessConfigManage, "业务配置管理", "维护假勤、费用、采购、用章及系统字典等业务参数与版本发布")
     ];
 }
 
@@ -266,6 +268,8 @@ public static class IdentitySeeder
             });
             db.SaveChanges();
         }
+
+        BusinessConfigurationDefaults.EnsureDefaultConfigurations(db, IdentityDefaults.TenantId);
     }
 
     public static void EnsureProductionReady(OaDbContext db, IConfiguration configuration)
