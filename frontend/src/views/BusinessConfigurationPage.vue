@@ -13,9 +13,12 @@ import type {
   TravelPolicyConfig
 } from '../api/types'
 import OaDialog from '../components/OaDialog.vue'
+import UserSelect from '../components/UserSelect.vue'
 import { useBusinessConfigurationStore } from '../stores/business-configurations'
+import { useOrganizationStore } from '../stores/organization'
 
 const store = useBusinessConfigurationStore()
+const organization = useOrganizationStore()
 
 // Domain tabs
 const domainTabs: { key: string; label: string }[] = [
@@ -781,11 +784,23 @@ async function copyJson() {
   }
 }
 
+function getUserDisplayName(userId?: string | null): string {
+  if (!userId) return '系统自动指派'
+  const emp = organization.directoryEmployees.find(e => e.id === userId)
+  if (emp) {
+    return `${emp.name} (${emp.departmentName || '员工'} · ${emp.id})`
+  }
+  return userId
+}
+
 // Lifecycle
 onMounted(() => {
   store.message = ''
   store.error = ''
   void store.loadList(1)
+  if (!organization.organizationLoaded) {
+    void organization.loadOrganization()
+  }
 })
 </script>
 
@@ -1257,8 +1272,12 @@ onMounted(() => {
             </label>
 
             <label class="dialog-field">
-              默认采购专员用户 ID
-              <input v-model="procurementForm.defaultPurchaserUserId" placeholder="例如: admin" />
+              默认采购专员
+              <UserSelect
+                v-model="procurementForm.defaultPurchaserUserId"
+                placeholder="请选择默认承办采购专员"
+              />
+              <small>发起采购申请时自动指派的采购承办人员</small>
             </label>
           </div>
 
@@ -1361,7 +1380,7 @@ onMounted(() => {
                 <tr>
                   <th>印章名称</th>
                   <th>印章类型</th>
-                  <th>保管人</th>
+                  <th style="min-width: 140px;">保管人</th>
                   <th>启用</th>
                   <th>支持外借</th>
                   <th>外借最长天数</th>
@@ -1379,7 +1398,13 @@ onMounted(() => {
                       <option value="FINANCE">财务专用章 (FINANCE)</option>
                     </select>
                   </td>
-                  <td><input v-model="s.custodianUserId" placeholder="保管人" /></td>
+                  <td style="min-width: 140px;">
+                    <UserSelect
+                      v-model="s.custodianUserId"
+                      compact
+                      placeholder="选择保管人"
+                    />
+                  </td>
                   <td><input v-model="s.isEnabled" type="checkbox" /></td>
                   <td><input v-model="s.allowOut" type="checkbox" /></td>
                   <td><input v-model.number="s.maxOutDays" type="number" min="0" max="90" /></td>
@@ -1936,7 +1961,13 @@ onMounted(() => {
             </div>
             <div class="detail-kv-item">
               <span class="kv-label">默认采购专员</span>
-              <span class="kv-value"><code>{{ detailParsed.defaultPurchaserUserId || '系统自动指派' }}</code></span>
+              <span class="kv-value">
+                <span v-if="detailParsed.defaultPurchaserUserId" class="user-chip">
+                  <span class="user-avatar-mini">{{ detailParsed.defaultPurchaserUserId.slice(0, 1).toUpperCase() }}</span>
+                  <strong>{{ getUserDisplayName(detailParsed.defaultPurchaserUserId) }}</strong>
+                </span>
+                <span v-else class="text-muted">系统自动指派</span>
+              </span>
             </div>
             <div class="detail-kv-item">
               <span class="kv-label">强制到货验收流程</span>
@@ -2016,7 +2047,13 @@ onMounted(() => {
                 <tr v-for="(s, idx) in (detailParsed.seals || [])" :key="idx">
                   <td><strong>{{ s.name }}</strong></td>
                   <td><code>{{ s.sealType }}</code></td>
-                  <td>{{ s.custodianUserId || '-' }}</td>
+                  <td>
+                    <span v-if="s.custodianUserId" class="user-chip">
+                      <span class="user-avatar-mini">{{ s.custodianUserId.slice(0, 1).toUpperCase() }}</span>
+                      {{ getUserDisplayName(s.custodianUserId) }}
+                    </span>
+                    <span v-else class="text-muted">-</span>
+                  </td>
                   <td>
                     <span class="status-pill" :class="s.isEnabled ? 'status-enabled' : 'status-disabled'">
                       {{ s.isEnabled ? '启用' : '停用' }}
@@ -2831,6 +2868,30 @@ onMounted(() => {
   border-radius: 6px;
   color: #92400e;
   font-size: 0.82rem;
+}
+
+.user-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  background: #f1f5f9;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  color: #1e293b;
+}
+
+.user-avatar-mini {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #3478e8;
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* Responsive styles down to 390px */
