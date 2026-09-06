@@ -13,6 +13,7 @@ using System.Buffers.Binary;
 using System.Data.Common;
 using System.Net;
 using System.Net.Sockets;
+using System.Text.Json;
 
 if (FileScanningPolicy.ValidateMode("Disabled", true) != "Disabled" || FileScanningPolicy.ValidateMode("ClamAv", false) != "ClamAv")
     throw new InvalidOperationException("文件扫描环境策略未返回规范模式。");
@@ -2522,9 +2523,11 @@ await using (var performanceCleanupDb = new OaDbContext(options))
 // --- Business Configuration Center PostgreSQL Integration Tests ---
 await using (var configDb = new OaDbContext(options))
 {
+    IdentitySeeder.EnsureDemoSeeded(configDb);
     var configData = new DemoData(configDb);
     var admin = configData.GetEmployee("u-admin");
     var zhang = configData.GetEmployee("u-zhang");
+    var configUser = configData.GetEmployee("u-config");
     var configService = new BusinessConfigurationService(configDb, configData);
 
     // 1. Seed verification
@@ -3094,11 +3097,352 @@ await using (var configDb = new OaDbContext(options))
     if (adjustedBalance.Entitled != 4.0m || adjustedBalance.Available != 1.5m || adjustedBalance.Used != 2.5m)
         throw new InvalidOperationException($"调休调整后余额不符合预期：Entitled={adjustedBalance.Entitled}, Available={adjustedBalance.Available}, Used={adjustedBalance.Used}");
 
-    // 10. WP-C: 安全与权限 (BUSINESS_CONFIG_MANAGE 必须强制 MFA)
-    var mfaConfig = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Auth:Mfa:Enabled"] = "true" }).Build();
+    // 10. WP-C (R-C1): 专职最小权限角色、MFA 约束与关键管理失败审计留痕
+    // 10.1 专职“配置管理员”角色与权限最小化原则
+    if (configUser.Role != "配置管理员" || !configData.HasRole(configUser, "配置管理员"))
+        throw new InvalidOperationException("配置管理员 u-config 角色不符合预期。");
+    if (!configData.HasPermission(configUser, OaPermissions.BusinessConfigManage))
+        throw new InvalidOperationException("配置管理员缺少 BUSINESS_CONFIG_MANAGE 权限。");
+    if (configData.HasPermission(configUser, OaPermissions.PersonnelManage) ||
+        configData.HasPermission(configUser, OaPermissions.ExpensePay) ||
+        configData.HasPermission(configUser, OaPermissions.ContractManage) ||
+        configData.HasPermission(configUser, OaPermissions.SealManage) ||
+        configData.HasPermission(configUser, OaPermissions.PurchaseManage) ||
+        configData.HasPermission(configUser, OaPermissions.UserManage))
+    {
+        throw new InvalidOperationException("配置管理员权限未遵循最小权限原则，包含人事/财务/合同/用印/采购等越权管理权限。");
+    }
+
+    // 10.2 MFA 挑战策略严格生效
+    var mfaConfig = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Authentication:MultiFactor:Enabled"] = "true" }).Build();
     var mfaSettings = MultiFactorSettings.From(mfaConfig);
     if (!mfaSettings.RequiredPermissions.Contains(OaPermissions.BusinessConfigManage))
         throw new InvalidOperationException("业务参数配置管理权限未强制纳入 MFA 保护策略。");
+    var mfaService = new MultiFactorAuthenticationService(configDb, configData, mfaConfig, new MfaSecretProtector(mfaConfig));
+    if (!mfaService.IsRequired(configUser))
+        throw new InvalidOperationException("具备业务参数配置管理权限的配置管理员未触发 MFA 强挑战。");
+    if (mfaService.IsRequired(zhang))
+        throw new InvalidOperationException("普通员工账号错误触发了业务配置 MFA 强挑战。");
+
+    // 10.3 关键失败场景结构化审计留痕
+    // 10.3.1 越权访问失败留痕
+    var unauthDraft = configService.CreateDraft(zhang, new CreateBusinessConfigurationRequest(
+        ConfigurationDomains.Leave, "HackCode", "越权草稿", null, nowUtc, null, "{}"));
+    if (unauthDraft.IsSuccess || unauthDraft.Code != "AUTH_002")
+        throw new InvalidOperationException("普通员工越权创建草稿未被 AUTH_002 拦截。");
+
+    var unauthAudit = configDb.AuditLogs.AsNoTracking()
+        .FirstOrDefault(a => a.TenantId == IdentityDefaults.TenantId && a.ActorId == zhang.Id && a.Action == "CONFIG_DRAFT_CREATE_FAILED");
+    if (unauthAudit is null || !unauthAudit.Summary.Contains("越权创建配置草稿被拒绝"))
+        throw new InvalidOperationException("越权创建配置草稿未生成 CONFIG_DRAFT_CREATE_FAILED 审计留痕。");
+
+    // 10.3.2 越权发布失败留痕
+    var unauthPub = configService.Publish(zhang, publishedV1.Value!.Id, new PublishBusinessConfigurationRequest(nowUtc, null, 1));
+    if (unauthPub.IsSuccess || unauthPub.Code != "AUTH_002")
+        throw new InvalidOperationException("普通员工越权发布未被 AUTH_002 拦截。");
+    var unauthPubAudit = configDb.AuditLogs.AsNoTracking()
+        .FirstOrDefault(a => a.TenantId == IdentityDefaults.TenantId && a.ActorId == zhang.Id && a.Action == "CONFIG_PUBLISH_FAILED");
+    if (unauthPubAudit is null || !unauthPubAudit.Summary.Contains("越权发布配置被拒绝"))
+        throw new InvalidOperationException("越权发布配置未生成 CONFIG_PUBLISH_FAILED 审计留痕。");
+
+    // 10.3.3 并发版本冲突失败留痕
+    var testDraftForAudit = configService.CreateDraft(configUser, new CreateBusinessConfigurationRequest(
+        ConfigurationDomains.Dictionary, "AuditTestDict", "审计测试字典", null, nowUtc, null,
+        """{"items":[{"code":"ITEM_1","name":"项目一","sortOrder":1,"isEnabled":true}]}"""));
+    if (!testDraftForAudit.IsSuccess)
+        throw new InvalidOperationException($"配置管理员创建草稿失败：{testDraftForAudit.Error}");
+
+    var conflictPub = configService.Publish(configUser, testDraftForAudit.Value!.Id, new PublishBusinessConfigurationRequest(nowUtc, null, 9999));
+    if (conflictPub.IsSuccess || conflictPub.Code != "CONCURRENCY_001")
+        throw new InvalidOperationException("并发版本冲突未被拦截。");
+    var conflictPubAudit = configDb.AuditLogs.AsNoTracking()
+        .FirstOrDefault(a => a.TenantId == IdentityDefaults.TenantId && a.ResourceId == testDraftForAudit.Value.Id.ToString() && a.Action == "CONFIG_PUBLISH_FAILED" && a.Summary.Contains("并发版本冲突"));
+    if (conflictPubAudit is null)
+        throw new InvalidOperationException("并发版本冲突发布未生成 CONFIG_PUBLISH_FAILED 审计留痕。");
+
+    // 10.3.4 非草稿发布与非法状态下线失败留痕
+    var publishedAuditItem = configService.Publish(configUser, testDraftForAudit.Value.Id, new PublishBusinessConfigurationRequest(nowUtc, null, testDraftForAudit.Value.ConcurrencyVersion));
+    if (!publishedAuditItem.IsSuccess)
+        throw new InvalidOperationException($"发布审计测试配置失败：{publishedAuditItem.Error}");
+
+    var nonDraftPub = configService.Publish(configUser, publishedAuditItem.Value!.Id, new PublishBusinessConfigurationRequest(nowUtc, null, publishedAuditItem.Value.ConcurrencyVersion));
+    if (nonDraftPub.IsSuccess || nonDraftPub.Code != "CONFIG_002")
+        throw new InvalidOperationException("非草稿配置发布未被拦截。");
+    var nonDraftPubAudit = configDb.AuditLogs.AsNoTracking()
+        .FirstOrDefault(a => a.TenantId == IdentityDefaults.TenantId && a.ResourceId == publishedAuditItem.Value.Id.ToString() && a.Action == "CONFIG_PUBLISH_FAILED" && a.Summary.Contains("非草稿"));
+    if (nonDraftPubAudit is null)
+        throw new InvalidOperationException("非草稿发布未生成 CONFIG_PUBLISH_FAILED 审计留痕。");
+
+    var draftItemForRetire = configService.CreateDraft(configUser, new CreateBusinessConfigurationRequest(
+        ConfigurationDomains.Dictionary, "RetireDraftDict", "草稿停用测试", null, nowUtc, null,
+        """{"items":[{"code":"ITEM_1","name":"项目一","sortOrder":1,"isEnabled":true}]}"""));
+    var illegalDraftRetireAudit = configService.Retire(configUser, draftItemForRetire.Value!.Id, new RetireBusinessConfigurationRequest(nowUtc, draftItemForRetire.Value.ConcurrencyVersion));
+    if (illegalDraftRetireAudit.IsSuccess || illegalDraftRetireAudit.Code != "CONFIG_002")
+        throw new InvalidOperationException("草稿停用未被拦截。");
+    var draftRetireAuditLog = configDb.AuditLogs.AsNoTracking()
+        .FirstOrDefault(a => a.TenantId == IdentityDefaults.TenantId && a.ResourceId == draftItemForRetire.Value.Id.ToString() && a.Action == "CONFIG_RETIRE_FAILED");
+    if (draftRetireAuditLog is null || !draftRetireAuditLog.Summary.Contains("草稿状态的配置不能下线"))
+        throw new InvalidOperationException("草稿停用未生成 CONFIG_RETIRE_FAILED 审计留痕。");
+
+    // 10.3.5 非草稿删除失败留痕
+    var illegalDeletePub = configService.Delete(configUser, publishedAuditItem.Value.Id);
+    if (illegalDeletePub.IsSuccess || illegalDeletePub.Code != "CONFIG_002")
+        throw new InvalidOperationException("非草稿删除未被拦截。");
+    var deleteFailedAudit = configDb.AuditLogs.AsNoTracking()
+        .FirstOrDefault(a => a.TenantId == IdentityDefaults.TenantId && a.ResourceId == publishedAuditItem.Value.Id.ToString() && a.Action == "CONFIG_DELETE_FAILED");
+    if (deleteFailedAudit is null || !deleteFailedAudit.Summary.Contains("只能删除草稿状态"))
+        throw new InvalidOperationException("删除非草稿未生成 CONFIG_DELETE_FAILED 审计留痕。");
+
+    // 11. WP-D (R-D1): 五类单据跨版本配置快照隔离与驳回重提回填验证
+    // 11.1 Leave (请假单)
+    var d1LeaveDraft = leaveService.CreateDraft(zhang, new CreateLeaveRequest(
+        LeaveType.Personal, new DateOnly(2026, 11, 2), LeavePeriod.FullDay, new DateOnly(2026, 11, 3), LeavePeriod.FullDay, "V1请假隔离测试", []));
+    if (!d1LeaveDraft.IsSuccess) throw new InvalidOperationException($"D1请假草稿创建失败：{d1LeaveDraft.Error}");
+    var d1LeaveSubmit = leaveService.Submit(zhang, d1LeaveDraft.Value!.Id);
+    if (!d1LeaveSubmit.IsSuccess) throw new InvalidOperationException($"D1请假提交失败：{d1LeaveSubmit.Error}");
+    var d1LeaveRec = configDb.LeaveRequests.AsNoTracking().Single(r => r.Id == d1LeaveDraft.Value.Id);
+    if (d1LeaveRec.ConfigVersionNumber != 1) throw new InvalidOperationException("D1请假单未关联 V1 配置版本。");
+
+    var d2LeaveDraft = leaveService.CreateDraft(zhang, new CreateLeaveRequest(
+        LeaveType.Personal, new DateOnly(2026, 11, 5), LeavePeriod.FullDay, new DateOnly(2026, 11, 6), LeavePeriod.FullDay, "D2请假驳回重提测试", []));
+    var d2LeaveSubmit = leaveService.Submit(zhang, d2LeaveDraft.Value!.Id);
+    if (!d2LeaveSubmit.IsSuccess) throw new InvalidOperationException($"D2请假提交失败：{d2LeaveSubmit.Error}");
+    var d2LeaveTask = d2LeaveSubmit.Value!.Tasks.First();
+    var d2LeaveReject = leaveService.Reject(configData.GetEmployee(d2LeaveTask.AssigneeId), d2LeaveTask.Id, "请假安排有冲突驳回");
+    if (!d2LeaveReject.IsSuccess) throw new InvalidOperationException($"D2请假驳回失败：{d2LeaveReject.Error}");
+
+    // 发布 LeavePolicy V2
+    var leaveV1 = configDb.BusinessConfigurations.Single(c => c.TenantId == IdentityDefaults.TenantId && c.Domain == ConfigurationDomains.Leave && c.Code == "LeavePolicy" && c.Status == ConfigurationStatus.Effective);
+    var leaveV2Draft = configService.CreateNewVersion(configUser, leaveV1.Id);
+    var leavePolicyCfg = JsonSerializer.Deserialize<LeavePolicyConfig>(leaveV1.ContentJson, BusinessConfigurationDefaults.JsonOptions)!;
+    leavePolicyCfg.CompTimeValidityDays = 180;
+    var leaveV2Json = JsonSerializer.Serialize(leavePolicyCfg, BusinessConfigurationDefaults.JsonOptions);
+    var updatedLeaveV2 = configService.UpdateDraft(configUser, leaveV2Draft.Value!.Id, new UpdateBusinessConfigurationRequest(
+        leaveV2Draft.Value.Name, leaveV2Draft.Value.Description, DateTimeOffset.UtcNow, null, leaveV2Json, leaveV2Draft.Value.ConcurrencyVersion));
+    var leaveV2Pub = configService.Publish(configUser, updatedLeaveV2.Value!.Id, new PublishBusinessConfigurationRequest(DateTimeOffset.UtcNow, null, updatedLeaveV2.Value.ConcurrencyVersion));
+    if (!leaveV2Pub.IsSuccess || leaveV2Pub.Value!.Status != ConfigurationStatus.Effective)
+        throw new InvalidOperationException($"LeavePolicy V2 发布失败：{leaveV2Pub.Error}");
+
+    // 断言 D1 历史隔离
+    var d1LeaveAfter = configDb.LeaveRequests.AsNoTracking().Single(r => r.Id == d1LeaveDraft.Value!.Id);
+    if (d1LeaveAfter.ConfigVersionNumber != 1 || d1LeaveAfter.ConfigSnapshotJson!.Contains("\"compTimeValidityDays\": 180"))
+        throw new InvalidOperationException("LeavePolicy V2 发布后，D1 历史请假单快照被篡改，违反跨版本快照隔离原则。");
+
+    // D3 请假单在 V2 下提交
+    var d3LeaveDraft = leaveService.CreateDraft(zhang, new CreateLeaveRequest(
+        LeaveType.Personal, new DateOnly(2026, 11, 9), LeavePeriod.FullDay, new DateOnly(2026, 11, 10), LeavePeriod.FullDay, "V2请假单", []));
+    var d3LeaveSubmit = leaveService.Submit(zhang, d3LeaveDraft.Value!.Id);
+    if (!d3LeaveSubmit.IsSuccess) throw new InvalidOperationException($"D3请假单提交失败：{d3LeaveSubmit.Error}");
+    var d3LeaveRec = configDb.LeaveRequests.AsNoTracking().Single(r => r.Id == d3LeaveDraft.Value!.Id);
+    if (d3LeaveRec.ConfigVersionNumber != 2 || !d3LeaveRec.ConfigSnapshotJson!.Contains("\"compTimeValidityDays\": 180"))
+        throw new InvalidOperationException("D3请假单在 V2 下提交未正确关联 V2 快照。");
+
+    // D2 驳回重提回填 V2 快照
+    var d2LeaveResubmit = leaveService.Submit(zhang, d2LeaveDraft.Value!.Id);
+    if (!d2LeaveResubmit.IsSuccess) throw new InvalidOperationException($"D2请假单驳回重提失败：{d2LeaveResubmit.Error}");
+    var d2LeaveAfter = configDb.LeaveRequests.AsNoTracking().Single(r => r.Id == d2LeaveDraft.Value!.Id);
+    if (d2LeaveAfter.ConfigVersionNumber != 2 || !d2LeaveAfter.ConfigSnapshotJson!.Contains("\"compTimeValidityDays\": 180"))
+        throw new InvalidOperationException("D2请假单驳回重提后未自动回填最新生效的 V2 配置快照。");
+
+    // 11.2 Expense (报销单)
+    var d1ExpDraft = expenseService.CreateDraft(zhang, new CreateExpenseClaim(
+        null, "张晨", "6222026000001234", "测试银行", "V1报销隔离测试",
+        [new ExpenseItem(DateOnly.FromDateTime(DateTime.Today), "办公", 100m, "日常办公耗材", "INV-V1-EXP-01", ["f1"])]));
+    if (!d1ExpDraft.IsSuccess) throw new InvalidOperationException($"D1报销草稿创建失败：{d1ExpDraft.Error}");
+    var d1ExpSubmit = expenseService.Submit(zhang, d1ExpDraft.Value!.Id);
+    if (!d1ExpSubmit.IsSuccess) throw new InvalidOperationException($"D1报销提交失败：{d1ExpSubmit.Error}");
+    var d1ExpRec = configDb.ExpenseClaims.AsNoTracking().Single(r => r.Id == d1ExpDraft.Value!.Id);
+    if (d1ExpRec.ConfigVersionNumber != 1) throw new InvalidOperationException("D1报销单未关联 V1 配置版本。");
+
+    var d2ExpDraft = expenseService.CreateDraft(zhang, new CreateExpenseClaim(
+        null, "张晨", "6222026000001234", "测试银行", "D2报销驳回重提测试",
+        [new ExpenseItem(DateOnly.FromDateTime(DateTime.Today), "办公", 150m, "打印纸耗材", "INV-V1-EXP-02", ["f2"])]));
+    var d2ExpSubmit = expenseService.Submit(zhang, d2ExpDraft.Value!.Id);
+    if (!d2ExpSubmit.IsSuccess) throw new InvalidOperationException($"D2报销提交失败：{d2ExpSubmit.Error}");
+    var d2ExpTask = d2ExpSubmit.Value!.Tasks.First();
+    var d2ExpReject = expenseService.Reject(configData.GetEmployee(d2ExpTask.AssigneeId), d2ExpTask.Id, "发票抬头有误驳回");
+    if (!d2ExpReject.IsSuccess) throw new InvalidOperationException($"D2报销驳回失败：{d2ExpReject.Error}");
+
+    // 发布 ExpensePolicy V2
+    var expV1 = configDb.BusinessConfigurations.Single(c => c.TenantId == IdentityDefaults.TenantId && c.Domain == ConfigurationDomains.Expense && c.Code == "ExpensePolicy" && c.Status == ConfigurationStatus.Effective);
+    var expV2Draft = configService.CreateNewVersion(configUser, expV1.Id);
+    var expPolicyCfg = JsonSerializer.Deserialize<ExpensePolicyConfig>(expV1.ContentJson, BusinessConfigurationDefaults.JsonOptions)!;
+    expPolicyCfg.BlockWhenExceeded = true;
+    var expV2Json = JsonSerializer.Serialize(expPolicyCfg, BusinessConfigurationDefaults.JsonOptions);
+    var updatedExpV2 = configService.UpdateDraft(configUser, expV2Draft.Value!.Id, new UpdateBusinessConfigurationRequest(
+        expV2Draft.Value.Name, expV2Draft.Value.Description, DateTimeOffset.UtcNow, null, expV2Json, expV2Draft.Value.ConcurrencyVersion));
+    var expV2Pub = configService.Publish(configUser, updatedExpV2.Value!.Id, new PublishBusinessConfigurationRequest(DateTimeOffset.UtcNow, null, updatedExpV2.Value.ConcurrencyVersion));
+    if (!expV2Pub.IsSuccess || expV2Pub.Value!.Status != ConfigurationStatus.Effective)
+        throw new InvalidOperationException($"ExpensePolicy V2 发布失败：{expV2Pub.Error}");
+
+    // 断言 D1 历史隔离
+    var d1ExpAfter = configDb.ExpenseClaims.AsNoTracking().Single(r => r.Id == d1ExpDraft.Value!.Id);
+    if (d1ExpAfter.ConfigVersionNumber != 1 || d1ExpAfter.ConfigSnapshotJson!.Contains("\"blockWhenExceeded\": true"))
+        throw new InvalidOperationException("ExpensePolicy V2 发布后，D1 历史报销单快照被篡改，违反跨版本快照隔离原则。");
+
+    // D3 报销单在 V2 下提交
+    var d3ExpDraft = expenseService.CreateDraft(zhang, new CreateExpenseClaim(
+        null, "张晨", "6222026000001234", "测试银行", "V2报销单",
+        [new ExpenseItem(DateOnly.FromDateTime(DateTime.Today), "办公", 200m, "新配置下报销", "INV-V2-EXP-03", ["f3"])]));
+    var d3ExpSubmit = expenseService.Submit(zhang, d3ExpDraft.Value!.Id);
+    if (!d3ExpSubmit.IsSuccess) throw new InvalidOperationException($"D3报销单提交失败：{d3ExpSubmit.Error}");
+    var d3ExpRec = configDb.ExpenseClaims.AsNoTracking().Single(r => r.Id == d3ExpDraft.Value!.Id);
+    if (d3ExpRec.ConfigVersionNumber != 2 || !d3ExpRec.ConfigSnapshotJson!.Contains("\"blockWhenExceeded\": true"))
+        throw new InvalidOperationException("D3报销单在 V2 下提交未正确关联 V2 快照。");
+
+    // D2 驳回重提回填 V2 快照
+    var d2ExpResubmit = expenseService.Submit(zhang, d2ExpDraft.Value!.Id);
+    if (!d2ExpResubmit.IsSuccess) throw new InvalidOperationException($"D2报销单驳回重提失败：{d2ExpResubmit.Error}");
+    var d2ExpAfter = configDb.ExpenseClaims.AsNoTracking().Single(r => r.Id == d2ExpDraft.Value!.Id);
+    if (d2ExpAfter.ConfigVersionNumber != 2 || !d2ExpAfter.ConfigSnapshotJson!.Contains("\"blockWhenExceeded\": true"))
+        throw new InvalidOperationException("D2报销单驳回重提后未自动回填最新生效的 V2 配置快照。");
+
+    // 11.3 Seal (用印单)
+    var d1SealDraft = sealService.CreateDraft(zhang, new SaveSealRequest(
+        "V1用印隔离测试", "合同协议", "框架合同", "公章", 1, false, null, null, null, "日常用印", ["c1.pdf"], null));
+    if (!d1SealDraft.IsSuccess) throw new InvalidOperationException($"D1用印草稿创建失败：{d1SealDraft.Error}");
+    var d1SealSubmit = sealService.Submit(zhang, d1SealDraft.Value!.Id);
+    if (!d1SealSubmit.IsSuccess) throw new InvalidOperationException($"D1用印提交失败：{d1SealSubmit.Error}");
+    var d1SealRec = configDb.SealRequests.AsNoTracking().Single(r => r.Id == d1SealDraft.Value!.Id);
+    if (d1SealRec.ConfigVersionNumber != 1) throw new InvalidOperationException("D1用印单未关联 V1 配置版本。");
+
+    var d2SealDraft = sealService.CreateDraft(zhang, new SaveSealRequest(
+        "D2用印驳回重提测试", "合同协议", "保密协议", "公章", 1, false, null, null, null, "重提用印", ["c2.pdf"], null));
+    var d2SealSubmit = sealService.Submit(zhang, d2SealDraft.Value!.Id);
+    if (!d2SealSubmit.IsSuccess) throw new InvalidOperationException($"D2用印提交失败：{d2SealSubmit.Error}");
+    var d2SealTask = d2SealSubmit.Value!.Tasks.First();
+    var d2SealReject = sealService.Reject(configData.GetEmployee(d2SealTask.AssigneeId), d2SealTask.Id, "用印用途描述不详驳回");
+    if (!d2SealReject.IsSuccess) throw new InvalidOperationException($"D2用印驳回失败：{d2SealReject.Error}");
+
+    // 发布 SealPolicy V2
+    var sealV1 = configDb.BusinessConfigurations.Single(c => c.TenantId == IdentityDefaults.TenantId && c.Domain == ConfigurationDomains.Seal && c.Code == "SealPolicy" && c.Status == ConfigurationStatus.Effective);
+    var sealV2Draft = configService.CreateNewVersion(configUser, sealV1.Id);
+    var sealPolicyCfg = JsonSerializer.Deserialize<SealPolicyConfig>(sealV1.ContentJson, BusinessConfigurationDefaults.JsonOptions)!;
+    sealPolicyCfg.Seals.First().MaxOutDays = 15;
+    var sealV2Json = JsonSerializer.Serialize(sealPolicyCfg, BusinessConfigurationDefaults.JsonOptions);
+    var updatedSealV2 = configService.UpdateDraft(configUser, sealV2Draft.Value!.Id, new UpdateBusinessConfigurationRequest(
+        sealV2Draft.Value.Name, sealV2Draft.Value.Description, DateTimeOffset.UtcNow, null, sealV2Json, sealV2Draft.Value.ConcurrencyVersion));
+    var sealV2Pub = configService.Publish(configUser, updatedSealV2.Value!.Id, new PublishBusinessConfigurationRequest(DateTimeOffset.UtcNow, null, updatedSealV2.Value.ConcurrencyVersion));
+    if (!sealV2Pub.IsSuccess || sealV2Pub.Value!.Status != ConfigurationStatus.Effective)
+        throw new InvalidOperationException($"SealPolicy V2 发布失败：{sealV2Pub.Error}");
+
+    // 断言 D1 历史隔离
+    var d1SealAfter = configDb.SealRequests.AsNoTracking().Single(r => r.Id == d1SealDraft.Value!.Id);
+    if (d1SealAfter.ConfigVersionNumber != 1 || d1SealAfter.ConfigSnapshotJson!.Contains("\"maxOutDays\": 15"))
+        throw new InvalidOperationException("SealPolicy V2 发布后，D1 历史用印单快照被篡改，违反跨版本快照隔离原则。");
+
+    // D3 用印单在 V2 下提交
+    var d3SealDraft = sealService.CreateDraft(zhang, new SaveSealRequest(
+        "V2用印单", "合同协议", "采购订单", "公章", 1, false, null, null, null, "新配置用印", ["c3.pdf"], null));
+    var d3SealSubmit = sealService.Submit(zhang, d3SealDraft.Value!.Id);
+    if (!d3SealSubmit.IsSuccess) throw new InvalidOperationException($"D3用印单提交失败：{d3SealSubmit.Error}");
+    var d3SealRec = configDb.SealRequests.AsNoTracking().Single(r => r.Id == d3SealDraft.Value!.Id);
+    if (d3SealRec.ConfigVersionNumber != 2 || !d3SealRec.ConfigSnapshotJson!.Contains("\"maxOutDays\": 15"))
+        throw new InvalidOperationException("D3用印单在 V2 下提交未正确关联 V2 快照。");
+
+    // D2 驳回重提回填 V2 快照
+    var d2SealResubmit = sealService.Submit(zhang, d2SealDraft.Value!.Id);
+    if (!d2SealResubmit.IsSuccess) throw new InvalidOperationException($"D2用印单驳回重提失败：{d2SealResubmit.Error}");
+    var d2SealAfter = configDb.SealRequests.AsNoTracking().Single(r => r.Id == d2SealDraft.Value!.Id);
+    if (d2SealAfter.ConfigVersionNumber != 2 || !d2SealAfter.ConfigSnapshotJson!.Contains("\"maxOutDays\": 15"))
+        throw new InvalidOperationException("D2用印单驳回重提后未自动回填最新生效的 V2 配置快照。");
+
+    // 11.4 Travel (差旅单)
+    var d2TravelDraft = travelService.CreateDraft(zhang, new SaveTravelRequest(
+        "D2差旅驳回重提申请", 800m, [new TravelItineraryItem("上海", new DateOnly(2026, 12, 1), new DateOnly(2026, 12, 2), "高铁二等座", "客户对接")], [], [], []));
+    if (!d2TravelDraft.IsSuccess) throw new InvalidOperationException($"D2差旅草稿创建失败：{d2TravelDraft.Error}");
+    var d2TravelSubmit = travelService.Submit(zhang, d2TravelDraft.Value!.Id);
+    if (!d2TravelSubmit.IsSuccess) throw new InvalidOperationException($"D2差旅提交失败：{d2TravelSubmit.Error}");
+    var d2TravelTask = d2TravelSubmit.Value!.Tasks.First();
+    var d2TravelReject = travelService.Reject(configData.GetEmployee(d2TravelTask.AssigneeId), d2TravelTask.Id, "出差行程调整驳回");
+    if (!d2TravelReject.IsSuccess) throw new InvalidOperationException($"D2差旅驳回失败：{d2TravelReject.Error}");
+
+    // 发布 TravelPolicy V2
+    var travelV1 = configDb.BusinessConfigurations.Single(c => c.TenantId == IdentityDefaults.TenantId && c.Domain == ConfigurationDomains.Travel && c.Code == "TravelPolicy" && c.Status == ConfigurationStatus.Effective);
+    var travelV2Draft = configService.CreateNewVersion(configUser, travelV1.Id);
+    var travelPolicyCfg = JsonSerializer.Deserialize<TravelPolicyConfig>(travelV1.ContentJson, BusinessConfigurationDefaults.JsonOptions)!;
+    travelPolicyCfg.Standards.First().HotelDailyLimit = 550m;
+    var travelV2Json = JsonSerializer.Serialize(travelPolicyCfg, BusinessConfigurationDefaults.JsonOptions);
+    var updatedTravelV2 = configService.UpdateDraft(configUser, travelV2Draft.Value!.Id, new UpdateBusinessConfigurationRequest(
+        travelV2Draft.Value.Name, travelV2Draft.Value.Description, DateTimeOffset.UtcNow, null, travelV2Json, travelV2Draft.Value.ConcurrencyVersion));
+    var travelV2Pub = configService.Publish(configUser, updatedTravelV2.Value!.Id, new PublishBusinessConfigurationRequest(DateTimeOffset.UtcNow, null, updatedTravelV2.Value.ConcurrencyVersion));
+    if (!travelV2Pub.IsSuccess || travelV2Pub.Value!.Status != ConfigurationStatus.Effective)
+        throw new InvalidOperationException($"TravelPolicy V2 发布失败：{travelV2Pub.Error}");
+
+    // 断言 D1 (okTravelDraft) 历史隔离
+    var d1TravelAfter = configDb.TravelRequests.AsNoTracking().Single(r => r.Id == okTravelDraft.Value!.Id);
+    if (d1TravelAfter.ConfigVersionNumber != 1 || d1TravelAfter.StandardHotelDailyLimit != 450m || d1TravelAfter.ConfigSnapshotJson!.Contains("\"hotelDailyLimit\": 550"))
+        throw new InvalidOperationException("TravelPolicy V2 发布后，D1 历史出差单快照被篡改，违反跨版本快照隔离原则。");
+
+    // D3 差旅单在 V2 下提交
+    var d3TravelDraft = travelService.CreateDraft(zhang, new SaveTravelRequest(
+        "V2差旅申请", 800m, [new TravelItineraryItem("上海", new DateOnly(2026, 12, 5), new DateOnly(2026, 12, 6), "高铁二等座", "客户复盘")], [], [], []));
+    var d3TravelSubmit = travelService.Submit(zhang, d3TravelDraft.Value!.Id);
+    if (!d3TravelSubmit.IsSuccess) throw new InvalidOperationException($"D3差旅单提交失败：{d3TravelSubmit.Error}");
+    var d3TravelRec = configDb.TravelRequests.AsNoTracking().Single(r => r.Id == d3TravelDraft.Value!.Id);
+    if (d3TravelRec.ConfigVersionNumber != 2 || d3TravelRec.StandardHotelDailyLimit != 550m || !d3TravelRec.ConfigSnapshotJson!.Contains("\"hotelDailyLimit\": 550"))
+        throw new InvalidOperationException("D3差旅单在 V2 下提交未正确关联 V2 快照。");
+
+    // D2 驳回重提回填 V2 快照
+    var d2TravelResubmit = travelService.Submit(zhang, d2TravelDraft.Value!.Id);
+    if (!d2TravelResubmit.IsSuccess) throw new InvalidOperationException($"D2差旅单驳回重提失败：{d2TravelResubmit.Error}");
+    var d2TravelAfter = configDb.TravelRequests.AsNoTracking().Single(r => r.Id == d2TravelDraft.Value!.Id);
+    if (d2TravelAfter.ConfigVersionNumber != 2 || d2TravelAfter.StandardHotelDailyLimit != 550m || !d2TravelAfter.ConfigSnapshotJson!.Contains("\"hotelDailyLimit\": 550"))
+        throw new InvalidOperationException("D2差旅单驳回重提后未自动回填最新生效的 V2 配置快照。");
+
+    // 11.5 Procurement (采购单)
+    var purchaseService = new PurchaseService(configData, configDb);
+    var d1PurDraft = purchaseService.CreateDraft(zhang, new SavePurchaseRequest(
+        "办公耗材采购V1", "日常办公", DateOnly.FromDateTime(DateTime.Today).AddDays(7), "京东企业购",
+        [new SavePurchaseItem("办公用品", "复印纸", "A4", 10, "箱", 120m, "月度补充")]));
+    if (!d1PurDraft.IsSuccess) throw new InvalidOperationException($"D1采购草稿创建失败：{d1PurDraft.Error}");
+    var d1PurSubmit = purchaseService.Submit(zhang, d1PurDraft.Value!.Id);
+    if (!d1PurSubmit.IsSuccess) throw new InvalidOperationException($"D1采购提交失败：{d1PurSubmit.Error}");
+    var d1PurRec = configDb.PurchaseRequests.AsNoTracking().Single(r => r.Id == d1PurDraft.Value!.Id);
+    if (d1PurRec.ConfigVersionNumber != 1) throw new InvalidOperationException("D1采购单未关联 V1 配置版本。");
+
+    var d2PurDraft = purchaseService.CreateDraft(zhang, new SavePurchaseRequest(
+        "显示器采购驳回重提", "开发办公", DateOnly.FromDateTime(DateTime.Today).AddDays(7), "戴尔企业店",
+        [new SavePurchaseItem("IT设备", "显示器", "27寸4K", 2, "台", 1500m, "外接屏")]));
+    var d2PurSubmit = purchaseService.Submit(zhang, d2PurDraft.Value!.Id);
+    if (!d2PurSubmit.IsSuccess) throw new InvalidOperationException($"D2采购提交失败：{d2PurSubmit.Error}");
+    var d2PurTask = d2PurSubmit.Value!.Tasks.First();
+    var d2PurReject = purchaseService.Reject(configData.GetEmployee(d2PurTask.AssigneeId), d2PurTask.Id, "预算超出需重新核算驳回");
+    if (!d2PurReject.IsSuccess) throw new InvalidOperationException($"D2采购驳回失败：{d2PurReject.Error}");
+
+    // 发布 ProcurementPolicy V2
+    var purV1 = configDb.BusinessConfigurations.Single(c => c.TenantId == IdentityDefaults.TenantId && c.Domain == ConfigurationDomains.Procurement && c.Code == "ProcurementPolicy" && c.Status == ConfigurationStatus.Effective);
+    var purV2Draft = configService.CreateNewVersion(configUser, purV1.Id);
+    var purPolicyCfg = JsonSerializer.Deserialize<ProcurementPolicyConfig>(purV1.ContentJson, BusinessConfigurationDefaults.JsonOptions)!;
+    purPolicyCfg.QuoteAttachmentThreshold = 8888m;
+    var purV2Json = JsonSerializer.Serialize(purPolicyCfg, BusinessConfigurationDefaults.JsonOptions);
+    var updatedPurV2 = configService.UpdateDraft(configUser, purV2Draft.Value!.Id, new UpdateBusinessConfigurationRequest(
+        purV2Draft.Value.Name, purV2Draft.Value.Description, DateTimeOffset.UtcNow, null, purV2Json, purV2Draft.Value.ConcurrencyVersion));
+    var purV2Pub = configService.Publish(configUser, updatedPurV2.Value!.Id, new PublishBusinessConfigurationRequest(DateTimeOffset.UtcNow, null, updatedPurV2.Value.ConcurrencyVersion));
+    if (!purV2Pub.IsSuccess || purV2Pub.Value!.Status != ConfigurationStatus.Effective)
+        throw new InvalidOperationException($"ProcurementPolicy V2 发布失败：{purV2Pub.Error}");
+
+    // 断言 D1 历史隔离
+    var d1PurAfter = configDb.PurchaseRequests.AsNoTracking().Single(r => r.Id == d1PurDraft.Value!.Id);
+    if (d1PurAfter.ConfigVersionNumber != 1 || d1PurAfter.ConfigSnapshotJson!.Contains("\"quoteAttachmentThreshold\": 8888"))
+        throw new InvalidOperationException("ProcurementPolicy V2 发布后，D1 历史采购单快照被篡改，违反跨版本快照隔离原则。");
+
+    // D3 采购单在 V2 下提交
+    var d3PurDraft = purchaseService.CreateDraft(zhang, new SavePurchaseRequest(
+        "V2标准采购申请", "设备升级", DateOnly.FromDateTime(DateTime.Today).AddDays(7), "联想自营",
+        [new SavePurchaseItem("IT设备", "开发主机", "i7", 1, "台", 5000m, "测试开发机")]));
+    var d3PurSubmit = purchaseService.Submit(zhang, d3PurDraft.Value!.Id);
+    if (!d3PurSubmit.IsSuccess) throw new InvalidOperationException($"D3采购单提交失败：{d3PurSubmit.Error}");
+    var d3PurRec = configDb.PurchaseRequests.AsNoTracking().Single(r => r.Id == d3PurDraft.Value!.Id);
+    if (d3PurRec.ConfigVersionNumber != 2 || !d3PurRec.ConfigSnapshotJson!.Contains("\"quoteAttachmentThreshold\": 8888"))
+        throw new InvalidOperationException("D3采购单在 V2 下提交未正确关联 V2 快照。");
+
+    // D2 驳回重提回填 V2 快照
+    var d2PurResubmit = purchaseService.Submit(zhang, d2PurDraft.Value!.Id);
+    if (!d2PurResubmit.IsSuccess) throw new InvalidOperationException($"D2采购单驳回重提失败：{d2PurResubmit.Error}");
+    var d2PurAfter = configDb.PurchaseRequests.AsNoTracking().Single(r => r.Id == d2PurDraft.Value!.Id);
+    if (d2PurAfter.ConfigVersionNumber != 2 || !d2PurAfter.ConfigSnapshotJson!.Contains("\"quoteAttachmentThreshold\": 8888"))
+        throw new InvalidOperationException("D2采购单驳回重提后未自动回填最新生效的 V2 配置快照。");
 }
 
 // -------------------------------------------------------------

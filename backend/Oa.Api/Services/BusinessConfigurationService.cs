@@ -147,7 +147,10 @@ public sealed class BusinessConfigurationService
     public ServiceResult<BusinessConfigurationView> CreateDraft(Employee actor, CreateBusinessConfigurationRequest request)
     {
         if (!data.HasPermission(actor, OaPermissions.BusinessConfigManage))
+        {
+            LogAudit(actor, "CONFIG_DRAFT_CREATE_FAILED", string.Empty, $"越权创建配置草稿被拒绝：缺少【{OaPermissions.BusinessConfigManage}】权限。");
             return ServiceResult<BusinessConfigurationView>.Failure("无权访问业务参数配置中心。", "AUTH_002");
+        }
 
         var domain = request.Domain.Trim();
         if (!ConfigurationDomains.All.Contains(domain))
@@ -163,10 +166,16 @@ public sealed class BusinessConfigurationService
 
         var normalizedJson = BusinessConfigurationValidator.ValidateAndNormalize(domain, request.ContentJson, data);
         if (!normalizedJson.IsSuccess)
+        {
+            LogAudit(actor, "CONFIG_DRAFT_CREATE_FAILED", string.Empty, $"创建配置草稿校验失败【{domain} / {code}】：{normalizedJson.Error}");
             return ServiceResult<BusinessConfigurationView>.Failure(normalizedJson.Error!, normalizedJson.Code!);
+        }
 
         if (request.EffectiveTo.HasValue && request.EffectiveTo.Value <= request.EffectiveFrom)
+        {
+            LogAudit(actor, "CONFIG_DRAFT_CREATE_FAILED", string.Empty, $"创建配置草稿失败【{domain} / {code}】：失效时间必须晚于生效时间。");
             return ServiceResult<BusinessConfigurationView>.Failure("失效时间必须晚于生效时间。", "CONFIG_001");
+        }
 
         using var lockLease = AcquireLock(domain, code);
 
@@ -210,17 +219,26 @@ public sealed class BusinessConfigurationService
     public ServiceResult<BusinessConfigurationView> UpdateDraft(Employee actor, Guid id, UpdateBusinessConfigurationRequest request)
     {
         if (!data.HasPermission(actor, OaPermissions.BusinessConfigManage))
+        {
+            LogAudit(actor, "CONFIG_DRAFT_UPDATE_FAILED", id.ToString(), $"越权更新配置草稿被拒绝：缺少【{OaPermissions.BusinessConfigManage}】权限。");
             return ServiceResult<BusinessConfigurationView>.Failure("无权访问业务参数配置中心。", "AUTH_002");
+        }
 
         var record = db.BusinessConfigurations.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null)
             return ServiceResult<BusinessConfigurationView>.Failure("配置不存在。", "DATA_001");
 
         if (record.Status != ConfigurationStatus.Draft)
+        {
+            LogAudit(actor, "CONFIG_DRAFT_UPDATE_FAILED", record.Id.ToString(), $"尝试更新非草稿状态配置【{record.Status}】被拒绝。");
             return ServiceResult<BusinessConfigurationView>.Failure("已发布或已停用的配置不能原地修改，请创建新版本。", "CONFIG_002");
+        }
 
         if (record.ConcurrencyVersion != request.ConcurrencyVersion)
+        {
+            LogAudit(actor, "CONFIG_DRAFT_UPDATE_FAILED", record.Id.ToString(), $"更新配置草稿并发版本冲突：客户端版本 {request.ConcurrencyVersion} 与当前数据库版本 {record.ConcurrencyVersion} 不匹配。");
             return ServiceResult<BusinessConfigurationView>.Failure("配置已被其他人修改，请刷新后重试。", "CONCURRENCY_001");
+        }
 
         var name = request.Name.Trim();
         if (string.IsNullOrWhiteSpace(name) || name.Length > 100)
@@ -228,10 +246,16 @@ public sealed class BusinessConfigurationService
 
         var normalizedJson = BusinessConfigurationValidator.ValidateAndNormalize(record.Domain, request.ContentJson, data);
         if (!normalizedJson.IsSuccess)
+        {
+            LogAudit(actor, "CONFIG_DRAFT_UPDATE_FAILED", record.Id.ToString(), $"更新配置草稿校验失败：{normalizedJson.Error}");
             return ServiceResult<BusinessConfigurationView>.Failure(normalizedJson.Error!, normalizedJson.Code!);
+        }
 
         if (request.EffectiveTo.HasValue && request.EffectiveTo.Value <= request.EffectiveFrom)
+        {
+            LogAudit(actor, "CONFIG_DRAFT_UPDATE_FAILED", record.Id.ToString(), "更新配置草稿失败：失效时间必须晚于生效时间。");
             return ServiceResult<BusinessConfigurationView>.Failure("失效时间必须晚于生效时间。", "CONFIG_001");
+        }
 
         var now = DateTimeOffset.UtcNow;
         record.Name = name;
@@ -255,11 +279,17 @@ public sealed class BusinessConfigurationService
     public ServiceResult<BusinessConfigurationView> CreateNewVersion(Employee actor, Guid sourceId)
     {
         if (!data.HasPermission(actor, OaPermissions.BusinessConfigManage))
+        {
+            LogAudit(actor, "CONFIG_VERSION_CREATE_FAILED", sourceId.ToString(), $"越权创建新配置版本被拒绝：缺少【{OaPermissions.BusinessConfigManage}】权限。");
             return ServiceResult<BusinessConfigurationView>.Failure("无权访问业务参数配置中心。", "AUTH_002");
+        }
 
         var source = db.BusinessConfigurations.AsNoTracking().SingleOrDefault(item => item.TenantId == TenantId && item.Id == sourceId);
         if (source is null)
+        {
+            LogAudit(actor, "CONFIG_VERSION_CREATE_FAILED", sourceId.ToString(), "创建新配置版本失败：源配置不存在。");
             return ServiceResult<BusinessConfigurationView>.Failure("源配置不存在。", "DATA_001");
+        }
 
         using var lockLease = AcquireLock(source.Domain, source.Code);
 
@@ -298,6 +328,7 @@ public sealed class BusinessConfigurationService
         }
         catch (DbUpdateException)
         {
+            LogAudit(actor, "CONFIG_VERSION_CREATE_FAILED", source.Id.ToString(), $"创建新配置版本失败【{source.Domain} / {source.Code}】：版本并发冲突。");
             return ServiceResult<BusinessConfigurationView>.Failure("版本并发冲突，请重试。", "CONCURRENCY_001");
         }
 
@@ -310,14 +341,23 @@ public sealed class BusinessConfigurationService
     public ServiceResult<BusinessConfigurationView> Publish(Employee actor, Guid id, PublishBusinessConfigurationRequest? request = null)
     {
         if (!data.HasPermission(actor, OaPermissions.BusinessConfigManage))
+        {
+            LogAudit(actor, "CONFIG_PUBLISH_FAILED", id.ToString(), $"越权发布配置被拒绝：缺少【{OaPermissions.BusinessConfigManage}】权限。");
             return ServiceResult<BusinessConfigurationView>.Failure("无权访问业务参数配置中心。", "AUTH_002");
+        }
 
         if (request?.ConcurrencyVersion == null || request.ConcurrencyVersion.Value <= 0)
+        {
+            LogAudit(actor, "CONFIG_PUBLISH_FAILED", id.ToString(), "发布配置失败：并发版本号为必填项且必须大于 0。");
             return ServiceResult<BusinessConfigurationView>.Failure("并发版本号为必填项且必须大于 0。", "CONCURRENCY_001");
+        }
 
         var record = db.BusinessConfigurations.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null)
+        {
+            LogAudit(actor, "CONFIG_PUBLISH_FAILED", id.ToString(), "发布配置失败：配置不存在。");
             return ServiceResult<BusinessConfigurationView>.Failure("配置不存在。", "DATA_001");
+        }
 
         // 状态机严格约束：只有草稿状态可发布
         if (record.Status != ConfigurationStatus.Draft)
@@ -328,7 +368,11 @@ public sealed class BusinessConfigurationService
         }
 
         if (record.ConcurrencyVersion != request.ConcurrencyVersion.Value)
+        {
+            LogAudit(actor, "CONFIG_PUBLISH_FAILED", record.Id.ToString(),
+                $"发布配置并发版本冲突：客户端版本 {request.ConcurrencyVersion.Value} 与当前数据库版本 {record.ConcurrencyVersion} 不匹配。");
             return ServiceResult<BusinessConfigurationView>.Failure("配置已被其他人修改，请刷新后重试。", "CONCURRENCY_001");
+        }
 
         var normalizedJson = BusinessConfigurationValidator.ValidateAndNormalize(record.Domain, record.ContentJson, data);
         if (!normalizedJson.IsSuccess)
@@ -342,18 +386,25 @@ public sealed class BusinessConfigurationService
         var effectiveTo = (request.EffectiveTo ?? record.EffectiveTo)?.ToUniversalTime();
 
         if (effectiveTo.HasValue && effectiveTo.Value <= effectiveFrom)
+        {
+            LogAudit(actor, "CONFIG_PUBLISH_FAILED", record.Id.ToString(), "发布配置失败：失效时间必须晚于生效时间。");
             return ServiceResult<BusinessConfigurationView>.Failure("失效时间必须晚于生效时间。", "CONFIG_001");
+        }
 
         using var lockLease = AcquireLock(record.Domain, record.Code);
 
         db.Entry(record).Reload();
         if (record.ConcurrencyVersion != request.ConcurrencyVersion.Value)
         {
+            LogAudit(actor, "CONFIG_PUBLISH_FAILED", record.Id.ToString(),
+                $"发布配置并发版本冲突：锁后重载版本 {record.ConcurrencyVersion} 与请求版本 {request.ConcurrencyVersion.Value} 不匹配。");
             return ServiceResult<BusinessConfigurationView>.Failure("配置已被其他人修改，请刷新后重试。", "CONCURRENCY_001");
         }
 
         if (record.Status != ConfigurationStatus.Draft)
         {
+            LogAudit(actor, "CONFIG_PUBLISH_FAILED", record.Id.ToString(),
+                $"发布配置失败：锁后配置已被变更为【{record.Status}】。");
             return ServiceResult<BusinessConfigurationView>.Failure("只有草稿状态的配置才可发布。", "CONFIG_002");
         }
 
@@ -380,6 +431,8 @@ public sealed class BusinessConfigurationService
                     // If other was published after this draft was authored, this draft is based on a stale state!
                     if (other.PublishedAt.HasValue && other.PublishedAt.Value >= record.CreatedAt)
                     {
+                        LogAudit(actor, "CONFIG_PUBLISH_FAILED", record.Id.ToString(),
+                            $"检测到并发发布冲突：配置【{record.Domain} / {record.Code}】在草稿编制后已有更新版本 v{other.Version} 发布生效。");
                         return ServiceResult<BusinessConfigurationView>.Failure(
                             $"检测到并发发布冲突：配置【{record.Domain} / {record.Code}】在草稿编制后已有更新版本 v{other.Version} 发布生效，请刷新后重试。",
                             "CONCURRENCY_001");
@@ -387,6 +440,8 @@ public sealed class BusinessConfigurationService
 
                     if (effectiveFrom <= other.EffectiveFrom)
                     {
+                        LogAudit(actor, "CONFIG_PUBLISH_FAILED", record.Id.ToString(),
+                            $"生效起始时间必须晚于已生效版本 v{other.Version} 的起始时间（{other.EffectiveFrom:yyyy-MM-dd HH:mm}）。");
                         return ServiceResult<BusinessConfigurationView>.Failure(
                             $"生效起始时间必须晚于已生效版本 v{other.Version} 的起始时间（{other.EffectiveFrom:yyyy-MM-dd HH:mm}）。",
                             "CONFIG_003");
@@ -404,6 +459,8 @@ public sealed class BusinessConfigurationService
                 }
                 else
                 {
+                    LogAudit(actor, "CONFIG_PUBLISH_FAILED", record.Id.ToString(),
+                        $"生效时间区间与已发布版本 v{other.Version}（{other.EffectiveFrom:yyyy-MM-dd HH:mm} 至 {(other.EffectiveTo.HasValue ? other.EffectiveTo.Value.ToString("yyyy-MM-dd HH:mm") : "永久")}）冲突。");
                     return ServiceResult<BusinessConfigurationView>.Failure(
                         $"生效时间区间与已发布版本 v{other.Version}（{other.EffectiveFrom:yyyy-MM-dd HH:mm} 至 {(other.EffectiveTo.HasValue ? other.EffectiveTo.Value.ToString("yyyy-MM-dd HH:mm") : "永久")}）冲突。",
                         "CONFIG_003");
@@ -448,35 +505,62 @@ public sealed class BusinessConfigurationService
     public ServiceResult<BusinessConfigurationView> Retire(Employee actor, Guid id, RetireBusinessConfigurationRequest? request = null)
     {
         if (!data.HasPermission(actor, OaPermissions.BusinessConfigManage))
+        {
+            LogAudit(actor, "CONFIG_RETIRE_FAILED", id.ToString(), $"越权停用配置被拒绝：缺少【{OaPermissions.BusinessConfigManage}】权限。");
             return ServiceResult<BusinessConfigurationView>.Failure("无权访问业务参数配置中心。", "AUTH_002");
+        }
 
         if (request?.ConcurrencyVersion == null || request.ConcurrencyVersion.Value <= 0)
+        {
+            LogAudit(actor, "CONFIG_RETIRE_FAILED", id.ToString(), "停用配置失败：并发版本号为必填项且必须大于 0。");
             return ServiceResult<BusinessConfigurationView>.Failure("并发版本号为必填项且必须大于 0。", "CONCURRENCY_001");
+        }
 
         var record = db.BusinessConfigurations.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null)
+        {
+            LogAudit(actor, "CONFIG_RETIRE_FAILED", id.ToString(), "停用配置失败：配置不存在。");
             return ServiceResult<BusinessConfigurationView>.Failure("配置不存在。", "DATA_001");
+        }
 
         // 状态机严格约束：草稿不能下线，Retired 不能重复下线
         if (record.Status == ConfigurationStatus.Draft)
+        {
+            LogAudit(actor, "CONFIG_RETIRE_FAILED", record.Id.ToString(), "停用配置失败：草稿状态的配置不能下线，请直接删除。");
             return ServiceResult<BusinessConfigurationView>.Failure("草稿状态的配置不能下线，请直接删除。", "CONFIG_002");
+        }
 
         if (record.Status == ConfigurationStatus.Retired)
+        {
+            LogAudit(actor, "CONFIG_RETIRE_FAILED", record.Id.ToString(), "停用配置失败：该配置版本已处于停用状态，不可重复下线。");
             return ServiceResult<BusinessConfigurationView>.Failure("该配置版本已处于停用状态，不可重复下线。", "CONFIG_002");
+        }
 
         if (record.Status != ConfigurationStatus.Effective && record.Status != ConfigurationStatus.Scheduled)
+        {
+            LogAudit(actor, "CONFIG_RETIRE_FAILED", record.Id.ToString(), $"停用配置失败：当前状态【{record.Status}】不允许下线。");
             return ServiceResult<BusinessConfigurationView>.Failure("当前状态不允许下线。", "CONFIG_002");
+        }
 
         if (record.ConcurrencyVersion != request.ConcurrencyVersion.Value)
+        {
+            LogAudit(actor, "CONFIG_RETIRE_FAILED", record.Id.ToString(), $"停用配置并发版本冲突：客户端版本 {request.ConcurrencyVersion.Value} 与当前版本 {record.ConcurrencyVersion} 不匹配。");
             return ServiceResult<BusinessConfigurationView>.Failure("配置已被其他人修改，请刷新后重试。", "CONCURRENCY_001");
+        }
 
         using var lockLease = AcquireLock(record.Domain, record.Code);
         db.Entry(record).Reload();
         if (record.ConcurrencyVersion != request.ConcurrencyVersion.Value)
+        {
+            LogAudit(actor, "CONFIG_RETIRE_FAILED", record.Id.ToString(), $"停用配置并发版本冲突：锁后版本 {record.ConcurrencyVersion} 与客户端版本 {request.ConcurrencyVersion.Value} 不匹配。");
             return ServiceResult<BusinessConfigurationView>.Failure("配置已被其他人修改，请刷新后重试。", "CONCURRENCY_001");
+        }
 
         if (record.Status != ConfigurationStatus.Effective && record.Status != ConfigurationStatus.Scheduled)
+        {
+            LogAudit(actor, "CONFIG_RETIRE_FAILED", record.Id.ToString(), $"停用配置失败：锁后状态【{record.Status}】不允许下线。");
             return ServiceResult<BusinessConfigurationView>.Failure("当前状态不允许下线。", "CONFIG_002");
+        }
 
         var now = DateTimeOffset.UtcNow;
         DateTimeOffset effectiveTo;
@@ -484,7 +568,10 @@ public sealed class BusinessConfigurationService
         {
             effectiveTo = request.EffectiveTo.Value.ToUniversalTime();
             if (effectiveTo < record.EffectiveFrom)
+            {
+                LogAudit(actor, "CONFIG_RETIRE_FAILED", record.Id.ToString(), "停用配置失败：下线失效时间不能早于生效起始时间。");
                 return ServiceResult<BusinessConfigurationView>.Failure("下线失效时间不能早于生效起始时间。", "CONFIG_001");
+            }
         }
         else
         {
@@ -509,18 +596,30 @@ public sealed class BusinessConfigurationService
     public ServiceResult<bool> Delete(Employee actor, Guid id)
     {
         if (!data.HasPermission(actor, OaPermissions.BusinessConfigManage))
+        {
+            LogAudit(actor, "CONFIG_DELETE_FAILED", id.ToString(), $"越权删除配置被拒绝：缺少【{OaPermissions.BusinessConfigManage}】权限。");
             return ServiceResult<bool>.Failure("无权访问业务参数配置中心。", "AUTH_002");
+        }
 
         var record = db.BusinessConfigurations.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null)
+        {
+            LogAudit(actor, "CONFIG_DELETE_FAILED", id.ToString(), "删除配置失败：配置不存在。");
             return ServiceResult<bool>.Failure("配置不存在。", "DATA_001");
+        }
 
         if (record.Status != ConfigurationStatus.Draft)
+        {
+            LogAudit(actor, "CONFIG_DELETE_FAILED", record.Id.ToString(), $"删除配置失败：只能删除草稿状态的配置，当前状态为【{record.Status}】。");
             return ServiceResult<bool>.Failure("只能删除草稿状态的配置。", "CONFIG_002");
+        }
 
         var refCount = CountReferences(id);
         if (refCount > 0)
+        {
+            LogAudit(actor, "CONFIG_DELETE_FAILED", record.Id.ToString(), $"删除配置失败：该配置版本已被业务单据引用（引用数：{refCount}），不可删除。");
             return ServiceResult<bool>.Failure("该配置版本已被业务单据引用，不可删除。", "CONFIG_004");
+        }
 
         db.BusinessConfigurations.Remove(record);
         db.SaveChanges();
