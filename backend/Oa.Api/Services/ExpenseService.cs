@@ -18,7 +18,42 @@ public sealed class ExpenseService
     private readonly TravelService? travelRequests;
     private readonly BudgetService? budgetService;
     private readonly List<ExpenseClaim> _claims;
-    private static readonly HashSet<string> AllowedCategories = ["交通", "住宿", "餐饮招待", "办公", "通讯", "培训", "其他"];
+
+    private (ExpensePolicyConfig Policy, BusinessConfigurationRecord? Record) ResolveExpensePolicy()
+    {
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Expense, "ExpensePolicy");
+        var policy = configRecord is not null
+            ? JsonSerializer.Deserialize<ExpensePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultExpensePolicy();
+        return (policy ?? BusinessConfigurationDefaults.CreateDefaultExpensePolicy(), configRecord);
+    }
+
+    private static ServiceResult<bool> ValidateItemsAgainstPolicy(IReadOnlyList<ExpenseItem> items, string? claimDescription, ExpensePolicyConfig policy)
+    {
+        foreach (var detail in items)
+        {
+            if (detail.Amount <= 0 || detail.Amount != decimal.Round(detail.Amount, 2))
+                return ServiceResult<bool>.Failure("费用类别或金额不合法。");
+
+            var catRule = policy.Categories.FirstOrDefault(c => c.Name.Equals(detail.Category, StringComparison.OrdinalIgnoreCase));
+            if (catRule is null)
+                return ServiceResult<bool>.Failure($"费用类别【{detail.Category}】已被系统停用或不存在，无法申请。", "EXP_005");
+            if (!catRule.IsEnabled)
+                return ServiceResult<bool>.Failure($"费用类别【{detail.Category}】已被系统停用，无法申请。", "EXP_005");
+
+            if (catRule.RequiresReceipt && (detail.Attachments is null || detail.Attachments.Count == 0))
+                return ServiceResult<bool>.Failure($"费用明细【{detail.Description}】属于【{detail.Category}】，必须上传发票凭证。", "EXP_002");
+
+            if (catRule.SingleLimit > 0 && detail.Amount > catRule.SingleLimit)
+            {
+                if (catRule.BlockWhenExceeded)
+                    return ServiceResult<bool>.Failure($"费用明细【{detail.Description}】金额超出单笔限额 {catRule.SingleLimit:N2} 元，禁止提交。", "EXP_006");
+                if (catRule.RequiresReasonWhenExceeded && string.IsNullOrWhiteSpace(claimDescription))
+                    return ServiceResult<bool>.Failure($"费用明细【{detail.Description}】超出单笔限额 {catRule.SingleLimit:N2} 元，必须填写说明原因。", "EXP_007");
+            }
+        }
+        return ServiceResult<bool>.Success(true);
+    }
 
     public ExpenseService(DemoData data, OaDbContext? db = null, NotificationService? notifications = null, FileService? files = null, IProcessRouter? processRouter = null, FlowInstanceService? flowInstances = null, FlowCopyService? copyRecipients = null, TravelService? travelRequests = null, BudgetService? budgetService = null)
     {
@@ -65,9 +100,10 @@ public sealed class ExpenseService
     {
         if (request.Items.Count == 0) return ServiceResult<ExpenseClaim>.Failure("至少需要一条费用明细。", "EXP_001");
         if (string.IsNullOrWhiteSpace(request.PayeeAccountName) || string.IsNullOrWhiteSpace(request.PayeeAccount)) return ServiceResult<ExpenseClaim>.Failure("请填写收款账户信息。");
-        if (request.Items.Any(item => item.Amount <= 0 || item.Amount != decimal.Round(item.Amount, 2) || !AllowedCategories.Contains(item.Category))) return ServiceResult<ExpenseClaim>.Failure("费用类别或金额不合法。");
-        if (request.Items.Any(item => item.Attachments is null || item.Attachments.Count == 0)) return ServiceResult<ExpenseClaim>.Failure("每条费用明细都需要合规票据或凭证。", "EXP_002");
-        if (files is not null && !files.AreOwnedBy(actor, request.Items.SelectMany(item => item.Attachments!))) return ServiceResult<ExpenseClaim>.Failure("附件不存在或不属于当前用户。", "FILE_005");
+        var (policy, configRecord) = ResolveExpensePolicy();
+        var validation = ValidateItemsAgainstPolicy(request.Items, request.Description, policy);
+        if (!validation.IsSuccess) return ServiceResult<ExpenseClaim>.Failure(validation.Error!, validation.Code!);
+        if (files is not null && !files.AreOwnedBy(actor, request.Items.SelectMany(item => item.Attachments ?? []))) return ServiceResult<ExpenseClaim>.Failure("附件不存在或不属于当前用户。", "FILE_005");
         var copies = copyRecipients.Validate(actor, request.CopyRecipientIds);
         if (!copies.IsSuccess) return ServiceResult<ExpenseClaim>.Failure(copies.Error!, copies.Code!);
         if (request.Items.Any(item => item.ExpenseDate > DateOnly.FromDateTime(DateTime.Today) || item.ExpenseDate < DateOnly.FromDateTime(DateTime.Today).AddDays(-180))) return ServiceResult<ExpenseClaim>.Failure("费用日期超出允许范围。", "EXP_004");
@@ -75,7 +111,6 @@ public sealed class ExpenseService
         if (!travel.IsSuccess) return ServiceResult<ExpenseClaim>.Failure(travel.Error!, travel.Code!);
 
         var total = request.Items.Sum(item => item.Amount);
-        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Expense, "ExpensePolicy");
         var item = new ExpenseClaim
         {
             Number = $"BX-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}", ApplicantId = actor.Id, ApplicantName = actor.Name, DepartmentName = actor.DepartmentName,
@@ -161,31 +196,9 @@ public sealed class ExpenseService
             }
         }
 
-        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Expense, "ExpensePolicy");
-        var policy = configRecord is not null
-            ? JsonSerializer.Deserialize<ExpensePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultExpensePolicy();
-
-        if (policy is not null)
-        {
-            foreach (var detail in item.Items)
-            {
-                var catRule = policy.Categories.FirstOrDefault(c => c.Name.Equals(detail.Category, StringComparison.OrdinalIgnoreCase));
-                if (catRule is not null && !catRule.IsEnabled)
-                    return ServiceResult<ExpenseClaim>.Failure($"费用类别【{detail.Category}】已被系统停用，无法提交申请。", "EXP_005");
-
-                if (catRule is not null && catRule.RequiresReceipt && (detail.Attachments is null || detail.Attachments.Count == 0))
-                    return ServiceResult<ExpenseClaim>.Failure($"费用明细【{detail.Description}】属于【{detail.Category}】，必须上传发票凭证。", "EXP_002");
-
-                if (catRule is not null && catRule.SingleLimit > 0 && detail.Amount > catRule.SingleLimit)
-                {
-                    if (catRule.BlockWhenExceeded)
-                        return ServiceResult<ExpenseClaim>.Failure($"费用明细【{detail.Description}】金额超出单笔限额 {catRule.SingleLimit:N2} 元，禁止提交。", "EXP_006");
-                    if (catRule.RequiresReasonWhenExceeded && string.IsNullOrWhiteSpace(item.Description))
-                        return ServiceResult<ExpenseClaim>.Failure($"费用明细【{detail.Description}】超出单笔限额 {catRule.SingleLimit:N2} 元，必须填写说明原因。", "EXP_007");
-                }
-            }
-        }
+        var (policy, configRecord) = ResolveExpensePolicy();
+        var itemValidation = ValidateItemsAgainstPolicy(item.Items, item.Description, policy);
+        if (!itemValidation.IsSuccess) return ServiceResult<ExpenseClaim>.Failure(itemValidation.Error!, itemValidation.Code!);
 
         // 预算额度预占检查
         if (budgetService is not null)
@@ -233,9 +246,10 @@ public sealed class ExpenseService
         if (original.Version != expectedVersion) return ServiceResult<ExpenseClaim>.Failure("单据已被更新，请刷新后重试。", "CONCURRENCY_001");
         if (request.Items.Count == 0) return ServiceResult<ExpenseClaim>.Failure("至少需要一条费用明细。", "EXP_001");
         if (string.IsNullOrWhiteSpace(request.PayeeAccountName) || string.IsNullOrWhiteSpace(request.PayeeAccount)) return ServiceResult<ExpenseClaim>.Failure("请填写收款账户信息。");
-        if (request.Items.Any(item => item.Amount <= 0 || item.Amount != decimal.Round(item.Amount, 2) || !AllowedCategories.Contains(item.Category))) return ServiceResult<ExpenseClaim>.Failure("费用类别或金额不合法。");
-        if (request.Items.Any(item => item.Attachments is null || item.Attachments.Count == 0)) return ServiceResult<ExpenseClaim>.Failure("每条费用明细都需要合规票据或凭证。", "EXP_002");
-        if (files is not null && !files.AreOwnedBy(actor, request.Items.SelectMany(item => item.Attachments!))) return ServiceResult<ExpenseClaim>.Failure("附件不存在或不属于当前用户。", "FILE_005");
+        var (policy, _) = ResolveExpensePolicy();
+        var validation = ValidateItemsAgainstPolicy(request.Items, request.Description, policy);
+        if (!validation.IsSuccess) return ServiceResult<ExpenseClaim>.Failure(validation.Error!, validation.Code!);
+        if (files is not null && !files.AreOwnedBy(actor, request.Items.SelectMany(item => item.Attachments ?? []))) return ServiceResult<ExpenseClaim>.Failure("附件不存在或不属于当前用户。", "FILE_005");
         var copies = copyRecipients.Validate(actor, request.CopyRecipientIds);
         if (!copies.IsSuccess) return ServiceResult<ExpenseClaim>.Failure(copies.Error!, copies.Code!);
         if (request.Items.Any(item => item.ExpenseDate > DateOnly.FromDateTime(DateTime.Today) || item.ExpenseDate < DateOnly.FromDateTime(DateTime.Today).AddDays(-180))) return ServiceResult<ExpenseClaim>.Failure("费用日期超出允许范围。", "EXP_004");

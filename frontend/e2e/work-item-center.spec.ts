@@ -177,3 +177,29 @@ test('管理员可在业务参数配置中心查看规则、切换UI与JSON快�
   await expect(page.getByRole('dialog')).toHaveCount(0)
 })
 
+test('普通员工在导航侧边栏不显示业务参数配置中心入口', async ({ page }) => {
+  await loginUi(page, 'u-zhang')
+  await expect(page.getByRole('button', { name: /业务参数配置/ })).toHaveCount(0)
+})
+
+test('在 390px 移动视口下业务参数配置中心不产生整页横向滚动', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await loginUi(page, 'u-admin')
+  await page.goto('/#/business-configurations')
+  await expect(page.getByRole('heading', { name: '业务参数配置中心' })).toBeVisible()
+
+  const hasPageOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)
+  expect(hasPageOverflow).toBeFalsy()
+
+  const firstRow = page.locator('tbody tr').first()
+  await firstRow.getByRole('button', { name: '详情' }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+
+  const hasDialogPageOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)
+  expect(hasDialogPageOverflow).toBeFalsy()
+
+  await page.getByRole('dialog').getByLabel('关闭').click()
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+})
+
+

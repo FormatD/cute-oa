@@ -19,6 +19,7 @@ public sealed class LeaveService
     private readonly FlowCopyService copyRecipients;
     private readonly List<LeaveRequest> _requests;
     private readonly Dictionary<(string UserId, LeaveType Type, int Year), LeaveBalance> _balances = [];
+    private readonly List<CompTimeGrantRecord> _compTimeGrants;
 
     public LeaveService(DemoData data, OaDbContext? db = null, IWorkCalendar? calendar = null, NotificationService? notifications = null, FileService? files = null, IProcessRouter? processRouter = null, FlowInstanceService? flowInstances = null, FlowCopyService? copyRecipients = null)
     {
@@ -31,6 +32,7 @@ public sealed class LeaveService
         this.flowInstances = flowInstances ?? new FlowInstanceService(db);
         this.copyRecipients = copyRecipients ?? new FlowCopyService(data, db);
         _requests = db is null ? [] : LoadRequests(db, this.flowInstances, this.copyRecipients);
+        _compTimeGrants = db is null ? [] : db.CompTimeGrants.AsNoTracking().Where(x => x.TenantId == TenantId).ToList();
     }
 
     public IReadOnlyList<LeaveRequest> List(Employee actor, DocumentListQuery? query = null) => _requests
@@ -85,6 +87,30 @@ public sealed class LeaveService
             var updated = current with { Entitled = entitled, Adjustment = request.Adjustment };
             _balances[key] = updated;
             PersistBalance(subject.Id, request.Type, request.Year);
+            if (request.Type == LeaveType.CompTime && request.Adjustment > 0)
+            {
+                var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Leave, "LeavePolicy");
+                var policy = configRecord is not null
+                    ? JsonSerializer.Deserialize<LeavePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+                    : BusinessConfigurationDefaults.CreateDefaultLeavePolicy();
+                var validityDays = policy?.CompTimeValidityDays > 0 ? policy.CompTimeValidityDays : 90;
+                var grant = new CompTimeGrantRecord
+                {
+                    TenantId = TenantId,
+                    UserId = subject.Id,
+                    GrantedDate = BusinessTime.ChinaToday(),
+                    Days = request.Adjustment,
+                    UsedDays = 0,
+                    FrozenDays = 0,
+                    ExpiredAt = BusinessTime.ChinaToday().AddDays(validityDays),
+                    Reason = reason
+                };
+                _compTimeGrants.Add(grant);
+                if (db is not null)
+                {
+                    db.CompTimeGrants.Add(grant);
+                }
+            }
             var saved = _balances[key];
             if (db is not null)
             {
@@ -190,14 +216,37 @@ public sealed class LeaveService
 
         int? balanceYear = null;
         LeaveBalance? balanceToFreeze = null;
+        LeaveBalance? crossYearBalanceToFreeze = null;
+        decimal crossYearDays1 = 0m;
+        decimal crossYearDays2 = 0m;
+        var isCrossYear = item.StartDate.Year != item.EndDate.Year;
+
+        if (isCrossYear && policy?.AllowCrossYear != true)
+        {
+            return ServiceResult<LeaveRequest>.Failure("当前请假政策禁止跨自然年度申请，请按年度拆分申请。", "LEAVE_004");
+        }
+
         if (item.Type is LeaveType.Annual or LeaveType.CompTime)
         {
-            if (item.StartDate.Year != item.EndDate.Year)
-                return ServiceResult<LeaveRequest>.Failure("年假和调休不能跨自然年度申请，请按年度拆分。", "LEAVE_004");
-            balanceYear = item.StartDate.Year;
-            balanceToFreeze = Balance(actor, item.Type, balanceYear.Value);
-            if (balanceToFreeze.Available < item.Days)
-                return ServiceResult<LeaveRequest>.Failure("假期余额不足。", "LEAVE_001");
+            if (isCrossYear)
+            {
+                var y1 = item.StartDate.Year;
+                var y2 = item.EndDate.Year;
+                crossYearDays1 = CalculateWorkingDays(item.StartDate, item.StartPeriod, new DateOnly(y1, 12, 31), LeavePeriod.FullDay, calendar);
+                crossYearDays2 = CalculateWorkingDays(new DateOnly(y2, 1, 1), LeavePeriod.FullDay, item.EndDate, item.EndPeriod, calendar);
+                balanceToFreeze = Balance(actor, item.Type, y1);
+                crossYearBalanceToFreeze = Balance(actor, item.Type, y2);
+                if (balanceToFreeze.Available < crossYearDays1 || crossYearBalanceToFreeze.Available < crossYearDays2)
+                    return ServiceResult<LeaveRequest>.Failure("跨年度假期余额不足，请检查各年度额度。", "LEAVE_001");
+                balanceYear = y1;
+            }
+            else
+            {
+                balanceYear = item.StartDate.Year;
+                balanceToFreeze = Balance(actor, item.Type, balanceYear.Value);
+                if (balanceToFreeze.Available < item.Days)
+                    return ServiceResult<LeaveRequest>.Failure("假期余额不足。", "LEAVE_001");
+            }
         }
 
         var result = ExecuteMutation(() =>
@@ -206,7 +255,19 @@ public sealed class LeaveService
             item.Version++;
             item.BalanceYear = balanceYear;
             if (balanceYear.HasValue)
-                _balances[(actor.Id, item.Type, balanceYear.Value)] = balanceToFreeze! with { Frozen = balanceToFreeze.Frozen + item.Days };
+            {
+                if (isCrossYear)
+                {
+                    var y1 = item.StartDate.Year;
+                    var y2 = item.EndDate.Year;
+                    _balances[(actor.Id, item.Type, y1)] = balanceToFreeze! with { Frozen = balanceToFreeze.Frozen + crossYearDays1 };
+                    _balances[(actor.Id, item.Type, y2)] = crossYearBalanceToFreeze! with { Frozen = crossYearBalanceToFreeze.Frozen + crossYearDays2 };
+                }
+                else
+                {
+                    _balances[(actor.Id, item.Type, balanceYear.Value)] = balanceToFreeze! with { Frozen = balanceToFreeze.Frozen + item.Days };
+                }
+            }
             item.Status = LeaveStatus.Approving;
             item.Tasks.Clear();
             item.ProcessDefinitionId = route.Value!.DefinitionId;
@@ -225,7 +286,11 @@ public sealed class LeaveService
                 item.Tasks.Add(new FlowTask { LeaveRequestId = item.Id, FlowInstanceId = instance.Id, AssigneeId = resolvedApprover.Assignee.Id, AssigneeName = resolvedApprover.Assignee.Name, OriginalAssigneeId = resolvedApprover.DelegationId is null ? null : resolvedApprover.OriginalApprover.Id, OriginalAssigneeName = resolvedApprover.DelegationId is null ? null : resolvedApprover.OriginalApprover.Name, DelegationId = resolvedApprover.DelegationId, Sequence = sequence });
             Persist(item, expectedVersion);
             flowInstances.RegisterTasks(instance, "Leave", item.Tasks.Select(task => new ResolvedFlowTask(task.Id, task.Sequence, route.Value.Approvers[task.Sequence - 1])).ToList());
-            if (balanceYear.HasValue) PersistBalance(actor.Id, item.Type, balanceYear.Value);
+            if (balanceYear.HasValue)
+            {
+                PersistBalance(actor.Id, item.Type, balanceYear.Value);
+                if (isCrossYear) PersistBalance(actor.Id, item.Type, item.EndDate.Year);
+            }
             if (item.Tasks.OrderBy(task => task.Sequence).FirstOrDefault() is { } firstTask)
                 notifications?.Enqueue(firstTask.AssigneeId, "TODO_CREATED", "新增请假审批待办", $"{item.ApplicantName} 提交了 {item.Number}", "LeaveRequest", item.Id);
             Audit(actor, "LEAVE_SUBMITTED", item, "提交请假审批");
@@ -308,7 +373,10 @@ public sealed class LeaveService
             }
             Persist(item, expectedVersion);
             if (item.Status == LeaveStatus.Completed && item.Type is LeaveType.Annual or LeaveType.CompTime)
+            {
                 PersistBalance(item.ApplicantId, item.Type, item.BalanceYear ?? item.StartDate.Year);
+                if (item.StartDate.Year != item.EndDate.Year) PersistBalance(item.ApplicantId, item.Type, item.EndDate.Year);
+            }
             activatedCopies = item.Status == LeaveStatus.Completed ? copyRecipients.Activate("Leave", item.Id, item.Status.ToString()) : [];
             if (item.Status == LeaveStatus.Completed)
             {
@@ -346,7 +414,10 @@ public sealed class LeaveService
             ReleaseFrozen(data.GetEmployee(item.ApplicantId), item);
             Persist(item, expectedVersion);
             if (item.Type is LeaveType.Annual or LeaveType.CompTime)
+            {
                 PersistBalance(item.ApplicantId, item.Type, item.BalanceYear ?? item.StartDate.Year);
+                if (item.StartDate.Year != item.EndDate.Year) PersistBalance(item.ApplicantId, item.Type, item.EndDate.Year);
+            }
             notifications?.Enqueue(item.ApplicantId, "LEAVE_REJECTED", "请假申请已驳回", $"{item.Number} 已被驳回：{comment.Trim()}", "LeaveRequest", item.Id);
             Audit(actor, "LEAVE_REJECTED", item, comment.Trim());
             return ServiceResult<LeaveRequest>.Success(item);
@@ -401,7 +472,10 @@ public sealed class LeaveService
             ReleaseFrozen(actor, item);
             Persist(item, expectedVersion);
             if (item.Type is LeaveType.Annual or LeaveType.CompTime)
+            {
                 PersistBalance(item.ApplicantId, item.Type, item.BalanceYear ?? item.StartDate.Year);
+                if (item.StartDate.Year != item.EndDate.Year) PersistBalance(item.ApplicantId, item.Type, item.EndDate.Year);
+            }
             activatedCopies = copyRecipients.Activate("Leave", item.Id, item.Status.ToString());
             foreach (var pendingTask in item.Tasks.Where(candidate => candidate.AssigneeId != actor.Id)) notifications?.Enqueue(pendingTask.AssigneeId, "LEAVE_WITHDRAWN", "请假申请已撤回", $"{item.Number} 已被申请人撤回", "LeaveRequest", item.Id);
             foreach (var recipient in activatedCopies) notifications?.Enqueue(recipient.Id, "FLOW_COPY", "请假抄送事项已撤回", $"{item.ApplicantName} 的 {item.Number} 已撤回", "LeaveRequest", item.Id);
@@ -424,19 +498,47 @@ public sealed class LeaveService
     private void ReleaseFrozen(Employee actor, LeaveRequest item)
     {
         if (item.Type is not (LeaveType.Annual or LeaveType.CompTime)) return;
-        var year = item.BalanceYear ?? item.StartDate.Year;
-        var key = (actor.Id, item.Type, year);
-        var balance = Balance(actor, item.Type, year);
-        _balances[key] = balance with { Frozen = Math.Max(0, balance.Frozen - item.Days) };
+        if (item.StartDate.Year != item.EndDate.Year)
+        {
+            var y1 = item.StartDate.Year;
+            var y2 = item.EndDate.Year;
+            var daysY1 = CalculateWorkingDays(item.StartDate, item.StartPeriod, new DateOnly(y1, 12, 31), LeavePeriod.FullDay, calendar);
+            var daysY2 = CalculateWorkingDays(new DateOnly(y2, 1, 1), LeavePeriod.FullDay, item.EndDate, item.EndPeriod, calendar);
+            var b1 = Balance(actor, item.Type, y1);
+            var b2 = Balance(actor, item.Type, y2);
+            _balances[(actor.Id, item.Type, y1)] = b1 with { Frozen = Math.Max(0, b1.Frozen - daysY1) };
+            _balances[(actor.Id, item.Type, y2)] = b2 with { Frozen = Math.Max(0, b2.Frozen - daysY2) };
+        }
+        else
+        {
+            var year = item.BalanceYear ?? item.StartDate.Year;
+            var key = (actor.Id, item.Type, year);
+            var balance = Balance(actor, item.Type, year);
+            _balances[key] = balance with { Frozen = Math.Max(0, balance.Frozen - item.Days) };
+        }
     }
 
     private void ReleaseFrozenToUsed(Employee actor, LeaveRequest item)
     {
         if (item.Type is not (LeaveType.Annual or LeaveType.CompTime)) return;
-        var year = item.BalanceYear ?? item.StartDate.Year;
-        var key = (actor.Id, item.Type, year);
-        var balance = Balance(actor, item.Type, year);
-        _balances[key] = balance with { Frozen = Math.Max(0, balance.Frozen - item.Days), Used = balance.Used + item.Days };
+        if (item.StartDate.Year != item.EndDate.Year)
+        {
+            var y1 = item.StartDate.Year;
+            var y2 = item.EndDate.Year;
+            var daysY1 = CalculateWorkingDays(item.StartDate, item.StartPeriod, new DateOnly(y1, 12, 31), LeavePeriod.FullDay, calendar);
+            var daysY2 = CalculateWorkingDays(new DateOnly(y2, 1, 1), LeavePeriod.FullDay, item.EndDate, item.EndPeriod, calendar);
+            var b1 = Balance(actor, item.Type, y1);
+            var b2 = Balance(actor, item.Type, y2);
+            _balances[(actor.Id, item.Type, y1)] = b1 with { Frozen = Math.Max(0, b1.Frozen - daysY1), Used = b1.Used + daysY1 };
+            _balances[(actor.Id, item.Type, y2)] = b2 with { Frozen = Math.Max(0, b2.Frozen - daysY2), Used = b2.Used + daysY2 };
+        }
+        else
+        {
+            var year = item.BalanceYear ?? item.StartDate.Year;
+            var key = (actor.Id, item.Type, year);
+            var balance = Balance(actor, item.Type, year);
+            _balances[key] = balance with { Frozen = Math.Max(0, balance.Frozen - item.Days), Used = balance.Used + item.Days };
+        }
     }
 
     private LeaveBalance Balance(Employee employee, LeaveType type, int year)
@@ -454,12 +556,37 @@ public sealed class LeaveService
     {
         var today = BusinessTime.ChinaToday();
         var asOf = year == today.Year ? today : new DateOnly(year, 12, 31);
-        var profile = db?.PersonnelProfiles.AsNoTracking().SingleOrDefault(item => item.TenantId == TenantId && item.UserId == employee.Id);
-        var statutory = type == LeaveType.Annual
-            ? AnnualLeavePolicy.Calculate(asOf, profile?.CumulativeWorkStartDate, employee.CumulativeWorkYears, profile?.HireDate)
-            : 0m;
-        if (type == LeaveType.Annual)
+        var record = db?.LeaveBalances.AsNoTracking().SingleOrDefault(x => x.TenantId == TenantId && x.UserId == employee.Id && x.LeaveType == (int)type && x.Year == year);
+
+        if (type == LeaveType.CompTime)
         {
+            var userGrants = _compTimeGrants.Where(g => g.UserId == employee.Id && g.GrantedDate.Year == year).ToList();
+            if (userGrants.Count > 0)
+            {
+                var validGrants = userGrants.Where(g => g.ExpiredAt >= today).ToList();
+                var unexpiredGranted = validGrants.Sum(g => g.Days);
+                var frozen = record?.Frozen ?? 0m;
+                var used = record?.Used ?? 0m;
+                var version = record?.Version ?? 0;
+                return new LeaveBalance(unexpiredGranted, frozen, used, year, 0m, unexpiredGranted, version);
+            }
+            if (record is not null)
+            {
+                return new LeaveBalance(record.StatutoryEntitled + record.Adjustment, record.Frozen, record.Used, year, record.StatutoryEntitled, record.Adjustment, record.Version);
+            }
+            return new LeaveBalance(0m, 0m, 0m, year, 0m, 0m);
+        }
+
+        // 年假：若已有固定记录则保持其 StatutoryEntitled，避免年中企业规则变化篡改已生成额度
+        decimal statutory;
+        if (record is not null && record.StatutoryEntitled > 0)
+        {
+            statutory = record.StatutoryEntitled;
+        }
+        else
+        {
+            var profile = db?.PersonnelProfiles.AsNoTracking().SingleOrDefault(item => item.TenantId == TenantId && item.UserId == employee.Id);
+            statutory = AnnualLeavePolicy.Calculate(asOf, profile?.CumulativeWorkStartDate, employee.CumulativeWorkYears, profile?.HireDate);
             var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Leave, "LeavePolicy");
             if (configRecord is not null)
             {
@@ -472,12 +599,12 @@ public sealed class LeaveService
                         < 20 => bonus.Tier2BonusDays,
                         _ => bonus.Tier3BonusDays
                     };
-                    statutory += bonusDays;
+                    statutory += Math.Max(0, bonusDays); // 企业上浮只能增加不能降低
                 }
             }
         }
+
         if (db is null) return new LeaveBalance(statutory, 0m, 0m, year, statutory, 0m);
-        var record = db.LeaveBalances.AsNoTracking().SingleOrDefault(x => x.TenantId == TenantId && x.UserId == employee.Id && x.LeaveType == (int)type && x.Year == year);
         return record is null
             ? new LeaveBalance(statutory, 0m, 0m, year, statutory, 0m)
             : new LeaveBalance(statutory + record.Adjustment, record.Frozen, record.Used, year, statutory, record.Adjustment, record.Version);
@@ -587,6 +714,8 @@ public sealed class LeaveService
         _requests.Clear();
         _requests.AddRange(LoadRequests(db, flowInstances, copyRecipients));
         _balances.Clear();
+        _compTimeGrants.Clear();
+        _compTimeGrants.AddRange(db.CompTimeGrants.AsNoTracking().Where(g => g.TenantId == TenantId).ToList());
     }
 
     private static bool IsLeaveBalanceUniqueConflict(DbUpdateException exception) =>

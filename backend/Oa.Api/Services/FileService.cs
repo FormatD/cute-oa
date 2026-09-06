@@ -4,7 +4,7 @@ using System.Text;
 
 namespace Oa.Api.Services;
 
-public sealed record FileDescriptor(Guid Id, string Name, string ContentType, long Size, DateTimeOffset CreatedAt);
+public sealed record FileDescriptor(Guid Id, string Name, string ContentType, long Size, DateTimeOffset CreatedAt, string AttachmentType = "OTHER", string? AttachmentTypeName = null);
 
 public sealed class FileService
 {
@@ -33,7 +33,7 @@ public sealed class FileService
             : Path.GetFullPath(configuredRoot, environment.ContentRootPath);
     }
 
-    public async Task<ServiceResult<FileDescriptor>> UploadAsync(Employee actor, IFormFile file, CancellationToken cancellationToken = default)
+    public async Task<ServiceResult<FileDescriptor>> UploadAsync(Employee actor, IFormFile file, string? attachmentType = null, CancellationToken cancellationToken = default)
     {
         var name = Path.GetFileName(file.FileName ?? string.Empty).Trim();
         var extension = Path.GetExtension(name);
@@ -41,6 +41,9 @@ public sealed class FileService
             return ServiceResult<FileDescriptor>.Failure("仅允许上传 PDF、图片、Office 文档。", "FILE_001");
         if (file.Length <= 0 || file.Length > MaxFileSize)
             return ServiceResult<FileDescriptor>.Failure("文件大小必须在 1 字节至 20MB 之间。", "FILE_002");
+
+        var typeValidation = ValidateAttachmentType(attachmentType);
+        if (!typeValidation.IsSuccess) return ServiceResult<FileDescriptor>.Failure(typeValidation.Error!, typeValidation.Code!);
 
         Directory.CreateDirectory(storageRoot);
         var id = Guid.NewGuid();
@@ -79,7 +82,7 @@ public sealed class FileService
 
             File.Move(quarantine, destination);
 
-            var record = new FileRecord { Id = id, TenantId = TenantId, OwnerId = actor.Id, OriginalName = name, StoredName = storedName, ContentType = contentType, Size = file.Length };
+            var record = new FileRecord { Id = id, TenantId = TenantId, OwnerId = actor.Id, OriginalName = name, StoredName = storedName, ContentType = contentType, AttachmentType = typeValidation.Value!.Code, Size = file.Length };
             db.Files.Add(record);
             Audit(actor, "FILE_UPLOADED", id, $"上传文件 {name}");
             await db.SaveChangesAsync(cancellationToken);
@@ -162,5 +165,31 @@ public sealed class FileService
     public Task<bool> IsScanningReadyAsync(CancellationToken cancellationToken = default) => malwareScanner.IsReadyAsync(cancellationToken);
 
     private void Audit(Employee actor, string action, Guid fileId, string summary) => db.AuditLogs.Add(new AuditRecord { TenantId = TenantId, ActorId = actor.Id, Action = action, ResourceType = "File", ResourceId = fileId.ToString(), Summary = summary });
-    private static FileDescriptor ToDescriptor(FileRecord record) => new(record.Id, record.OriginalName, record.ContentType, record.Size, record.CreatedAt);
+
+    private ServiceResult<DictionaryItemConfig> ValidateAttachmentType(string? typeCode)
+    {
+        var code = string.IsNullOrWhiteSpace(typeCode) ? "OTHER" : typeCode.Trim();
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Dictionary, "AttachmentType");
+        var dict = configRecord is not null
+            ? System.Text.Json.JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultAttachmentTypeDict();
+        var item = dict?.Items.FirstOrDefault(i => i.Code.Equals(code, StringComparison.OrdinalIgnoreCase));
+        if (item is null)
+            return ServiceResult<DictionaryItemConfig>.Failure($"附件类型【{code}】不存在。", "VALIDATION_001");
+        if (!item.IsEnabled)
+            return ServiceResult<DictionaryItemConfig>.Failure($"附件类型【{item.Name}】已停用，无法使用。", "VALIDATION_001");
+        return ServiceResult<DictionaryItemConfig>.Success(item);
+    }
+
+    private string ResolveAttachmentTypeName(string code)
+    {
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Dictionary, "AttachmentType");
+        var dict = configRecord is not null
+            ? System.Text.Json.JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultAttachmentTypeDict();
+        var item = dict?.Items.FirstOrDefault(i => i.Code.Equals(code, StringComparison.OrdinalIgnoreCase));
+        return item?.Name ?? code;
+    }
+
+    private FileDescriptor ToDescriptor(FileRecord record) => new(record.Id, record.OriginalName, record.ContentType, record.Size, record.CreatedAt, record.AttachmentType, ResolveAttachmentTypeName(record.AttachmentType));
 }

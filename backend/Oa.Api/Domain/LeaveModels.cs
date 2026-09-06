@@ -1,6 +1,6 @@
 namespace Oa.Api.Domain;
 
-public enum LeaveType { Annual, Personal, Sick, CompTime }
+public enum LeaveType { Annual, Personal, Sick, CompTime, Marriage, Maternity, Paternity, Bereavement }
 public enum LeavePeriod { FullDay, Morning, Afternoon }
 public enum LeaveStatus { Draft, Approving, Rejected, Completed, Withdrawn }
 public enum FlowTaskStatus { Pending, Approved, Rejected, Cancelled }

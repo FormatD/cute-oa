@@ -248,9 +248,25 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
         return ServiceResult<GenerateContractDemoResult>.Success(new(created, skipped));
     }
 
+    private ServiceResult<DictionaryItemConfig> ValidateContractType(string? contractType)
+    {
+        var code = contractType?.Trim() ?? string.Empty;
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Dictionary, "ContractType");
+        var dict = configRecord is not null
+            ? JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultContractTypeDict();
+        var item = dict?.Items.FirstOrDefault(i => i.Code.Equals(code, StringComparison.OrdinalIgnoreCase));
+        if (item is null)
+            return ServiceResult<DictionaryItemConfig>.Failure("合同类型不合法。", "CONTRACT_001");
+        if (!item.IsEnabled)
+            return ServiceResult<DictionaryItemConfig>.Failure($"合同类型【{item.Name}】已停用，无法使用。", "CONTRACT_001");
+        return ServiceResult<DictionaryItemConfig>.Success(item);
+    }
+
     private ServiceResult<bool> Validate(Employee actor, SaveEmploymentContractRequest request, Guid? currentId, bool activating)
     {
-        if (!EmploymentContractTypes.All.Contains(request.ContractType)) return ServiceResult<bool>.Failure("合同类型不合法。", "CONTRACT_001");
+        var typeValidation = ValidateContractType(request.ContractType);
+        if (!typeValidation.IsSuccess) return ServiceResult<bool>.Failure(typeValidation.Error!, typeValidation.Code!);
         var location = request.WorkLocation?.Trim() ?? string.Empty; var position = request.PositionName?.Trim() ?? string.Empty; var reason = request.ChangeReason?.Trim() ?? string.Empty;
         if (location.Length is < 1 or > 100 || position.Length is < 1 or > 100 || reason.Length is < 5 or > 500 || request.Notes?.Trim().Length > 1000)
             return ServiceResult<bool>.Failure("工作地点、岗位、备注或变更说明不符合要求。", "CONTRACT_001");

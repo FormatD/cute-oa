@@ -302,7 +302,7 @@ public sealed class WorkItemService(
     private static bool IsContractRisk(EmploymentContractView item) => item.OpenEndedReviewRequired
         || item.DisplayStatus is EmploymentContractStatuses.Expired or EmploymentContractStatuses.Expiring
         || item.CurrentAlertThreshold is not null && !item.CurrentAlertAcknowledged;
-    private static string LeaveTypeName(LeaveType type) => type switch { LeaveType.Annual => "年假", LeaveType.Personal => "事假", LeaveType.Sick => "病假", LeaveType.CompTime => "调休", _ => "请假" };
+    private static string LeaveTypeName(LeaveType type) => type switch { LeaveType.Annual => "年假", LeaveType.Personal => "事假", LeaveType.Sick => "病假", LeaveType.CompTime => "调休", LeaveType.Marriage => "婚假", LeaveType.Maternity => "产假", LeaveType.Paternity => "陪产假", LeaveType.Bereavement => "丧假", _ => "请假" };
     private static string BusinessRoute(string businessType, Guid id) => businessType.ToUpperInvariant() switch
     {
         "LEAVE" => $"/leave/{id}",

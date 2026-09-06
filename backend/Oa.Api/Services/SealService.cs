@@ -10,14 +10,14 @@ public sealed class SealService
 {
     private const string TenantId = "demo";
     private const string BusinessType = "Seal";
-    public static readonly HashSet<string> DocumentCategories =
-    [
-        "合同协议", "招投标文件", "公文函件", "资质证明", "财务报表", "人事材料", "其他"
-    ];
-    public static readonly HashSet<string> SealTypes =
-    [
-        "公章", "合同专用章", "财务专用章", "法人章", "人事专用章", "其他"
-    ];
+    private (SealPolicyConfig Policy, BusinessConfigurationRecord? Record) ResolveSealPolicy()
+    {
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Seal, "SealPolicy");
+        var policy = configRecord is not null
+            ? JsonSerializer.Deserialize<SealPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultSealPolicy();
+        return (policy ?? BusinessConfigurationDefaults.CreateDefaultSealPolicy(), configRecord);
+    }
 
     private readonly DemoData data;
     private readonly OaDbContext db;
@@ -103,15 +103,15 @@ public sealed class SealService
         if (!validation.IsSuccess) return ServiceResult<SealRequest>.Failure(validation.Error!, validation.Code!);
 
         var today = BusinessTime.ChinaToday();
-        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Seal, "SealPolicy");
-        var policy = configRecord is not null
-            ? JsonSerializer.Deserialize<SealPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultSealPolicy();
+        var (policy, configRecord) = ResolveSealPolicy();
+        var sealItem = validation.Value!.SealItem;
+        var docCategory = validation.Value.DocCategory;
+        var riskLevel = docCategory.RiskLevel ?? "LOW";
 
-        var docCategory = policy?.DocumentCategories.FirstOrDefault(r => r.Name.Equals(request.DocumentCategory.Trim(), StringComparison.OrdinalIgnoreCase));
-        if (docCategory is not null && !docCategory.IsEnabled)
-            return ServiceResult<SealRequest>.Failure($"文件类别【{docCategory.Name}】已被系统停用，无法申请。", "SEAL_007");
-        var riskLevel = docCategory?.RiskLevel ?? (request.DocumentCategory.Trim() is "合同协议" or "招投标文件" ? "HIGH" : "LOW");
+        var riskRules = policy.RiskRules ?? new SealRiskRulesConfig();
+        decimal metric = riskLevel == "HIGH" || request.IsOut || sealItem.SealType == "法人章"
+            ? riskRules.HighRiskMetric
+            : (riskLevel == "MEDIUM" || request.Copies > 3 ? riskRules.MediumRiskMetric : riskRules.LowRiskMetric);
 
         var record = new SealRequestRecord
         {
@@ -121,16 +121,19 @@ public sealed class SealService
             ApplicantName = actor.Name,
             DepartmentName = actor.DepartmentName,
             Title = request.Title.Trim(),
-            DocumentCategory = request.DocumentCategory.Trim(),
+            DocumentCategory = docCategory.Name,
             DocumentName = request.DocumentName.Trim(),
-            SealType = request.SealType.Trim(),
+            SealType = sealItem.Name,
+            CustodianUserId = sealItem.CustodianUserId,
+            MaxOutDays = sealItem.MaxOutDays,
+            RiskMetric = metric,
             Copies = request.Copies,
             IsOut = request.IsOut,
             OutStartDate = request.IsOut ? request.OutStartDate : null,
             OutEndDate = request.IsOut ? request.OutEndDate : null,
             OutCustodian = request.IsOut ? request.OutCustodian?.Trim() : null,
             Reason = request.Reason.Trim(),
-            AttachmentsJson = JsonSerializer.Serialize(validation.Value!.Attachments),
+            AttachmentsJson = JsonSerializer.Serialize(validation.Value.Attachments),
             Status = (int)SealStatus.Draft,
             Version = 1,
             IsDemo = isDemo,
@@ -158,17 +161,31 @@ public sealed class SealService
         var validation = Validate(actor, request);
         if (!validation.IsSuccess) return ServiceResult<SealRequest>.Failure(validation.Error!, validation.Code!);
 
+        var (policy, _) = ResolveSealPolicy();
+        var sealItem = validation.Value!.SealItem;
+        var docCategory = validation.Value.DocCategory;
+        var riskLevel = docCategory.RiskLevel ?? "LOW";
+
+        var riskRules = policy.RiskRules ?? new SealRiskRulesConfig();
+        decimal metric = riskLevel == "HIGH" || request.IsOut || sealItem.SealType == "法人章"
+            ? riskRules.HighRiskMetric
+            : (riskLevel == "MEDIUM" || request.Copies > 3 ? riskRules.MediumRiskMetric : riskRules.LowRiskMetric);
+
         record.Title = request.Title.Trim();
-        record.DocumentCategory = request.DocumentCategory.Trim();
+        record.DocumentCategory = docCategory.Name;
         record.DocumentName = request.DocumentName.Trim();
-        record.SealType = request.SealType.Trim();
+        record.SealType = sealItem.Name;
+        record.CustodianUserId = sealItem.CustodianUserId;
+        record.MaxOutDays = sealItem.MaxOutDays;
+        record.RiskMetric = metric;
+        record.RiskLevel = riskLevel;
         record.Copies = request.Copies;
         record.IsOut = request.IsOut;
         record.OutStartDate = request.IsOut ? request.OutStartDate : null;
         record.OutEndDate = request.IsOut ? request.OutEndDate : null;
         record.OutCustodian = request.IsOut ? request.OutCustodian?.Trim() : null;
         record.Reason = request.Reason.Trim();
-        record.AttachmentsJson = JsonSerializer.Serialize(validation.Value!.Attachments);
+        record.AttachmentsJson = JsonSerializer.Serialize(validation.Value.Attachments);
         record.Version++;
         record.UpdatedAt = DateTimeOffset.UtcNow;
         copyRecipients.Track(BusinessType, record.Id, record.Number, record.ApplicantName, record.Title, validation.Value.CopyRecipientIds);
@@ -183,23 +200,42 @@ public sealed class SealService
         if ((SealStatus)record.Status is not (SealStatus.Draft or SealStatus.Rejected or SealStatus.Withdrawn))
             return ServiceResult<SealRequest>.Failure("当前状态不允许提交。", "STATE_001");
 
-        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Seal, "SealPolicy");
-        var policy = configRecord is not null
-            ? JsonSerializer.Deserialize<SealPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultSealPolicy();
+        var (policy, configRecord) = ResolveSealPolicy();
 
-        var sealItem = policy?.Seals.FirstOrDefault(s => s.Name.Equals(record.SealType, StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(record.SealType, StringComparison.OrdinalIgnoreCase));
-        if (sealItem is not null && !sealItem.IsEnabled)
+        var sealItem = policy.Seals.FirstOrDefault(s => s.Name.Equals(record.SealType, StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(record.SealType, StringComparison.OrdinalIgnoreCase));
+        if (sealItem is null)
+            return ServiceResult<SealRequest>.Failure($"印章【{record.SealType}】不存在或已失效。", "SEAL_005");
+        if (!sealItem.IsEnabled)
             return ServiceResult<SealRequest>.Failure($"印章【{sealItem.Name}】已被系统停用，无法申请。", "SEAL_005");
 
-        if (record.IsOut && sealItem is not null && !sealItem.AllowOut)
-            return ServiceResult<SealRequest>.Failure($"印章【{sealItem.Name}】禁止外带使用。", "SEAL_006");
+        if (record.IsOut)
+        {
+            if (!sealItem.AllowOut)
+                return ServiceResult<SealRequest>.Failure($"印章【{sealItem.Name}】禁止外带使用。", "SEAL_006");
+            if (record.OutStartDate.HasValue && record.OutEndDate.HasValue)
+            {
+                var diffDays = record.OutEndDate.Value.DayNumber - record.OutStartDate.Value.DayNumber;
+                if (diffDays > sealItem.MaxOutDays)
+                    return ServiceResult<SealRequest>.Failure($"印章【{sealItem.Name}】最长外带天数为 {sealItem.MaxOutDays} 天，当前申请天数超出限制。", "SEAL_002");
+            }
+        }
 
-        var docCategory = policy?.DocumentCategories.FirstOrDefault(r => r.Name.Equals(record.DocumentCategory, StringComparison.OrdinalIgnoreCase));
-        if (docCategory is not null && !docCategory.IsEnabled)
+        var docCategory = policy.DocumentCategories.FirstOrDefault(r => r.Name.Equals(record.DocumentCategory, StringComparison.OrdinalIgnoreCase));
+        if (docCategory is null)
+            return ServiceResult<SealRequest>.Failure($"文件类别【{record.DocumentCategory}】不存在或已失效。", "SEAL_007");
+        if (!docCategory.IsEnabled)
             return ServiceResult<SealRequest>.Failure($"文件类别【{docCategory.Name}】已被系统停用，无法申请。", "SEAL_007");
 
-        record.RiskLevel = docCategory?.RiskLevel ?? (record.DocumentCategory is "合同协议" or "招投标文件" ? "HIGH" : "LOW");
+        var riskLevel = docCategory.RiskLevel ?? "LOW";
+        record.RiskLevel = riskLevel;
+        record.CustodianUserId = sealItem.CustodianUserId;
+        record.MaxOutDays = sealItem.MaxOutDays;
+
+        var riskRules = policy.RiskRules ?? new SealRiskRulesConfig();
+        decimal metric = riskLevel == "HIGH" || record.IsOut || sealItem.SealType == "法人章"
+            ? riskRules.HighRiskMetric
+            : (riskLevel == "MEDIUM" || record.Copies > 3 ? riskRules.MediumRiskMetric : riskRules.LowRiskMetric);
+        record.RiskMetric = metric;
 
         if (configRecord is not null)
         {
@@ -209,21 +245,7 @@ public sealed class SealService
             record.ConfigResolvedAt = DateTimeOffset.UtcNow;
         }
 
-        // Routing metric:
-        // Tier 3: Out or Legal Person Seal -> 3m (Manager + HR/Admin + GM)
-        // Tier 2: Copies > 3 OR Contract / Bidding -> 2m (Manager + HR/Admin)
-        // Tier 1: In-office ordinary <= 3 copies -> 1m (Manager)
-        decimal metric = 1m;
-        if (record.IsOut || record.SealType == "法人章")
-        {
-            metric = 3m;
-        }
-        else if (record.Copies > 3 || record.DocumentCategory is "合同协议" or "招投标文件")
-        {
-            metric = 2m;
-        }
-
-        var route = processRouter.Resolve(BusinessType, actor, metric);
+        var route = processRouter.Resolve(BusinessType, actor, metric, record.SealType);
         if (!route.IsSuccess) return ServiceResult<SealRequest>.Failure(route.Error!, route.Code!);
 
         var attempt = db.FlowInstances.Where(item => item.TenantId == TenantId && item.BusinessType == BusinessType && item.BusinessId == record.Id)
@@ -338,11 +360,18 @@ public sealed class SealService
 
     public ServiceResult<SealRequest> RegisterExecution(Employee actor, Guid id, RegisterSealExecutionRequest request)
     {
-        if (!data.HasPermission(actor, OaPermissions.SealManage)) return ServiceResult<SealRequest>.Failure("无印章管理执行权限。", "AUTH_002");
         var record = db.SealRequests.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null) return ServiceResult<SealRequest>.Failure("用章申请不存在。", "DATA_001");
+
+        var isCustodian = !string.IsNullOrWhiteSpace(record.CustodianUserId) && record.CustodianUserId == actor.Id;
+        var hasManagePerm = data.HasPermission(actor, OaPermissions.SealManage);
+        if (!hasManagePerm && !isCustodian)
+            return ServiceResult<SealRequest>.Failure("无印章管理执行权限。", "AUTH_002");
+
         var subject = data.FindEmployee(record.ApplicantId);
-        if (subject is null || !data.CanView(actor, subject, BusinessType)) return ServiceResult<SealRequest>.Failure("印章管理权限不覆盖该申请。", "AUTH_002");
+        if (subject is null || (!isCustodian && !data.CanView(actor, subject, BusinessType)))
+            return ServiceResult<SealRequest>.Failure("印章管理权限不覆盖该申请。", "AUTH_002");
+
         if (record.Status != (int)SealStatus.Approved || db.SealExecutions.Any(item => item.SealRequestId == id)) return ServiceResult<SealRequest>.Failure("仅已批准且未用印的申请可登记用印/借出。", "STATE_001");
         if (record.Version != request.Version) return ServiceResult<SealRequest>.Failure("单据已被更新，请刷新后重试。", "CONCURRENCY_001");
 
@@ -504,6 +533,10 @@ public sealed class SealService
         var finalCopied = ActivateCopies(record, SealStatus.Approved.ToString());
         Audit(actor, "SEAL_APPROVED", record, $"通过第 {task.Sequence} 节点，用章申请已最终通过");
         notifications.Enqueue(record.ApplicantId, "SEAL_APPROVED", "用章申请已批准", $"{record.Number} 审批已通过", "SealRequest", record.Id);
+        if (!string.IsNullOrWhiteSpace(record.CustodianUserId))
+        {
+            notifications.Enqueue(record.CustodianUserId, "SEAL_ASSIGNED", "用章申请待用印执行", $"{record.ApplicantName} 的用章申请 {record.Number} 已审批通过，请办理用印/借出", "SealRequest", record.Id);
+        }
         foreach (var recipient in finalCopied) notifications.Enqueue(recipient.Id, "FLOW_COPY", "用章抄送事项已办结", $"{record.ApplicantName} 的 {record.Number} 审批已通过", "SealRequest", record.Id);
         record.Version++;
         record.UpdatedAt = DateTimeOffset.UtcNow;
@@ -514,26 +547,42 @@ public sealed class SealService
     {
         if (string.IsNullOrWhiteSpace(request.Title) || request.Title.Trim().Length > 100)
             return ServiceResult<ValidatedSealInput>.Failure("用印主题应为 1–100 个字符。", "SEAL_001");
-        if (string.IsNullOrWhiteSpace(request.DocumentCategory) || !DocumentCategories.Contains(request.DocumentCategory.Trim()))
-            return ServiceResult<ValidatedSealInput>.Failure($"文件类别不合法，支持类别：{string.Join('、', DocumentCategories)}。", "SEAL_001");
+        if (string.IsNullOrWhiteSpace(request.DocumentCategory))
+            return ServiceResult<ValidatedSealInput>.Failure("文件类别不能为空。", "SEAL_001");
         if (string.IsNullOrWhiteSpace(request.DocumentName) || request.DocumentName.Trim().Length > 100)
             return ServiceResult<ValidatedSealInput>.Failure("文件名称应为 1–100 个字符。", "SEAL_001");
-        if (string.IsNullOrWhiteSpace(request.SealType) || !SealTypes.Contains(request.SealType.Trim()))
-            return ServiceResult<ValidatedSealInput>.Failure($"印章类型不合法，支持类型：{string.Join('、', SealTypes)}。", "SEAL_001");
+        if (string.IsNullOrWhiteSpace(request.SealType))
+            return ServiceResult<ValidatedSealInput>.Failure("印章类型不能为空。", "SEAL_001");
         if (request.Copies is < 1 or > 100)
             return ServiceResult<ValidatedSealInput>.Failure("用印份数应为 1–100 之间的整数。", "SEAL_001");
         if (string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Trim().Length > 500)
             return ServiceResult<ValidatedSealInput>.Failure("申请事由应为 1–500 个字符。", "SEAL_001");
 
+        var (policy, _) = ResolveSealPolicy();
+
+        var sealItem = policy.Seals.FirstOrDefault(s => s.Name.Equals(request.SealType.Trim(), StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(request.SealType.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (sealItem is null)
+            return ServiceResult<ValidatedSealInput>.Failure($"印章类型【{request.SealType}】不存在。", "SEAL_001");
+        if (!sealItem.IsEnabled)
+            return ServiceResult<ValidatedSealInput>.Failure($"印章【{sealItem.Name}】已被系统停用，无法申请。", "SEAL_005");
+
+        var docCategory = policy.DocumentCategories.FirstOrDefault(r => r.Name.Equals(request.DocumentCategory.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (docCategory is null)
+            return ServiceResult<ValidatedSealInput>.Failure($"文件类别【{request.DocumentCategory}】不存在。", "SEAL_001");
+        if (!docCategory.IsEnabled)
+            return ServiceResult<ValidatedSealInput>.Failure($"文件类别【{docCategory.Name}】已被系统停用，无法申请。", "SEAL_007");
+
         if (request.IsOut)
         {
+            if (!sealItem.AllowOut)
+                return ServiceResult<ValidatedSealInput>.Failure($"印章【{sealItem.Name}】禁止外带使用。", "SEAL_006");
             if (request.OutStartDate is null || request.OutEndDate is null)
                 return ServiceResult<ValidatedSealInput>.Failure("外带借出必须指定预计借出日期与归还日期。", "SEAL_002");
             if (request.OutEndDate < request.OutStartDate)
                 return ServiceResult<ValidatedSealInput>.Failure("预计归还日期不能早于借出日期。", "SEAL_002");
             var diffDays = request.OutEndDate.Value.DayNumber - request.OutStartDate.Value.DayNumber;
-            if (diffDays > 30)
-                return ServiceResult<ValidatedSealInput>.Failure("外带借出周期最长不得超过 30 天。", "SEAL_002");
+            if (diffDays > sealItem.MaxOutDays)
+                return ServiceResult<ValidatedSealInput>.Failure($"印章【{sealItem.Name}】最长外带天数为 {sealItem.MaxOutDays} 天，当前申请天数（{diffDays} 天）超出限制。", "SEAL_002");
             if (string.IsNullOrWhiteSpace(request.OutCustodian) || request.OutCustodian.Trim().Length > 50)
                 return ServiceResult<ValidatedSealInput>.Failure("外带保管人应为 1–50 个字符。", "SEAL_002");
         }
@@ -545,7 +594,7 @@ public sealed class SealService
         if (copyRecipientsList.Any(id => data.FindEmployee(id) is not { Status: "ACTIVE" }))
             return ServiceResult<ValidatedSealInput>.Failure("抄送人必须为在职员工。", "VALIDATION_001");
 
-        return ServiceResult<ValidatedSealInput>.Success(new ValidatedSealInput(validAttachments, copyRecipientsList));
+        return ServiceResult<ValidatedSealInput>.Success(new ValidatedSealInput(sealItem, docCategory, validAttachments, copyRecipientsList));
     }
 
     private IReadOnlyList<string>? NormalizeAttachments(Employee actor, IReadOnlyList<string>? attachments)
@@ -593,6 +642,9 @@ public sealed class SealService
             DocumentCategory = record.DocumentCategory,
             DocumentName = record.DocumentName,
             SealType = record.SealType,
+            CustodianUserId = record.CustodianUserId,
+            MaxOutDays = record.MaxOutDays,
+            RiskMetric = record.RiskMetric,
             Copies = record.Copies,
             IsOut = record.IsOut,
             OutStartDate = record.OutStartDate,
@@ -677,5 +729,5 @@ public sealed class SealService
         return $"{prefix}{max + 1:D3}";
     }
 
-    private sealed record ValidatedSealInput(IReadOnlyList<string> Attachments, IReadOnlyList<string> CopyRecipientIds);
+    private sealed record ValidatedSealInput(SealRegistryItemConfig SealItem, SealDocumentCategoryConfig DocCategory, IReadOnlyList<string> Attachments, IReadOnlyList<string> CopyRecipientIds);
 }

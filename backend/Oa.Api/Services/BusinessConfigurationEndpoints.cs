@@ -78,6 +78,77 @@ public static class BusinessConfigurationEndpoints
             return ToResult(result);
         });
 
+        group.MapGet("/{id:guid}/history", (
+            Guid id,
+            HttpRequest request,
+            DemoAuthService auth,
+            BusinessConfigurationService service) =>
+        {
+            var actor = auth.Resolve(request);
+            var result = service.ListVersions(actor, id);
+            return ToResult(result);
+        });
+
+        group.MapGet("/dictionaries/{code}", (
+            string code,
+            HttpRequest request,
+            DemoAuthService auth,
+            BusinessConfigurationService service) =>
+        {
+            _ = auth.Resolve(request);
+            if (string.IsNullOrWhiteSpace(code))
+                return Results.BadRequest(new { code = "CONFIG_001", message = "code 参数必填。" });
+
+            var config = service.GetEffective(ConfigurationDomains.Dictionary, code.Trim());
+            DictionaryConfig? dict = null;
+            string name = code;
+            if (config is not null)
+            {
+                name = config.Name;
+                try
+                {
+                    dict = JsonSerializer.Deserialize<DictionaryConfig>(config.ContentJson, BusinessConfigurationDefaults.JsonOptions);
+                }
+                catch (Exception ex)
+                {
+                    return Results.BadRequest(new { code = "CONFIG_001", message = $"字典配置反序列化失败：{ex.Message}" });
+                }
+            }
+            else
+            {
+                dict = code.Trim() switch
+                {
+                    "AnnouncementType" => BusinessConfigurationDefaults.CreateDefaultAnnouncementTypeDict(),
+                    "ContractType" => BusinessConfigurationDefaults.CreateDefaultContractTypeDict(),
+                    "AttachmentType" => BusinessConfigurationDefaults.CreateDefaultAttachmentTypeDict(),
+                    "ApprovalCommentPreset" => BusinessConfigurationDefaults.CreateDefaultApprovalCommentPresetDict(),
+                    _ => null
+                };
+            }
+
+            if (dict is null)
+                return Results.NotFound(new { code = "DATA_001", message = $"未找到字典【{code}】的生效配置。" });
+
+            var enabledItems = dict.Items.Where(item => item.IsEnabled).OrderBy(item => item.SortOrder).ToList();
+            return Results.Ok(new
+            {
+                domain = ConfigurationDomains.Dictionary,
+                code = code.Trim(),
+                name,
+                items = enabledItems
+            });
+        });
+
+        group.MapPost("/activate-scheduled", (
+            HttpRequest request,
+            DemoAuthService auth,
+            BusinessConfigurationService service) =>
+        {
+            var actor = auth.Resolve(request);
+            var count = service.ActivateScheduledConfigurations();
+            return Results.Ok(new { activatedCount = count });
+        });
+
         group.MapPost("/", (
             CreateBusinessConfigurationRequest body,
             HttpRequest request,
@@ -102,6 +173,17 @@ public static class BusinessConfigurationEndpoints
         });
 
         group.MapPost("/{id:guid}/versions", (
+            Guid id,
+            HttpRequest request,
+            DemoAuthService auth,
+            BusinessConfigurationService service,
+            IdempotencyService idempotency) =>
+        {
+            var actor = auth.Resolve(request);
+            return Write(request, actor, idempotency, () => service.CreateNewVersion(actor, id), created: true, atomic: true, fingerprintPayload: new { id });
+        });
+
+        group.MapPost("/{id:guid}/branch", (
             Guid id,
             HttpRequest request,
             DemoAuthService auth,
@@ -197,6 +279,11 @@ public static class BusinessConfigurationEndpoints
             {
                 transaction?.Rollback();
                 if (transaction is not null) idempotency.ClearTrackedChanges();
+                try
+                {
+                    idempotency.LogAudit(actor.Id, "CONFIG_OPERATION_FAILED", "BusinessConfiguration", route, $"配置操作失败【{route}】：[{result.Code}] {result.Error}");
+                }
+                catch { }
                 var failureStatus = result.Code switch
                 {
                     "AUTH_002" => StatusCodes.Status403Forbidden,

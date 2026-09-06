@@ -88,6 +88,12 @@ public sealed class PurchaseRequest
     public string PaymentStatus { get; init; } = "UNPAID";
     public decimal PaidTotalAmount { get; init; }
     public decimal PrepaymentLimitRate { get; init; } = 0.50m;
+    public string? Category { get; init; }
+    public string? AmountTier { get; init; }
+    public string? PurchaserUserId { get; init; }
+    public string? PurchaserUserName { get; init; }
+    public bool RequiresAcceptance { get; init; } = true;
+    public string? AcceptanceRoleOrAssignee { get; init; }
     public int Version { get; init; }
     public bool IsDemo { get; init; }
     public Guid? ProcessDefinitionId { get; init; }

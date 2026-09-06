@@ -10,10 +10,14 @@ public sealed class PurchaseService
 {
     private const string TenantId = "demo";
     private const string BusinessType = "Purchase";
-    private static readonly HashSet<string> Categories =
-    [
-        "办公用品", "IT设备", "软件服务", "行政物资", "市场物料", "生产物料", "专业服务", "其他"
-    ];
+    private (ProcurementPolicyConfig Policy, BusinessConfigurationRecord? Record) ResolveProcurementPolicy()
+    {
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Procurement, "ProcurementPolicy");
+        var policy = configRecord is not null
+            ? JsonSerializer.Deserialize<ProcurementPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultProcurementPolicy();
+        return (policy ?? BusinessConfigurationDefaults.CreateDefaultProcurementPolicy(), configRecord);
+    }
     private readonly DemoData data;
     private readonly OaDbContext db;
     private readonly NotificationService notifications;
@@ -127,16 +131,20 @@ public sealed class PurchaseService
         if ((PurchaseStatus)record.Status is not (PurchaseStatus.Draft or PurchaseStatus.Rejected or PurchaseStatus.Withdrawn))
             return ServiceResult<PurchaseRequest>.Failure("当前状态不允许提交。", "STATE_001");
 
-        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Procurement, "ProcurementPolicy");
-        var policy = configRecord is not null
-            ? JsonSerializer.Deserialize<ProcurementPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultProcurementPolicy();
-
-        var quoteThreshold = policy?.QuoteAttachmentThreshold ?? 5000m;
+        var (policy, configRecord) = ResolveProcurementPolicy();
+        var quoteThreshold = policy.QuoteAttachmentThreshold > 0 ? policy.QuoteAttachmentThreshold : 5000m;
         var doubleQuoteThreshold = 50000m;
         var attachmentCount = DeserializeList(record.AttachmentsJson).Count;
         if (record.EstimatedTotal >= doubleQuoteThreshold && attachmentCount < 2 || record.EstimatedTotal >= quoteThreshold && attachmentCount < 1)
             return ServiceResult<PurchaseRequest>.Failure(record.EstimatedTotal >= doubleQuoteThreshold ? $"{doubleQuoteThreshold:N0} 元及以上采购至少需要两份报价或依据附件。" : $"{quoteThreshold:N0} 元及以上采购至少需要一份报价或依据附件。", "PURCHASE_002");
+
+        var matchingTier = policy.AmountTiers.OrderBy(t => t.MaxAmount ?? decimal.MaxValue)
+            .FirstOrDefault(t => t.MaxAmount == null || record.EstimatedTotal <= t.MaxAmount);
+        record.AmountTier = matchingTier?.Name ?? "常规采购";
+        record.Category = (JsonSerializer.Deserialize<List<PurchaseItem>>(record.ItemsJson) ?? []).FirstOrDefault()?.Category ?? "其他";
+        record.RequiresAcceptance = policy.RequiresAcceptance;
+        record.AcceptanceRoleOrAssignee = policy.AcceptanceRoleOrAssignee;
+
         var route = processRouter.Resolve(BusinessType, actor, record.EstimatedTotal);
         if (!route.IsSuccess) return ServiceResult<PurchaseRequest>.Failure(route.Error!, route.Code!);
 
@@ -299,13 +307,36 @@ public sealed class PurchaseService
     {
         var record = db.PurchaseRequests.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null) return ServiceResult<PurchaseRequest>.Failure("采购申请不存在。", "DATA_001");
-        if (actor.Id != record.ApplicantId && !data.HasPermission(actor, OaPermissions.PurchaseManage))
-            return ServiceResult<PurchaseRequest>.Failure("仅申请人或采购执行人员可以验收。", "AUTH_002");
+
+        bool isAuthorized = false;
+        if (string.IsNullOrWhiteSpace(record.AcceptanceRoleOrAssignee) || record.AcceptanceRoleOrAssignee.Equals("APPLICANT", StringComparison.OrdinalIgnoreCase))
+        {
+            isAuthorized = actor.Id == record.ApplicantId || data.HasPermission(actor, OaPermissions.PurchaseManage);
+        }
+        else if (record.AcceptanceRoleOrAssignee.StartsWith("ROLE:", StringComparison.OrdinalIgnoreCase))
+        {
+            var roleName = record.AcceptanceRoleOrAssignee["ROLE:".Length..];
+            isAuthorized = (actor.Roles ?? []).Contains(roleName) || (roleName == "采购员" && data.HasPermission(actor, OaPermissions.PurchaseManage));
+        }
+        else if (record.AcceptanceRoleOrAssignee == "PURCHASE_MANAGE")
+        {
+            isAuthorized = data.HasPermission(actor, OaPermissions.PurchaseManage);
+        }
+        else
+        {
+            isAuthorized = actor.Id == record.AcceptanceRoleOrAssignee;
+        }
+
+        if (!isAuthorized)
+            return ServiceResult<PurchaseRequest>.Failure("当前用户不是指定的验收人或无验收权限。", "AUTH_002");
+
         if (actor.Id != record.ApplicantId)
         {
             var subject = data.FindEmployee(record.ApplicantId);
-            if (subject is null || !data.CanView(actor, subject, BusinessType)) return ServiceResult<PurchaseRequest>.Failure("采购执行权限不覆盖该申请。", "AUTH_002");
+            if (subject is null || !data.CanView(actor, subject, BusinessType))
+                return ServiceResult<PurchaseRequest>.Failure("采购执行或验收权限不覆盖该申请。", "AUTH_002");
         }
+
         var order = db.PurchaseOrders.AsNoTracking().SingleOrDefault(item => item.PurchaseRequestId == id);
         if (record.Status != (int)PurchaseStatus.Ordered || order is null || db.PurchaseReceipts.Any(item => item.PurchaseRequestId == id))
             return ServiceResult<PurchaseRequest>.Failure("仅已下单且未验收的采购申请可登记验收。", "STATE_001");
@@ -395,6 +426,18 @@ public sealed class PurchaseService
                 purchase.Status = (int)PurchaseStatus.Approved;
                 instance.Status = (int)FlowInstanceStatus.Completed;
                 instance.CompletedAt = DateTimeOffset.UtcNow;
+
+                var (procurementPolicy, _) = ResolveProcurementPolicy();
+                if (!string.IsNullOrWhiteSpace(procurementPolicy.DefaultPurchaserUserId))
+                {
+                    var purchaser = data.FindEmployee(procurementPolicy.DefaultPurchaserUserId);
+                    if (purchaser is not null)
+                    {
+                        purchase.PurchaserUserId = purchaser.Id;
+                        notifications.Enqueue(purchaser.Id, "PURCHASE_ASSIGNED", "已指派采购执行任务", $"{purchase.Number} 已审批通过，指派由你负责采购执行", "PurchaseRequest", purchase.Id);
+                    }
+                }
+
                 var copied = ActivateCopies(purchase, PurchaseStatus.Approved.ToString());
                 notifications.Enqueue(purchase.ApplicantId, "PURCHASE_APPROVED", "采购申请已审批通过", $"{purchase.Number} 已全部审批通过，等待采购执行", "PurchaseRequest", purchase.Id);
                 foreach (var recipient in copied) notifications.Enqueue(recipient.Id, "FLOW_COPY", "采购抄送事项已审批完成", $"{purchase.ApplicantName} 的 {purchase.Number} 已审批完成", "PurchaseRequest", purchase.Id);
@@ -424,6 +467,10 @@ public sealed class PurchaseService
             return ServiceResult<(IReadOnlyList<PurchaseItem>, IReadOnlyList<string>, IReadOnlyList<string>)>.Failure("建议供应商最多 100 个字符。", "PURCHASE_001");
         if (request.Items is null || request.Items.Count is < 1 or > 50)
             return ServiceResult<(IReadOnlyList<PurchaseItem>, IReadOnlyList<string>, IReadOnlyList<string>)>.Failure("采购明细应为 1–50 行。", "PURCHASE_001");
+
+        var (policy, _) = ResolveProcurementPolicy();
+        var allowedCategories = policy.Categories.Where(c => c.IsEnabled).Select(c => c.Name).ToHashSet();
+
         var normalized = new List<PurchaseItem>();
         foreach (var item in request.Items)
         {
@@ -431,7 +478,9 @@ public sealed class PurchaseService
             var unit = item.Unit?.Trim() ?? string.Empty;
             var specification = NormalizeOptional(item.Specification);
             var remark = NormalizeOptional(item.Remark);
-            if (!Categories.Contains(item.Category) || name.Length is < 1 or > 100 || unit.Length is < 1 or > 20 || (specification?.Length ?? 0) > 200 || (remark?.Length ?? 0) > 300 ||
+            if (string.IsNullOrWhiteSpace(item.Category) || !allowedCategories.Contains(item.Category))
+                return ServiceResult<(IReadOnlyList<PurchaseItem>, IReadOnlyList<string>, IReadOnlyList<string>)>.Failure($"采购明细品类【{item.Category}】未启用或不存在。", "PURCHASE_001");
+            if (name.Length is < 1 or > 100 || unit.Length is < 1 or > 20 || (specification?.Length ?? 0) > 200 || (remark?.Length ?? 0) > 300 ||
                 item.Quantity <= 0 || item.Quantity > 1_000_000m || decimal.Round(item.Quantity, 4) != item.Quantity ||
                 item.EstimatedUnitPrice < 0 || item.EstimatedUnitPrice > 10_000_000m || decimal.Round(item.EstimatedUnitPrice, 2) != item.EstimatedUnitPrice)
                 return ServiceResult<(IReadOnlyList<PurchaseItem>, IReadOnlyList<string>, IReadOnlyList<string>)>.Failure("采购明细的品类、名称、规格、数量、单位、单价或备注不合法。", "PURCHASE_001");
@@ -488,6 +537,14 @@ public sealed class PurchaseService
         record.ItemCount = items.Count;
         record.EstimatedTotal = items.Sum(item => item.EstimatedAmount);
         record.AttachmentsJson = JsonSerializer.Serialize(attachments);
+
+        var (policy, _) = ResolveProcurementPolicy();
+        var matchingTier = policy.AmountTiers.OrderBy(t => t.MaxAmount ?? decimal.MaxValue)
+            .FirstOrDefault(t => t.MaxAmount == null || record.EstimatedTotal <= t.MaxAmount);
+        record.AmountTier = matchingTier?.Name ?? "常规采购";
+        record.Category = items.FirstOrDefault()?.Category ?? "其他";
+        record.RequiresAcceptance = policy.RequiresAcceptance;
+        record.AcceptanceRoleOrAssignee = policy.AcceptanceRoleOrAssignee;
     }
 
     private PurchaseRequest Load(PurchaseRequestRecord record)
@@ -501,6 +558,12 @@ public sealed class PurchaseService
             Items = JsonSerializer.Deserialize<List<PurchaseItem>>(record.ItemsJson) ?? [], EstimatedTotal = record.EstimatedTotal,
             Attachments = DeserializeList(record.AttachmentsJson), CopyRecipientIds = copyRecipients.LoadRecipientIds(BusinessType, record.Id),
             Status = (PurchaseStatus)record.Status, PaymentStatus = record.PaymentStatus, PaidTotalAmount = record.PaidTotalAmount, PrepaymentLimitRate = record.PrepaymentLimitRate, Version = record.Version, IsDemo = record.IsDemo,
+            Category = record.Category,
+            AmountTier = record.AmountTier,
+            PurchaserUserId = record.PurchaserUserId,
+            PurchaserUserName = record.PurchaserUserId is not null ? data.FindEmployee(record.PurchaserUserId)?.Name : null,
+            RequiresAcceptance = record.RequiresAcceptance,
+            AcceptanceRoleOrAssignee = record.AcceptanceRoleOrAssignee,
             BudgetPoolId = record.BudgetPoolId,
             ProcessDefinitionId = record.ProcessDefinitionId, ProcessDefinitionCode = record.ProcessDefinitionCode, ProcessDefinitionVersion = record.ProcessDefinitionVersion,
             CurrentFlowInstanceId = record.CurrentFlowInstanceId,
@@ -527,7 +590,7 @@ public sealed class PurchaseService
 
         var order = db.PurchaseOrders.AsNoTracking().SingleOrDefault(item => item.PurchaseRequestId == id);
         var receipt = db.PurchaseReceipts.AsNoTracking().SingleOrDefault(item => item.PurchaseRequestId == id);
-        var isAccepted = receipt is not null && receipt.Result == "ALL_ACCEPTED";
+        var isAccepted = !record.RequiresAcceptance || (receipt is not null && receipt.Result == "ALL_ACCEPTED");
         var contractAmount = order?.ActualAmount ?? 0m;
         var limitRate = record.PrepaymentLimitRate > 0 ? record.PrepaymentLimitRate : 0.50m;
         var maxPrepayment = decimal.Round(contractAmount * limitRate, 2);

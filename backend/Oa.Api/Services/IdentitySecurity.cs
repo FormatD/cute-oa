@@ -185,7 +185,7 @@ public static class PasswordHasher
 
 public static class IdentitySeeder
 {
-    public static void EnsureDemoSeeded(OaDbContext db)
+    public static void EnsureDemoSeeded(OaDbContext db, bool seedContent = true)
     {
         foreach (var department in IdentityDefaults.Departments.Where(item => !db.Departments.Any(existing => existing.Id == item.Id)))
             db.Departments.Add(new DepartmentRecord { Id = department.Id, TenantId = IdentityDefaults.TenantId, Name = department.Name, ParentId = department.ParentId, IsSystem = true });
@@ -250,26 +250,29 @@ public static class IdentitySeeder
         }
         db.SaveChanges();
 
-        if (!db.Announcements.Any(item => item.Id == IdentityDefaults.WelcomeAnnouncementId))
+        if (seedContent)
         {
-            var now = DateTimeOffset.UtcNow;
-            db.Announcements.Add(new AnnouncementRecord
+            if (!db.Announcements.Any(item => item.Id == IdentityDefaults.WelcomeAnnouncementId))
             {
-                Id = IdentityDefaults.WelcomeAnnouncementId,
-                TenantId = IdentityDefaults.TenantId,
-                Title = "欢迎使用 xxx公司 OA",
-                Content = "OA 系统用于公司请假、报销、审批、组织通讯录和公告协同。请在开始使用前检查个人部门、岗位和直属上级信息，如有问题请联系行政人事部。",
-                Status = "PUBLISHED",
-                CreatedBy = "u-admin",
-                PublishedBy = "u-admin",
-                CreatedAt = now,
-                UpdatedAt = now,
-                PublishedAt = now
-            });
-            db.SaveChanges();
-        }
+                var now = DateTimeOffset.UtcNow;
+                db.Announcements.Add(new AnnouncementRecord
+                {
+                    Id = IdentityDefaults.WelcomeAnnouncementId,
+                    TenantId = IdentityDefaults.TenantId,
+                    Title = "欢迎使用 xxx公司 OA",
+                    Content = "OA 系统用于公司请假、报销、审批、组织通讯录和公告协同。请在开始使用前检查个人部门、岗位和直属上级信息，如有问题请联系行政人事部。",
+                    Status = "PUBLISHED",
+                    CreatedBy = "u-admin",
+                    PublishedBy = "u-admin",
+                    CreatedAt = now,
+                    UpdatedAt = now,
+                    PublishedAt = now
+                });
+                db.SaveChanges();
+            }
 
-        BusinessConfigurationDefaults.EnsureDefaultConfigurations(db, IdentityDefaults.TenantId);
+            BusinessConfigurationDefaults.EnsureDefaultConfigurations(db, IdentityDefaults.TenantId);
+        }
     }
 
     public static void EnsureProductionReady(OaDbContext db, IConfiguration configuration)
