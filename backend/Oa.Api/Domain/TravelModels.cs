@@ -42,6 +42,7 @@ public sealed class TravelRequest
     public string? StandardTransportation { get; set; }
     public bool IsOverStandard { get; set; }
     public string? OverStandardReason { get; set; }
+    public decimal AllowedBudgetCap => (StandardHotelDailyLimit + StandardMealDailyAllowance) * Days * (1 + CompanionIds.Count);
     public int Version { get; init; } = 1;
     public Guid? ProcessDefinitionId { get; set; }
     public string? ProcessDefinitionCode { get; set; }

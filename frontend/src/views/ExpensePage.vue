@@ -8,12 +8,14 @@ import { useAppStore } from '../stores/app'
 import { useAuthStore } from '../stores/auth'
 import { useEmployeeDirectoryStore } from '../stores/employee-directory'
 import { useExpenseStore } from '../stores/expense'
+import { useEffectiveConfigurationStore } from '../stores/effective-configurations'
 import { useFileStore } from '../stores/files'
 import { useTravelStore } from '../stores/travel'
 import { useUiStore } from '../stores/ui'
 
 const app = useAppStore()
 const auth = useAuthStore()
+const effectiveConfig = useEffectiveConfigurationStore()
 const employeeDirectory = useEmployeeDirectoryStore()
 const expenseStore = useExpenseStore()
 const files = useFileStore()
@@ -75,6 +77,7 @@ async function loadDeptBudget() {
 }
 
 onMounted(() => {
+  void effectiveConfig.load()
   void loadDeptBudget()
 })
 
@@ -482,13 +485,7 @@ async function exportExpenseCsv() {
     <div class="dialog-grid">
       <label class="dialog-field">费用类别
         <select v-model="expenseStore.expenseForm.category">
-          <option>交通</option>
-          <option>住宿</option>
-          <option>餐饮招待</option>
-          <option>办公</option>
-          <option>通讯</option>
-          <option>培训</option>
-          <option>其他</option>
+          <option v-for="cat in effectiveConfig.expenseCategories" :key="cat.code" :value="cat.name">{{ cat.name }}</option>
         </select>
       </label>
       <label class="dialog-field">费用日期<input v-model="expenseStore.expenseForm.expenseDate" type="date"></label>

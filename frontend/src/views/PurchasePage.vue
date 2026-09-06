@@ -9,11 +9,13 @@ import { useAuthStore } from '../stores/auth'
 import { useEmployeeDirectoryStore } from '../stores/employee-directory'
 import { useFileStore } from '../stores/files'
 import { usePurchaseStore } from '../stores/purchase'
+import { useEffectiveConfigurationStore } from '../stores/effective-configurations'
 import { useUiStore } from '../stores/ui'
 import { businessStatusLabel } from '../utils/businessLabels'
 
 const app = useAppStore()
 const auth = useAuthStore()
+const effectiveConfig = useEffectiveConfigurationStore()
 const employees = useEmployeeDirectoryStore()
 const files = useFileStore()
 const purchase = usePurchaseStore()
@@ -22,7 +24,7 @@ const router = useRouter()
 const api = useApiClient()
 
 const today = new Date()
-const categories = ['办公用品', 'IT设备', '软件服务', '行政物资', '市场物料', '生产物料', '专业服务', '其他']
+const categories = computed(() => effectiveConfig.procurementCategories.map(c => c.name))
 
 const currentDeptBudget = ref<Budget | null>(null)
 const canFinance = computed(() => auth.currentUser?.permissions?.includes('PURCHASE_MANAGE') === true || auth.currentUser?.permissions?.includes('EXPENSE_PAY') === true)
@@ -39,6 +41,7 @@ async function loadDeptBudget() {
 }
 
 onMounted(() => {
+  void effectiveConfig.load()
   void loadDeptBudget()
 })
 

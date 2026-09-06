@@ -3,6 +3,7 @@ import { defineStore } from 'pinia'
 import { createHttpClient } from '../api/http'
 import { createAuthApi } from '../api/modules/auth'
 import type { Employee, LoginChallengeState, LoginSession, MfaSetup } from '../api/types'
+import { useEffectiveConfigurationStore } from './effective-configurations'
 
 export type LoginProgress = 'AUTHENTICATED' | LoginChallengeState
 
@@ -38,6 +39,11 @@ export const useAuthStore = defineStore('auth', () => {
     recoveryCodes.value = []
     localStorage.removeItem('oa_access_token')
     localStorage.removeItem('oa_user_id')
+    try {
+      useEffectiveConfigurationStore().clear()
+    } catch {
+      // pinia might not be ready
+    }
   }
 
   function clearMfaChallenge() {

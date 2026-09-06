@@ -19,13 +19,32 @@ public sealed class ExpenseService
     private readonly BudgetService? budgetService;
     private readonly List<ExpenseClaim> _claims;
 
-    private (ExpensePolicyConfig Policy, BusinessConfigurationRecord? Record) ResolveExpensePolicy()
+    private ServiceResult<(ExpensePolicyConfig Policy, BusinessConfigurationRecord? Record)> ResolveExpensePolicy()
     {
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Expense, "ExpensePolicy");
-        var policy = configRecord is not null
-            ? JsonSerializer.Deserialize<ExpensePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultExpensePolicy();
-        return (policy ?? BusinessConfigurationDefaults.CreateDefaultExpensePolicy(), configRecord);
+        if (db is not null && configRecord is null)
+            return ServiceResult<(ExpensePolicyConfig, BusinessConfigurationRecord?)>.Failure("未找到生效中的费用报销策略配置【ExpensePolicy】。", "CONFIG_MISSING");
+
+        ExpensePolicyConfig? policy = null;
+        if (configRecord is not null)
+        {
+            try
+            {
+                policy = JsonSerializer.Deserialize<ExpensePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
+            }
+            catch
+            {
+                return ServiceResult<(ExpensePolicyConfig, BusinessConfigurationRecord?)>.Failure("费用报销策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+            }
+            if (policy is null)
+                return ServiceResult<(ExpensePolicyConfig, BusinessConfigurationRecord?)>.Failure("费用报销策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+        }
+        else
+        {
+            policy = BusinessConfigurationDefaults.CreateDefaultExpensePolicy();
+        }
+
+        return ServiceResult<(ExpensePolicyConfig, BusinessConfigurationRecord?)>.Success((policy, configRecord));
     }
 
     private static ServiceResult<bool> ValidateItemsAgainstPolicy(IReadOnlyList<ExpenseItem> items, string? claimDescription, ExpensePolicyConfig policy)
@@ -99,8 +118,9 @@ public sealed class ExpenseService
     public ServiceResult<ExpenseClaim> CreateDraft(Employee actor, CreateExpenseClaim request)
     {
         if (request.Items.Count == 0) return ServiceResult<ExpenseClaim>.Failure("至少需要一条费用明细。", "EXP_001");
-        if (string.IsNullOrWhiteSpace(request.PayeeAccountName) || string.IsNullOrWhiteSpace(request.PayeeAccount)) return ServiceResult<ExpenseClaim>.Failure("请填写收款账户信息。");
-        var (policy, configRecord) = ResolveExpensePolicy();
+        var policyResult = ResolveExpensePolicy();
+        if (!policyResult.IsSuccess) return ServiceResult<ExpenseClaim>.Failure(policyResult.Error!, policyResult.Code!);
+        var (policy, configRecord) = policyResult.Value;
         var validation = ValidateItemsAgainstPolicy(request.Items, request.Description, policy);
         if (!validation.IsSuccess) return ServiceResult<ExpenseClaim>.Failure(validation.Error!, validation.Code!);
         if (files is not null && !files.AreOwnedBy(actor, request.Items.SelectMany(item => item.Attachments ?? []))) return ServiceResult<ExpenseClaim>.Failure("附件不存在或不属于当前用户。", "FILE_005");
@@ -196,7 +216,9 @@ public sealed class ExpenseService
             }
         }
 
-        var (policy, configRecord) = ResolveExpensePolicy();
+        var policyResult = ResolveExpensePolicy();
+        if (!policyResult.IsSuccess) return ServiceResult<ExpenseClaim>.Failure(policyResult.Error!, policyResult.Code!);
+        var (policy, configRecord) = policyResult.Value;
         var itemValidation = ValidateItemsAgainstPolicy(item.Items, item.Description, policy);
         if (!itemValidation.IsSuccess) return ServiceResult<ExpenseClaim>.Failure(itemValidation.Error!, itemValidation.Code!);
 
@@ -246,7 +268,9 @@ public sealed class ExpenseService
         if (original.Version != expectedVersion) return ServiceResult<ExpenseClaim>.Failure("单据已被更新，请刷新后重试。", "CONCURRENCY_001");
         if (request.Items.Count == 0) return ServiceResult<ExpenseClaim>.Failure("至少需要一条费用明细。", "EXP_001");
         if (string.IsNullOrWhiteSpace(request.PayeeAccountName) || string.IsNullOrWhiteSpace(request.PayeeAccount)) return ServiceResult<ExpenseClaim>.Failure("请填写收款账户信息。");
-        var (policy, _) = ResolveExpensePolicy();
+        var policyResult = ResolveExpensePolicy();
+        if (!policyResult.IsSuccess) return ServiceResult<ExpenseClaim>.Failure(policyResult.Error!, policyResult.Code!);
+        var (policy, _) = policyResult.Value;
         var validation = ValidateItemsAgainstPolicy(request.Items, request.Description, policy);
         if (!validation.IsSuccess) return ServiceResult<ExpenseClaim>.Failure(validation.Error!, validation.Code!);
         if (files is not null && !files.AreOwnedBy(actor, request.Items.SelectMany(item => item.Attachments ?? []))) return ServiceResult<ExpenseClaim>.Failure("附件不存在或不属于当前用户。", "FILE_005");

@@ -260,3 +260,75 @@ public sealed class BusinessRuleSnapshot
     public DateTimeOffset ResolvedAt { get; set; }
     public JsonElement Parameters { get; set; }
 }
+
+public sealed class EffectiveLeaveTypeOption
+{
+    public string Code { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public decimal MinUnit { get; set; } = 0.5m;
+    public bool RequiresAttachment { get; set; }
+    public decimal? AttachmentThresholdDays { get; set; }
+}
+
+public sealed class EffectiveExpenseCategoryOption
+{
+    public string Code { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public decimal? SingleLimit { get; set; }
+    public bool RequiresReceipt { get; set; } = true;
+    public bool RequiresReasonWhenExceeded { get; set; } = true;
+    public bool BlockWhenExceeded { get; set; }
+}
+
+public sealed class EffectiveProcurementCategoryOption
+{
+    public string Code { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+}
+
+public sealed class EffectiveProcurementAmountTierOption
+{
+    public string Name { get; set; } = string.Empty;
+    public decimal? MaxAmount { get; set; }
+}
+
+public sealed class EffectiveSealOption
+{
+    public string Code { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string SealType { get; set; } = string.Empty;
+    public bool AllowOut { get; set; } = true;
+    public int MaxOutDays { get; set; } = 7;
+}
+
+public sealed class EffectiveSealDocCategoryOption
+{
+    public string Code { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string RiskLevel { get; set; } = "LOW";
+}
+
+public sealed class EffectiveDictionaryOption
+{
+    public string Code { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public int SortOrder { get; set; }
+}
+
+public sealed class EffectiveBusinessConfigurationBundle
+{
+    public List<EffectiveLeaveTypeOption> LeaveTypes { get; set; } = [];
+    public List<EffectiveExpenseCategoryOption> ExpenseCategories { get; set; } = [];
+    public List<TravelCityTierConfig> TravelCityTiers { get; set; } = [];
+    public List<string> TravelEmployeeRanks { get; set; } = [];
+    public List<TravelStandardItemConfig> TravelStandards { get; set; } = [];
+    public List<EffectiveProcurementCategoryOption> ProcurementCategories { get; set; } = [];
+    public List<EffectiveProcurementAmountTierOption> ProcurementAmountTiers { get; set; } = [];
+    public decimal ProcurementQuoteThreshold { get; set; } = 5000m;
+    public List<EffectiveSealOption> Seals { get; set; } = [];
+    public List<EffectiveSealDocCategoryOption> SealDocumentCategories { get; set; } = [];
+    public List<EffectiveDictionaryOption> ContractTypes { get; set; } = [];
+    public List<EffectiveDictionaryOption> AttachmentTypes { get; set; } = [];
+    public List<EffectiveDictionaryOption> ApprovalCommentPresets { get; set; } = [];
+    public List<EffectiveDictionaryOption> AnnouncementTypes { get; set; } = [];
+}

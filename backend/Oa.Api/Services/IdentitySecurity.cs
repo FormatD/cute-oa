@@ -101,6 +101,7 @@ public static class IdentityDefaults
         new("u-lin", "林涛", "财务经理", "finance", "财务部", "u-wang", 15, "ACTIVE"),
         new("u-sun", "孙悦", "HR/行政", "hr", "行政人事部", "u-wang", 6, "ACTIVE"),
         new("u-admin", "系统管理员", "系统管理员", "general", "总经办", "u-wang", 7, "ACTIVE"),
+        new("u-config", "赵配置", "配置管理员", "general", "总经办", "u-wang", 5, "ACTIVE"),
         new("u-disabled", "停用账号", "员工", "sales", "销售部", "u-wang", 2, "DISABLED")
     ];
 
@@ -108,6 +109,7 @@ public static class IdentityDefaults
     [
         new("general-manager", "总经理", "general", 10),
         new("system-administrator", "系统管理员", "general", 20),
+        new("config-administrator", "业务参数管理员", "general", 25),
         new("engineering-manager", "研发部经理", "engineering", 10),
         new("software-engineer", "研发工程师", "engineering", 20),
         new("finance-manager", "财务经理", "finance", 10),
@@ -125,6 +127,7 @@ public static class IdentityDefaults
         ["u-lin"] = "finance-manager",
         ["u-sun"] = "hr-specialist",
         ["u-admin"] = "system-administrator",
+        ["u-config"] = "config-administrator",
         ["u-disabled"] = "sales-specialist"
     };
 
@@ -136,6 +139,7 @@ public static class IdentityDefaults
         ["财务专员"] = [OaPermissions.ExpensePay, OaPermissions.ExpenseAllView, OaPermissions.ExpenseScopeView],
         ["财务经理"] = [OaPermissions.ExpensePay, OaPermissions.ExpenseAllView, OaPermissions.ExpenseScopeView, OaPermissions.DocumentDeptManage, OaPermissions.DocumentScopeView],
         ["HR/行政"] = [OaPermissions.CalendarManage, OaPermissions.AnnouncementManage, OaPermissions.PersonnelScopeView, OaPermissions.PersonnelExport, OaPermissions.PersonnelManage, OaPermissions.AttendanceScopeView, OaPermissions.AttendanceManage, OaPermissions.ContractScopeView, OaPermissions.ContractManage, OaPermissions.SealScopeView, OaPermissions.SealManage, OaPermissions.DocumentScopeView, OaPermissions.DocumentDeptManage, OaPermissions.DocumentManage],
+        ["配置管理员"] = [OaPermissions.BusinessConfigManage],
         ["系统管理员"] = OaPermissions.All
     };
 
