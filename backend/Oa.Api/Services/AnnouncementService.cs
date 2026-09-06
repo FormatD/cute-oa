@@ -140,9 +140,27 @@ public sealed class AnnouncementService(OaDbContext db, DemoData data)
     {
         var code = string.IsNullOrWhiteSpace(typeCode) ? "COMPANY_NEWS" : typeCode.Trim();
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Dictionary, "AnnouncementType");
-        var dict = configRecord is not null
-            ? System.Text.Json.JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultAnnouncementTypeDict();
+        if (db is not null && configRecord is null)
+            return ServiceResult<DictionaryItemConfig>.Failure("未找到生效中的公告类型字典配置【AnnouncementType】。", "CONFIG_MISSING");
+
+        DictionaryConfig? dict = null;
+        if (configRecord is not null)
+        {
+            try
+            {
+                dict = System.Text.Json.JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
+            }
+            catch
+            {
+                return ServiceResult<DictionaryItemConfig>.Failure("公告类型字典配置内容损坏，无法解析。", "CONFIG_INVALID");
+            }
+            if (dict is null)
+                return ServiceResult<DictionaryItemConfig>.Failure("公告类型字典配置内容损坏，无法解析。", "CONFIG_INVALID");
+        }
+        else
+        {
+            dict = BusinessConfigurationDefaults.CreateDefaultAnnouncementTypeDict();
+        }
         var item = dict?.Items.FirstOrDefault(i => i.Code.Equals(code, StringComparison.OrdinalIgnoreCase));
         if (item is null)
             return ServiceResult<DictionaryItemConfig>.Failure($"公告类型【{code}】不存在。", "VALIDATION_001");

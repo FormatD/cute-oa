@@ -228,7 +228,7 @@ public sealed class SealService
         var (policy, configRecord) = policyResult.Value;
 
         var normSealType = NormalizeSealType(record.SealType);
-        var sealItem = policy.Seals.FirstOrDefault(s => s.Name.Equals(normSealType, StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(normSealType, StringComparison.OrdinalIgnoreCase));
+        var sealItem = policy.Seals.FirstOrDefault(s => (!string.IsNullOrWhiteSpace(s.Code) && s.Code.Equals(normSealType, StringComparison.OrdinalIgnoreCase)) || s.Name.Equals(normSealType, StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(normSealType, StringComparison.OrdinalIgnoreCase));
         if (sealItem is null)
             return ServiceResult<SealRequest>.Failure($"印章【{record.SealType}】不存在或已失效。", "SEAL_005");
         if (!sealItem.IsEnabled)
@@ -246,7 +246,7 @@ public sealed class SealService
             }
         }
 
-        var docCategory = policy.DocumentCategories.FirstOrDefault(r => r.Name.Equals(record.DocumentCategory, StringComparison.OrdinalIgnoreCase));
+        var docCategory = policy.DocumentCategories.FirstOrDefault(r => (!string.IsNullOrWhiteSpace(r.Code) && r.Code.Equals(record.DocumentCategory, StringComparison.OrdinalIgnoreCase)) || r.Name.Equals(record.DocumentCategory, StringComparison.OrdinalIgnoreCase));
         if (docCategory is null)
             return ServiceResult<SealRequest>.Failure($"文件类别【{record.DocumentCategory}】不存在或已失效。", "SEAL_007");
         if (!docCategory.IsEnabled)
@@ -588,14 +588,14 @@ public sealed class SealService
         if (!policyResult.IsSuccess) return ServiceResult<ValidatedSealInput>.Failure(policyResult.Error!, policyResult.Code!);
         var (policy, _) = policyResult.Value;
         var normSealType = NormalizeSealType(request.SealType);
-        var sealItem = policy.Seals.FirstOrDefault(s => s.Name.Equals(normSealType, StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(normSealType, StringComparison.OrdinalIgnoreCase));
+        var sealItem = policy.Seals.FirstOrDefault(s => (!string.IsNullOrWhiteSpace(s.Code) && s.Code.Equals(normSealType, StringComparison.OrdinalIgnoreCase)) || s.Name.Equals(normSealType, StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(normSealType, StringComparison.OrdinalIgnoreCase));
         if (sealItem is null)
             return ServiceResult<ValidatedSealInput>.Failure($"印章类型【{request.SealType}】不存在。", "SEAL_001");
         if (!sealItem.IsEnabled)
             return ServiceResult<ValidatedSealInput>.Failure($"印章【{sealItem.Name}】已被系统停用，无法申请。", "SEAL_005");
 
         var normDocCategory = NormalizeDocumentCategory(request.DocumentCategory);
-        var docCategory = policy.DocumentCategories.FirstOrDefault(r => r.Name.Equals(normDocCategory, StringComparison.OrdinalIgnoreCase));
+        var docCategory = policy.DocumentCategories.FirstOrDefault(r => (!string.IsNullOrWhiteSpace(r.Code) && r.Code.Equals(normDocCategory, StringComparison.OrdinalIgnoreCase)) || r.Name.Equals(normDocCategory, StringComparison.OrdinalIgnoreCase));
         if (docCategory is null)
             return ServiceResult<ValidatedSealInput>.Failure($"文件类别【{request.DocumentCategory}】不存在。", "SEAL_001");
         if (!docCategory.IsEnabled)

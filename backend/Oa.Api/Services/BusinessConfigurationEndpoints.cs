@@ -63,8 +63,8 @@ public static class BusinessConfigurationEndpoints
             BusinessConfigurationService service) =>
         {
             _ = auth.Resolve(request);
-            var bundle = service.GetEffectiveBundle(asOf);
-            return Results.Ok(bundle);
+            var result = service.GetEffectiveBundle(asOf);
+            return ToResult(result);
         });
 
         group.MapGet("/{id:guid}", (
@@ -296,7 +296,7 @@ public static class BusinessConfigurationEndpoints
                 var failureStatus = result.Code switch
                 {
                     "AUTH_002" => StatusCodes.Status403Forbidden,
-                    "DATA_001" => StatusCodes.Status404NotFound,
+                    "DATA_001" or "CONFIG_MISSING" => StatusCodes.Status404NotFound,
                     "CONFLICT_001" or "CONCURRENCY_001" or "CONFIG_002" or "CONFIG_003" or "CONFIG_004" => StatusCodes.Status409Conflict,
                     _ => StatusCodes.Status400BadRequest
                 };

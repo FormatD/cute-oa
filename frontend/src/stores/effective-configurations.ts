@@ -87,7 +87,9 @@ const createDefaultBundle = (): EffectiveBusinessConfigurationBundle => ({
   contractTypes: [
     { code: 'FIXED_TERM', name: '固定期限', sortOrder: 1 },
     { code: 'OPEN_ENDED', name: '无固定期限', sortOrder: 2 },
-    { code: 'PROJECT_BASED', name: '以完成任务为期限', sortOrder: 3 }
+    { code: 'PROJECT_BASED', name: '以完成任务为期限', sortOrder: 3 },
+    { code: 'INTERNSHIP', name: '实习协议', sortOrder: 4 },
+    { code: 'LABOR_DISPATCH', name: '劳务派遣协议', sortOrder: 5 }
   ],
   attachmentTypes: [
     { code: 'ID_CARD', name: '身份证件', sortOrder: 1 },
@@ -153,6 +155,10 @@ export const useEffectiveConfigurationStore = defineStore('effectiveConfiguratio
     }
   }
 
+  function invalidate() {
+    loaded.value = false
+  }
+
   function clear() {
     bundle.value = createDefaultBundle()
     loaded.value = false
@@ -180,6 +186,7 @@ export const useEffectiveConfigurationStore = defineStore('effectiveConfiguratio
     approvalCommentPresets,
     announcementTypes,
     load,
+    invalidate,
     clear
   }
 })

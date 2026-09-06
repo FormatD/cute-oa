@@ -13,7 +13,7 @@ public sealed class PurchaseService
     private ServiceResult<(ProcurementPolicyConfig Policy, BusinessConfigurationRecord? Record)> ResolveProcurementPolicy()
     {
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Procurement, "ProcurementPolicy");
-        if (configRecord is null)
+        if (db is not null && configRecord is null)
             return ServiceResult<(ProcurementPolicyConfig, BusinessConfigurationRecord?)>.Failure("未找到生效中的采购管理策略配置【ProcurementPolicy】。", "CONFIG_MISSING");
 
         ProcurementPolicyConfig? policy = null;
@@ -497,7 +497,7 @@ public sealed class PurchaseService
         if (!policyResult.IsSuccess)
             return ServiceResult<(IReadOnlyList<PurchaseItem>, IReadOnlyList<string>, IReadOnlyList<string>)>.Failure(policyResult.Error!, policyResult.Code!);
         var (policy, _) = policyResult.Value;
-        var allowedCategories = policy.Categories.Where(c => c.IsEnabled).Select(c => c.Name).ToHashSet();
+        var allowedCategories = policy.Categories.Where(c => c.IsEnabled).SelectMany(c => new[] { c.Code, c.Name }).Where(x => !string.IsNullOrWhiteSpace(x)).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var normalized = new List<PurchaseItem>();
         foreach (var item in request.Items)

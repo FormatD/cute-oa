@@ -2547,7 +2547,10 @@ await using (var configDb = new OaDbContext(options))
         throw new InvalidOperationException("默认公告字典未自动初始化生效。");
 
     // 1.1 Effective options bundle verification (R-B1)
-    var effectiveBundle = configService.GetEffectiveBundle();
+    var bundleResult = configService.GetEffectiveBundle();
+    if (!bundleResult.IsSuccess || bundleResult.Value is null)
+        throw new InvalidOperationException($"统一有效配置 Bundle (GetEffectiveBundle) 获取失败: {bundleResult.Error}");
+    var effectiveBundle = bundleResult.Value;
     if (effectiveBundle.LeaveTypes.Count == 0 ||
         effectiveBundle.ExpenseCategories.Count == 0 ||
         effectiveBundle.TravelStandards.Count == 0 ||
@@ -2559,6 +2562,13 @@ await using (var configDb = new OaDbContext(options))
         effectiveBundle.AnnouncementTypes.Count == 0)
     {
         throw new InvalidOperationException("统一有效配置 Bundle (GetEffectiveBundle) 选项缺失或解析失败。");
+    }
+
+    // 1.2 Fail-closed verification (P0-F3: 无生效配置时返回 CONFIG_MISSING，绝不静默回退默认值)
+    var historicalBundle = configService.GetEffectiveBundle(DateTimeOffset.UtcNow.AddYears(-10));
+    if (historicalBundle.IsSuccess || historicalBundle.Code != "CONFIG_MISSING")
+    {
+        throw new InvalidOperationException($"无生效配置时 GetEffectiveBundle 应失败并返回 CONFIG_MISSING，实际返回: IsSuccess={historicalBundle.IsSuccess}, Code={historicalBundle.Code}");
     }
 
     // 2. Permission enforcement
@@ -3096,6 +3106,78 @@ await using (var configDb = new OaDbContext(options))
     var adjustedBalance = compTimeLeaveService.GetBalance(grantUser, grantUser.Id, LeaveType.CompTime, today.Year).Value!;
     if (adjustedBalance.Entitled != 4.0m || adjustedBalance.Available != 1.5m || adjustedBalance.Used != 2.5m)
         throw new InvalidOperationException($"调休调整后余额不符合预期：Entitled={adjustedBalance.Entitled}, Available={adjustedBalance.Available}, Used={adjustedBalance.Used}");
+
+    // 9.7 R-B3: 调休 Grant 并发更新保护测试 (Dual DbContext + Task.WhenAll + Advisory Lock + OCC)
+    var concurrentGrantUser = configData.GetEmployee("u-li");
+    var existingLiGrants = configDb.CompTimeGrants.Where(g => g.TenantId == "demo" && g.UserId == concurrentGrantUser.Id).ToList();
+    if (existingLiGrants.Count > 0) configDb.CompTimeGrants.RemoveRange(existingLiGrants);
+    var existingLiBalances = configDb.LeaveBalances.Where(b => b.TenantId == "demo" && b.UserId == concurrentGrantUser.Id && b.LeaveType == (int)LeaveType.CompTime).ToList();
+    if (existingLiBalances.Count > 0) configDb.LeaveBalances.RemoveRange(existingLiBalances);
+
+    var liGrant = new CompTimeGrantRecord
+    {
+        TenantId = "demo",
+        UserId = concurrentGrantUser.Id,
+        GrantedDate = today.AddDays(-1),
+        ExpiredAt = today.AddDays(30),
+        Days = 2.0m,
+        UsedDays = 0m,
+        FrozenDays = 0m,
+        Reason = "并发保护测试授予",
+        Version = 1
+    };
+    configDb.CompTimeGrants.Add(liGrant);
+    configDb.SaveChanges();
+
+    var liInitBal = compTimeLeaveService.GetBalance(concurrentGrantUser, concurrentGrantUser.Id, LeaveType.CompTime, today.Year).Value!;
+    if (liInitBal.Available != 2.0m)
+        throw new InvalidOperationException($"并发测试初始余额不符合预期: Available={liInitBal.Available}");
+
+    var req1Result = compTimeLeaveService.CreateDraft(concurrentGrantUser, new CreateLeaveRequest(
+        LeaveType.CompTime, new DateOnly(2026, 11, 2), LeavePeriod.FullDay, new DateOnly(2026, 11, 2), LeavePeriod.FullDay, "并发申请1", []));
+    var req2Result = compTimeLeaveService.CreateDraft(concurrentGrantUser, new CreateLeaveRequest(
+        LeaveType.CompTime, new DateOnly(2026, 11, 3), LeavePeriod.FullDay, new DateOnly(2026, 11, 3), LeavePeriod.FullDay, "并发申请2", []));
+    if (!req1Result.IsSuccess || !req2Result.IsSuccess)
+        throw new InvalidOperationException("创建并发调休申请草稿失败。");
+
+    var compTimeBarrier = new ManualResetEventSlim(false);
+    var compTask1 = Task.Run(async () =>
+    {
+        await using var threadDb = new OaDbContext(options);
+        var threadData = new DemoData(threadDb);
+        var threadLeave = new LeaveService(threadData, threadDb);
+        var threadActor = threadData.GetEmployee("u-li");
+        compTimeBarrier.Wait();
+        return threadLeave.Submit(threadActor, req1Result.Value!.Id);
+    });
+
+    var compTask2 = Task.Run(async () =>
+    {
+        await using var threadDb = new OaDbContext(options);
+        var threadData = new DemoData(threadDb);
+        var threadLeave = new LeaveService(threadData, threadDb);
+        var threadActor = threadData.GetEmployee("u-li");
+        compTimeBarrier.Wait();
+        return threadLeave.Submit(threadActor, req2Result.Value!.Id);
+    });
+
+    compTimeBarrier.Set();
+    var compResults = await Task.WhenAll(compTask1, compTask2);
+
+    await using (var verifyDb = new OaDbContext(options))
+    {
+        var finalGrant = verifyDb.CompTimeGrants.AsNoTracking().Single(g => g.Id == liGrant.Id);
+        var submittedCount = compResults.Count(r => r.IsSuccess);
+        var expectedFrozen = submittedCount * 1.0m;
+        if (finalGrant.FrozenDays != expectedFrozen)
+        {
+            throw new InvalidOperationException($"并发更新保护失效发生更新丢失！成功提交数: {submittedCount}, Grant FrozenDays={finalGrant.FrozenDays}, 预期={expectedFrozen}");
+        }
+        if (submittedCount != 2 || finalGrant.FrozenDays != 2.0m || finalGrant.Version != 3)
+        {
+            throw new InvalidOperationException($"并发串行化与OCC验证不符：submittedCount={submittedCount}, FrozenDays={finalGrant.FrozenDays}, Version={finalGrant.Version}");
+        }
+    }
 
     // 10. WP-C (R-C1): 专职最小权限角色、MFA 约束与关键管理失败审计留痕
     // 10.1 专职“配置管理员”角色与权限最小化原则

@@ -170,9 +170,27 @@ public sealed class FileService
     {
         var code = string.IsNullOrWhiteSpace(typeCode) ? "OTHER" : typeCode.Trim();
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Dictionary, "AttachmentType");
-        var dict = configRecord is not null
-            ? System.Text.Json.JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultAttachmentTypeDict();
+        if (db is not null && configRecord is null)
+            return ServiceResult<DictionaryItemConfig>.Failure("未找到生效中的附件类型字典配置【AttachmentType】。", "CONFIG_MISSING");
+
+        DictionaryConfig? dict = null;
+        if (configRecord is not null)
+        {
+            try
+            {
+                dict = System.Text.Json.JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
+            }
+            catch
+            {
+                return ServiceResult<DictionaryItemConfig>.Failure("附件类型字典配置内容损坏，无法解析。", "CONFIG_INVALID");
+            }
+            if (dict is null)
+                return ServiceResult<DictionaryItemConfig>.Failure("附件类型字典配置内容损坏，无法解析。", "CONFIG_INVALID");
+        }
+        else
+        {
+            dict = BusinessConfigurationDefaults.CreateDefaultAttachmentTypeDict();
+        }
         var item = dict?.Items.FirstOrDefault(i => i.Code.Equals(code, StringComparison.OrdinalIgnoreCase));
         if (item is null)
             return ServiceResult<DictionaryItemConfig>.Failure($"附件类型【{code}】不存在。", "VALIDATION_001");

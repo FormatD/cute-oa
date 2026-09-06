@@ -252,9 +252,27 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
     {
         var code = contractType?.Trim() ?? string.Empty;
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Dictionary, "ContractType");
-        var dict = configRecord is not null
-            ? JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultContractTypeDict();
+        if (db is not null && configRecord is null)
+            return ServiceResult<DictionaryItemConfig>.Failure("未找到生效中的合同类型字典配置【ContractType】。", "CONFIG_MISSING");
+
+        DictionaryConfig? dict = null;
+        if (configRecord is not null)
+        {
+            try
+            {
+                dict = JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
+            }
+            catch
+            {
+                return ServiceResult<DictionaryItemConfig>.Failure("合同类型字典配置内容损坏，无法解析。", "CONFIG_INVALID");
+            }
+            if (dict is null)
+                return ServiceResult<DictionaryItemConfig>.Failure("合同类型字典配置内容损坏，无法解析。", "CONFIG_INVALID");
+        }
+        else
+        {
+            dict = BusinessConfigurationDefaults.CreateDefaultContractTypeDict();
+        }
         var item = dict?.Items.FirstOrDefault(i => i.Code.Equals(code, StringComparison.OrdinalIgnoreCase));
         if (item is null)
             return ServiceResult<DictionaryItemConfig>.Failure("合同类型不合法。", "CONTRACT_001");

@@ -96,8 +96,11 @@ public sealed class LeaveService
             {
                 var neededDeduct = -deltaCompTime;
                 var today = BusinessTime.ChinaToday();
-                var activeAvail = _compTimeGrants
-                    .Where(g => g.TenantId == TenantId && g.UserId == subject.Id && g.ExpiredAt >= today)
+                var userGrants = db is not null
+                    ? db.CompTimeGrants.AsNoTracking().Where(g => g.TenantId == TenantId && g.UserId == subject.Id).ToList()
+                    : _compTimeGrants.Where(g => g.TenantId == TenantId && g.UserId == subject.Id).ToList();
+                var activeAvail = userGrants
+                    .Where(g => g.ExpiredAt >= today)
                     .Sum(g => Math.Max(0, g.Days - g.UsedDays - g.FrozenDays));
                 if (activeAvail < neededDeduct)
                 {
@@ -120,9 +123,26 @@ public sealed class LeaveService
                 if (deltaCompTime > 0)
                 {
                     var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Leave, "LeavePolicy");
-                    var policy = configRecord is not null
-                        ? JsonSerializer.Deserialize<LeavePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-                        : BusinessConfigurationDefaults.CreateDefaultLeavePolicy();
+                    if (db is not null && configRecord is null)
+                        return ServiceResult<LeaveBalance>.Failure("未找到生效中的假勤规则配置【LeavePolicy】。", "CONFIG_MISSING");
+                    LeavePolicyConfig? policy = null;
+                    if (configRecord is not null)
+                    {
+                        try
+                        {
+                            policy = JsonSerializer.Deserialize<LeavePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
+                        }
+                        catch
+                        {
+                            return ServiceResult<LeaveBalance>.Failure("假勤规则配置内容损坏，无法解析。", "CONFIG_INVALID");
+                        }
+                        if (policy is null)
+                            return ServiceResult<LeaveBalance>.Failure("假勤规则配置内容损坏，无法解析。", "CONFIG_INVALID");
+                    }
+                    else
+                    {
+                        policy = BusinessConfigurationDefaults.CreateDefaultLeavePolicy();
+                    }
                     var validityDays = policy?.CompTimeValidityDays > 0 ? policy.CompTimeValidityDays : 90;
                     var grant = new CompTimeGrantRecord
                     {
@@ -144,21 +164,27 @@ public sealed class LeaveService
                 }
                 else if (deltaCompTime < 0)
                 {
+                    if (db is not null)
+                    {
+                        _compTimeGrants.RemoveAll(g => g.TenantId == TenantId && g.UserId == subject.Id);
+                        _compTimeGrants.AddRange(db.CompTimeGrants.AsNoTracking().Where(g => g.TenantId == TenantId && g.UserId == subject.Id).ToList());
+                    }
                     var neededDeduct = -deltaCompTime;
                     var unexpiredGrants = _compTimeGrants
                         .Where(g => g.TenantId == TenantId && g.UserId == subject.Id && g.ExpiredAt >= today)
                         .OrderByDescending(g => g.ExpiredAt)
                         .ThenByDescending(g => g.GrantedDate)
                         .ToList();
-                    var touched = new List<CompTimeGrantRecord>();
+                    var touched = new List<(CompTimeGrantRecord Grant, int ExpectedVersion)>();
                     foreach (var grant in unexpiredGrants)
                     {
                         var avail = Math.Max(0, grant.Days - grant.UsedDays - grant.FrozenDays);
                         if (avail <= 0) continue;
                         var deduct = Math.Min(avail, neededDeduct);
+                        var exp = grant.Version;
                         grant.Days -= deduct;
                         grant.Version++;
-                        touched.Add(grant);
+                        touched.Add((grant, exp));
                         neededDeduct -= deduct;
                         if (neededDeduct <= 0) break;
                     }
@@ -182,7 +208,7 @@ public sealed class LeaveService
                 db.SaveChanges();
             }
             return ServiceResult<LeaveBalance>.Success(saved);
-        });
+        }, userLockId: request.Type == LeaveType.CompTime ? subject.Id : null);
     }
 
     public IReadOnlyList<FlowTask> GetPendingTasks(Employee actor) => _requests
@@ -314,29 +340,6 @@ public sealed class LeaveService
         List<CompTimeGrantAllocation>? compTimeAllocations = null;
         if (item.Type == LeaveType.CompTime)
         {
-            var today = BusinessTime.ChinaToday();
-            var activeGrants = _compTimeGrants
-                .Where(g => g.TenantId == TenantId && g.UserId == actor.Id && g.ExpiredAt >= today)
-                .OrderBy(g => g.ExpiredAt)
-                .ThenBy(g => g.GrantedDate)
-                .ThenBy(g => g.Id)
-                .ToList();
-            var totalAvailable = activeGrants.Sum(g => Math.Max(0, g.Days - g.UsedDays - g.FrozenDays));
-            if (totalAvailable < item.Days)
-            {
-                return ServiceResult<LeaveRequest>.Failure("调休余额不足。", "LEAVE_001");
-            }
-            compTimeAllocations = new List<CompTimeGrantAllocation>();
-            var remaining = item.Days;
-            foreach (var grant in activeGrants)
-            {
-                var avail = Math.Max(0, grant.Days - grant.UsedDays - grant.FrozenDays);
-                if (avail <= 0) continue;
-                var freeze = Math.Min(avail, remaining);
-                compTimeAllocations.Add(new CompTimeGrantAllocation(grant.Id, freeze));
-                remaining -= freeze;
-                if (remaining <= 0) break;
-            }
             balanceYear = item.StartDate.Year;
         }
         else if (item.Type == LeaveType.Annual)
@@ -367,20 +370,42 @@ public sealed class LeaveService
             var expectedVersion = item.Version;
             item.Version++;
             item.BalanceYear = balanceYear;
-            if (item.Type == LeaveType.CompTime && compTimeAllocations is not null)
+            if (item.Type == LeaveType.CompTime)
             {
-                item.CompTimeAllocations = compTimeAllocations;
-                var touched = new List<CompTimeGrantRecord>();
-                foreach (var alloc in compTimeAllocations)
+                if (db is not null)
                 {
-                    var grant = _compTimeGrants.FirstOrDefault(g => g.Id == alloc.GrantId);
-                    if (grant is not null)
-                    {
-                        grant.FrozenDays += alloc.Days;
-                        grant.Version++;
-                        touched.Add(grant);
-                    }
+                    _compTimeGrants.RemoveAll(g => g.TenantId == TenantId && g.UserId == actor.Id);
+                    _compTimeGrants.AddRange(db.CompTimeGrants.AsNoTracking().Where(g => g.TenantId == TenantId && g.UserId == actor.Id).ToList());
                 }
+                var today = BusinessTime.ChinaToday();
+                var activeGrants = _compTimeGrants
+                    .Where(g => g.TenantId == TenantId && g.UserId == actor.Id && g.ExpiredAt >= today)
+                    .OrderBy(g => g.ExpiredAt)
+                    .ThenBy(g => g.GrantedDate)
+                    .ThenBy(g => g.Id)
+                    .ToList();
+                var totalAvailable = activeGrants.Sum(g => Math.Max(0, g.Days - g.UsedDays - g.FrozenDays));
+                if (totalAvailable < item.Days)
+                {
+                    return ServiceResult<LeaveRequest>.Failure("调休余额不足。", "LEAVE_001");
+                }
+                compTimeAllocations = new List<CompTimeGrantAllocation>();
+                var remaining = item.Days;
+                var touched = new List<(CompTimeGrantRecord Grant, int ExpectedVersion)>();
+                foreach (var grant in activeGrants)
+                {
+                    var avail = Math.Max(0, grant.Days - grant.UsedDays - grant.FrozenDays);
+                    if (avail <= 0) continue;
+                    var freeze = Math.Min(avail, remaining);
+                    compTimeAllocations.Add(new CompTimeGrantAllocation(grant.Id, freeze));
+                    var exp = grant.Version;
+                    grant.FrozenDays += freeze;
+                    grant.Version++;
+                    touched.Add((grant, exp));
+                    remaining -= freeze;
+                    if (remaining <= 0) break;
+                }
+                item.CompTimeAllocations = compTimeAllocations;
                 PersistCompTimeGrants(touched);
                 _balances[(actor.Id, item.Type, balanceYear!.Value)] = LoadBalance(actor, item.Type, balanceYear.Value);
             }
@@ -425,7 +450,7 @@ public sealed class LeaveService
                 notifications?.Enqueue(firstTask.AssigneeId, "TODO_CREATED", "新增请假审批待办", $"{item.ApplicantName} 提交了 {item.Number}", "LeaveRequest", item.Id);
             Audit(actor, "LEAVE_SUBMITTED", item, "提交请假审批");
             return ServiceResult<LeaveRequest>.Success(item);
-        });
+        }, userLockId: item.Type == LeaveType.CompTime ? actor.Id : null);
         return result;
     }
 
@@ -517,7 +542,7 @@ public sealed class LeaveService
                 notifications?.Enqueue(next.AssigneeId, "TODO_CREATED", "新增请假审批待办", $"{item.Number} 等待你审批", "LeaveRequest", item.Id);
             Audit(actor, "LEAVE_APPROVED", item, comment?.Trim() ?? "同意请假");
             return ServiceResult<LeaveRequest>.Success(item);
-        });
+        }, userLockId: item.Type == LeaveType.CompTime ? item.ApplicantId : null);
         return result;
     }
 
@@ -551,7 +576,7 @@ public sealed class LeaveService
             notifications?.Enqueue(item.ApplicantId, "LEAVE_REJECTED", "请假申请已驳回", $"{item.Number} 已被驳回：{comment.Trim()}", "LeaveRequest", item.Id);
             Audit(actor, "LEAVE_REJECTED", item, comment.Trim());
             return ServiceResult<LeaveRequest>.Success(item);
-        });
+        }, userLockId: item.Type == LeaveType.CompTime ? item.ApplicantId : null);
         return result;
     }
 
@@ -611,7 +636,7 @@ public sealed class LeaveService
             foreach (var recipient in activatedCopies) notifications?.Enqueue(recipient.Id, "FLOW_COPY", "请假抄送事项已撤回", $"{item.ApplicantName} 的 {item.Number} 已撤回", "LeaveRequest", item.Id);
             Audit(actor, "LEAVE_WITHDRAWN", item, "撤回请假申请");
             return ServiceResult<LeaveRequest>.Success(item);
-        });
+        }, userLockId: item.Type == LeaveType.CompTime ? actor.Id : null);
         return result;
     }
 
@@ -632,15 +657,21 @@ public sealed class LeaveService
         {
             if (item.CompTimeAllocations.Count > 0)
             {
-                var touched = new List<CompTimeGrantRecord>();
+                if (db is not null)
+                {
+                    _compTimeGrants.RemoveAll(g => g.TenantId == TenantId && g.UserId == actor.Id);
+                    _compTimeGrants.AddRange(db.CompTimeGrants.AsNoTracking().Where(g => g.TenantId == TenantId && g.UserId == actor.Id).ToList());
+                }
+                var touched = new List<(CompTimeGrantRecord Grant, int ExpectedVersion)>();
                 foreach (var alloc in item.CompTimeAllocations)
                 {
                     var grant = _compTimeGrants.FirstOrDefault(g => g.Id == alloc.GrantId);
                     if (grant is not null)
                     {
+                        var exp = grant.Version;
                         grant.FrozenDays = Math.Max(0, grant.FrozenDays - alloc.Days);
                         grant.Version++;
-                        touched.Add(grant);
+                        touched.Add((grant, exp));
                     }
                 }
                 PersistCompTimeGrants(touched);
@@ -678,16 +709,22 @@ public sealed class LeaveService
         {
             if (item.CompTimeAllocations.Count > 0)
             {
-                var touched = new List<CompTimeGrantRecord>();
+                if (db is not null)
+                {
+                    _compTimeGrants.RemoveAll(g => g.TenantId == TenantId && g.UserId == actor.Id);
+                    _compTimeGrants.AddRange(db.CompTimeGrants.AsNoTracking().Where(g => g.TenantId == TenantId && g.UserId == actor.Id).ToList());
+                }
+                var touched = new List<(CompTimeGrantRecord Grant, int ExpectedVersion)>();
                 foreach (var alloc in item.CompTimeAllocations)
                 {
                     var grant = _compTimeGrants.FirstOrDefault(g => g.Id == alloc.GrantId);
                     if (grant is not null)
                     {
+                        var exp = grant.Version;
                         grant.FrozenDays = Math.Max(0, grant.FrozenDays - alloc.Days);
                         grant.UsedDays += alloc.Days;
                         grant.Version++;
-                        touched.Add(grant);
+                        touched.Add((grant, exp));
                     }
                 }
                 PersistCompTimeGrants(touched);
@@ -721,6 +758,10 @@ public sealed class LeaveService
     {
         if (type is not (LeaveType.Annual or LeaveType.CompTime)) throw new ArgumentOutOfRangeException(nameof(type), "仅年假和调休具有余额。");
         if (year is < 2000 or > 2100) throw new ArgumentOutOfRangeException(nameof(year), "余额年度必须在 2000–2100 之间。");
+        if (type == LeaveType.CompTime)
+        {
+            return LoadBalance(employee, type, year);
+        }
         var key = (employee.Id, type, year);
         if (_balances.TryGetValue(key, out var cached)) return cached;
         var loaded = LoadBalance(employee, type, year);
@@ -736,7 +777,9 @@ public sealed class LeaveService
 
         if (type == LeaveType.CompTime)
         {
-            var userGrants = _compTimeGrants.Where(g => g.TenantId == TenantId && g.UserId == employee.Id).ToList();
+            var userGrants = db is not null
+                ? db.CompTimeGrants.AsNoTracking().Where(g => g.TenantId == TenantId && g.UserId == employee.Id).ToList()
+                : _compTimeGrants.Where(g => g.TenantId == TenantId && g.UserId == employee.Id).ToList();
             if (userGrants.Count > 0)
             {
                 var validGrants = userGrants.Where(g => g.ExpiredAt >= today).ToList();
@@ -831,20 +874,22 @@ public sealed class LeaveService
         db.SaveChanges();
     }
 
-    private void PersistCompTimeGrants(IEnumerable<CompTimeGrantRecord> updatedGrants)
+    private void PersistCompTimeGrants(IEnumerable<(CompTimeGrantRecord Grant, int ExpectedVersion)> updatedGrants)
     {
         if (db is null) return;
-        foreach (var grant in updatedGrants)
+        foreach (var (grant, expectedVersion) in updatedGrants)
         {
             var record = db.CompTimeGrants.SingleOrDefault(x => x.Id == grant.Id);
-            if (record is not null)
+            if (record is null || record.Version != expectedVersion)
             {
-                record.Days = grant.Days;
-                record.UsedDays = grant.UsedDays;
-                record.FrozenDays = grant.FrozenDays;
-                record.Reason = grant.Reason;
-                record.Version = grant.Version;
+                throw new DbUpdateConcurrencyException();
             }
+            db.Entry(record).Property(x => x.Version).OriginalValue = expectedVersion;
+            record.Days = grant.Days;
+            record.UsedDays = grant.UsedDays;
+            record.FrozenDays = grant.FrozenDays;
+            record.Reason = grant.Reason;
+            record.Version = expectedVersion + 1;
         }
         db.SaveChanges();
     }
@@ -876,12 +921,16 @@ public sealed class LeaveService
         _balances[key] = balance with { Version = record.Version };
     }
 
-    private ServiceResult<T> ExecuteMutation<T>(Func<ServiceResult<T>> mutation)
+    private ServiceResult<T> ExecuteMutation<T>(Func<ServiceResult<T>> mutation, string? userLockId = null)
     {
         if (db is null) return mutation();
         using var transaction = db.Database.BeginTransaction();
         try
         {
+            if (userLockId is not null && db.Database.IsNpgsql())
+            {
+                db.Database.ExecuteSqlRaw("SELECT pg_advisory_xact_lock(hashtext({0})::bigint)", $"comp_time_grant:{TenantId}:{userLockId}");
+            }
             var result = mutation();
             if (result.IsSuccess) transaction.Commit();
             else

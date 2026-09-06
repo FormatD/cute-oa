@@ -20,7 +20,7 @@ export default defineConfig({
     {
       command: 'dotnet run --project backend/Oa.Api/Oa.Api.csproj --urls http://127.0.0.1:5235',
       cwd: repositoryDirectory,
-      env: { ...process.env, ASPNETCORE_ENVIRONMENT: 'Development', Cors__AllowedOrigins__0: 'http://127.0.0.1:5174' },
+      env: { ...process.env, ASPNETCORE_ENVIRONMENT: 'Development', Cors__AllowedOrigins__0: 'http://127.0.0.1:5174', LoginProtection__Enabled: 'false' },
       url: 'http://127.0.0.1:5235/health/ready',
       reuseExistingServer: false,
       timeout: 120_000

@@ -145,6 +145,7 @@ public sealed class LeavePolicyConfig
 
 public sealed class ExpenseCategoryPolicyConfig
 {
+    public string Code { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public bool IsEnabled { get; set; } = true;
     public decimal? SingleLimit { get; set; }
@@ -183,6 +184,7 @@ public sealed class TravelPolicyConfig
 
 public sealed class ProcurementCategoryPolicyConfig
 {
+    public string Code { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public bool IsEnabled { get; set; } = true;
 }
@@ -205,6 +207,7 @@ public sealed class ProcurementPolicyConfig
 
 public sealed class SealRegistryItemConfig
 {
+    public string Code { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public string SealType { get; set; } = string.Empty;
     public string CustodianUserId { get; set; } = string.Empty;
@@ -215,6 +218,7 @@ public sealed class SealRegistryItemConfig
 
 public sealed class SealDocumentCategoryConfig
 {
+    public string Code { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public bool IsEnabled { get; set; } = true;
     public string RiskLevel { get; set; } = "LOW";

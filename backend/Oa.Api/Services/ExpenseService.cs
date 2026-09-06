@@ -54,7 +54,9 @@ public sealed class ExpenseService
             if (detail.Amount <= 0 || detail.Amount != decimal.Round(detail.Amount, 2))
                 return ServiceResult<bool>.Failure("费用类别或金额不合法。");
 
-            var catRule = policy.Categories.FirstOrDefault(c => c.Name.Equals(detail.Category, StringComparison.OrdinalIgnoreCase));
+            var catRule = policy.Categories.FirstOrDefault(c =>
+                (!string.IsNullOrWhiteSpace(c.Code) && c.Code.Equals(detail.Category, StringComparison.OrdinalIgnoreCase)) ||
+                c.Name.Equals(detail.Category, StringComparison.OrdinalIgnoreCase));
             if (catRule is null)
                 return ServiceResult<bool>.Failure($"费用类别【{detail.Category}】已被系统停用或不存在，无法申请。", "EXP_005");
             if (!catRule.IsEnabled)

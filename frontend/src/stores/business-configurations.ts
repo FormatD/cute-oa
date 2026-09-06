@@ -11,6 +11,7 @@ import type {
   UpdateBusinessConfigurationRequest
 } from '../api/types'
 import { PAGE_SIZE } from './pagination'
+import { useEffectiveConfigurationStore } from './effective-configurations'
 
 export const useBusinessConfigurationStore = defineStore('businessConfigurations', () => {
   const api = useApiClient().businessConfigurations
@@ -126,12 +127,24 @@ export const useBusinessConfigurationStore = defineStore('businessConfigurations
     return execute(() => api.createNewVersion(id), '已成功基于当前版本创建新草稿。')
   }
 
-  function publish(id: string, payload?: PublishBusinessConfigurationRequest) {
-    return execute(() => api.publish(id, payload), '配置发布成功。')
+  async function publish(id: string, payload?: PublishBusinessConfigurationRequest) {
+    const result = await execute(() => api.publish(id, payload), '配置发布成功。')
+    if (result) {
+      const effectiveStore = useEffectiveConfigurationStore()
+      effectiveStore.invalidate()
+      await effectiveStore.load(true)
+    }
+    return result
   }
 
-  function retire(id: string, payload?: RetireBusinessConfigurationRequest) {
-    return execute(() => api.retire(id, payload), '配置已成功下线。')
+  async function retire(id: string, payload?: RetireBusinessConfigurationRequest) {
+    const result = await execute(() => api.retire(id, payload), '配置已成功下线。')
+    if (result) {
+      const effectiveStore = useEffectiveConfigurationStore()
+      effectiveStore.invalidate()
+      await effectiveStore.load(true)
+    }
+    return result
   }
 
   function deleteConfiguration(id: string) {

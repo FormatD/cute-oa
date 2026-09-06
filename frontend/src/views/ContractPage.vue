@@ -36,7 +36,7 @@ const typeMap = computed(() => {
   }
   return map
 })
-const typeLabel = (value: string) => typeMap.value.get(value) ?? ({ FIXED_TERM: '固定期限', OPEN_ENDED: '无固定期限', PROJECT_BASED: '以完成任务为期限' }[value] ?? value)
+const typeLabel = (value: string) => typeMap.value.get(value) ?? ({ FIXED_TERM: '固定期限', OPEN_ENDED: '无固定期限', PROJECT_BASED: '以完成任务为期限', INTERNSHIP: '实习协议', LABOR_DISPATCH: '劳务派遣协议' }[value] ?? value)
 const statusLabel = (value: string) => ({ DRAFT: '草稿', ACTIVE: '有效', EXPIRING: '即将到期', EXPIRED: '已到期', TERMINATED: '已终止', SUPERSEDED: '已续签替代' }[value] ?? value)
 
 function openCreate() {

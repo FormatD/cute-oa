@@ -55,13 +55,13 @@ public static class BusinessConfigurationDefaults
     {
         Categories =
         [
-            new() { Name = "交通", IsEnabled = true, SingleLimit = 5000, RequiresReceipt = true, RequiresReasonWhenExceeded = true, BlockWhenExceeded = false },
-            new() { Name = "住宿", IsEnabled = true, SingleLimit = 3000, RequiresReceipt = true, RequiresReasonWhenExceeded = true, BlockWhenExceeded = false },
-            new() { Name = "餐饮招待", IsEnabled = true, SingleLimit = 2000, RequiresReceipt = true, RequiresReasonWhenExceeded = true, BlockWhenExceeded = false },
-            new() { Name = "办公", IsEnabled = true, SingleLimit = 10000, RequiresReceipt = true, RequiresReasonWhenExceeded = true, BlockWhenExceeded = false },
-            new() { Name = "通讯", IsEnabled = true, SingleLimit = 1000, RequiresReceipt = true, RequiresReasonWhenExceeded = true, BlockWhenExceeded = false },
-            new() { Name = "培训", IsEnabled = true, SingleLimit = 20000, RequiresReceipt = true, RequiresReasonWhenExceeded = true, BlockWhenExceeded = false },
-            new() { Name = "其他", IsEnabled = true, SingleLimit = 5000, RequiresReceipt = true, RequiresReasonWhenExceeded = true, BlockWhenExceeded = false }
+            new() { Code = "Traffic", Name = "交通", IsEnabled = true, SingleLimit = 5000, RequiresReceipt = true, RequiresReasonWhenExceeded = true, BlockWhenExceeded = false },
+            new() { Code = "Hotel", Name = "住宿", IsEnabled = true, SingleLimit = 3000, RequiresReceipt = true, RequiresReasonWhenExceeded = true, BlockWhenExceeded = false },
+            new() { Code = "Meal", Name = "餐饮招待", IsEnabled = true, SingleLimit = 2000, RequiresReceipt = true, RequiresReasonWhenExceeded = true, BlockWhenExceeded = false },
+            new() { Code = "Office", Name = "办公", IsEnabled = true, SingleLimit = 10000, RequiresReceipt = true, RequiresReasonWhenExceeded = true, BlockWhenExceeded = false },
+            new() { Code = "Communication", Name = "通讯", IsEnabled = true, SingleLimit = 1000, RequiresReceipt = true, RequiresReasonWhenExceeded = true, BlockWhenExceeded = false },
+            new() { Code = "Training", Name = "培训", IsEnabled = true, SingleLimit = 20000, RequiresReceipt = true, RequiresReasonWhenExceeded = true, BlockWhenExceeded = false },
+            new() { Code = "Other", Name = "其他", IsEnabled = true, SingleLimit = 5000, RequiresReceipt = true, RequiresReasonWhenExceeded = true, BlockWhenExceeded = false }
         ]
     };
 
@@ -92,14 +92,14 @@ public static class BusinessConfigurationDefaults
     {
         Categories =
         [
-            new() { Name = "办公用品", IsEnabled = true },
-            new() { Name = "IT设备", IsEnabled = true },
-            new() { Name = "软件服务", IsEnabled = true },
-            new() { Name = "行政物资", IsEnabled = true },
-            new() { Name = "市场物料", IsEnabled = true },
-            new() { Name = "生产物料", IsEnabled = true },
-            new() { Name = "专业服务", IsEnabled = true },
-            new() { Name = "其他", IsEnabled = true }
+            new() { Code = "OfficeSupplies", Name = "办公用品", IsEnabled = true },
+            new() { Code = "ITEquipment", Name = "IT设备", IsEnabled = true },
+            new() { Code = "SoftwareService", Name = "软件服务", IsEnabled = true },
+            new() { Code = "AdminSupplies", Name = "行政物资", IsEnabled = true },
+            new() { Code = "Marketing", Name = "市场物料", IsEnabled = true },
+            new() { Code = "Production", Name = "生产物料", IsEnabled = true },
+            new() { Code = "Consulting", Name = "专业服务", IsEnabled = true },
+            new() { Code = "Other", Name = "其他", IsEnabled = true }
         ],
         QuoteAttachmentThreshold = 5000m,
         AmountTiers =
@@ -117,22 +117,22 @@ public static class BusinessConfigurationDefaults
     {
         Seals =
         [
-            new() { Name = "公章", SealType = "公章", CustodianUserId = "u-admin", IsEnabled = true, AllowOut = true, MaxOutDays = 7 },
-            new() { Name = "合同专用章", SealType = "合同专用章", CustodianUserId = "u-admin", IsEnabled = true, AllowOut = true, MaxOutDays = 7 },
-            new() { Name = "财务专用章", SealType = "财务专用章", CustodianUserId = "u-lin", IsEnabled = true, AllowOut = false, MaxOutDays = 0 },
-            new() { Name = "法人章", SealType = "法人章", CustodianUserId = "u-wang", IsEnabled = true, AllowOut = false, MaxOutDays = 0 },
-            new() { Name = "人事专用章", SealType = "人事专用章", CustodianUserId = "u-sun", IsEnabled = true, AllowOut = true, MaxOutDays = 5 },
-            new() { Name = "其他", SealType = "其他", CustodianUserId = "u-admin", IsEnabled = true, AllowOut = true, MaxOutDays = 3 }
+            new() { Code = "OfficialSeal", Name = "公章", SealType = "公章", CustodianUserId = "u-admin", IsEnabled = true, AllowOut = true, MaxOutDays = 7 },
+            new() { Code = "ContractSeal", Name = "合同专用章", SealType = "合同专用章", CustodianUserId = "u-admin", IsEnabled = true, AllowOut = true, MaxOutDays = 7 },
+            new() { Code = "FinanceSeal", Name = "财务专用章", SealType = "财务专用章", CustodianUserId = "u-lin", IsEnabled = true, AllowOut = false, MaxOutDays = 0 },
+            new() { Code = "LegalSeal", Name = "法人章", SealType = "法人章", CustodianUserId = "u-wang", IsEnabled = true, AllowOut = false, MaxOutDays = 0 },
+            new() { Code = "PersonnelSeal", Name = "人事专用章", SealType = "人事专用章", CustodianUserId = "u-sun", IsEnabled = true, AllowOut = true, MaxOutDays = 5 },
+            new() { Code = "OtherSeal", Name = "其他", SealType = "其他", CustodianUserId = "u-admin", IsEnabled = true, AllowOut = true, MaxOutDays = 3 }
         ],
         DocumentCategories =
         [
-            new() { Name = "合同协议", IsEnabled = true, RiskLevel = "MEDIUM" },
-            new() { Name = "招投标文件", IsEnabled = true, RiskLevel = "MEDIUM" },
-            new() { Name = "公文函件", IsEnabled = true, RiskLevel = "LOW" },
-            new() { Name = "资质证明", IsEnabled = true, RiskLevel = "LOW" },
-            new() { Name = "财务报表", IsEnabled = true, RiskLevel = "MEDIUM" },
-            new() { Name = "人事材料", IsEnabled = true, RiskLevel = "LOW" },
-            new() { Name = "其他", IsEnabled = true, RiskLevel = "LOW" }
+            new() { Code = "ContractAgreement", Name = "合同协议", IsEnabled = true, RiskLevel = "MEDIUM" },
+            new() { Code = "BiddingDocument", Name = "招投标文件", IsEnabled = true, RiskLevel = "MEDIUM" },
+            new() { Code = "OfficialLetter", Name = "公文函件", IsEnabled = true, RiskLevel = "LOW" },
+            new() { Code = "QualificationCert", Name = "资质证明", IsEnabled = true, RiskLevel = "LOW" },
+            new() { Code = "FinancialStatement", Name = "财务报表", IsEnabled = true, RiskLevel = "MEDIUM" },
+            new() { Code = "PersonnelMaterial", Name = "人事材料", IsEnabled = true, RiskLevel = "LOW" },
+            new() { Code = "OtherDocument", Name = "其他", IsEnabled = true, RiskLevel = "LOW" }
         ],
         RiskRules = new()
         {

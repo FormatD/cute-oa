@@ -819,136 +819,196 @@ public sealed class BusinessConfigurationService
             .Replace("%", "\\%", StringComparison.Ordinal)
             .Replace("_", "\\_", StringComparison.Ordinal);
 
-    public EffectiveBusinessConfigurationBundle GetEffectiveBundle(DateTimeOffset? asOfDate = null)
+    public ServiceResult<EffectiveBusinessConfigurationBundle> GetEffectiveBundle(DateTimeOffset? asOfDate = null)
     {
         var asOf = (asOfDate ?? DateTimeOffset.UtcNow).ToUniversalTime();
         var bundle = new EffectiveBusinessConfigurationBundle();
 
         // 1. Leave
         var leaveRecord = GetEffective(ConfigurationDomains.Leave, "LeavePolicy", asOf);
-        var leavePolicy = leaveRecord is not null
-            ? JsonSerializer.Deserialize<LeavePolicyConfig>(leaveRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultLeavePolicy();
-        if (leavePolicy is not null)
+        if (leaveRecord is null)
+            return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("未找到生效中的假勤规则配置【LeavePolicy】。", "CONFIG_MISSING");
+        LeavePolicyConfig? leavePolicy;
+        try
         {
-            bundle.LeaveTypes = leavePolicy.LeaveTypes
-                .Where(t => t.IsEnabled)
-                .Select(t => new EffectiveLeaveTypeOption
-                {
-                    Code = t.Type,
-                    Name = t.Name,
-                    MinUnit = t.MinUnit,
-                    RequiresAttachment = t.RequiresAttachment,
-                    AttachmentThresholdDays = t.AttachmentThresholdDays
-                })
-                .ToList();
+            leavePolicy = JsonSerializer.Deserialize<LeavePolicyConfig>(leaveRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
         }
+        catch (Exception ex)
+        {
+            return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure($"假勤规则配置内容损坏，无法解析: {ex.Message}", "CONFIG_INVALID");
+        }
+        if (leavePolicy is null)
+            return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("假勤规则配置内容损坏，无法解析。", "CONFIG_INVALID");
+
+        bundle.LeaveTypes = leavePolicy.LeaveTypes
+            .Where(t => t.IsEnabled)
+            .Select(t => new EffectiveLeaveTypeOption
+            {
+                Code = t.Type,
+                Name = t.Name,
+                MinUnit = t.MinUnit,
+                RequiresAttachment = t.RequiresAttachment,
+                AttachmentThresholdDays = t.AttachmentThresholdDays
+            })
+            .ToList();
 
         // 2. Expense
         var expenseRecord = GetEffective(ConfigurationDomains.Expense, "ExpensePolicy", asOf);
-        var expensePolicy = expenseRecord is not null
-            ? JsonSerializer.Deserialize<ExpensePolicyConfig>(expenseRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultExpensePolicy();
-        if (expensePolicy is not null)
+        if (expenseRecord is null)
+            return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("未找到生效中的费用报销规则配置【ExpensePolicy】。", "CONFIG_MISSING");
+        ExpensePolicyConfig? expensePolicy;
+        try
         {
-            bundle.ExpenseCategories = expensePolicy.Categories
-                .Where(c => c.IsEnabled)
-                .Select(c => new EffectiveExpenseCategoryOption
-                {
-                    Code = c.Name,
-                    Name = c.Name,
-                    SingleLimit = c.SingleLimit,
-                    RequiresReceipt = c.RequiresReceipt,
-                    RequiresReasonWhenExceeded = c.RequiresReasonWhenExceeded,
-                    BlockWhenExceeded = c.BlockWhenExceeded
-                })
-                .ToList();
+            expensePolicy = JsonSerializer.Deserialize<ExpensePolicyConfig>(expenseRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
         }
+        catch (Exception ex)
+        {
+            return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure($"费用报销规则配置内容损坏，无法解析: {ex.Message}", "CONFIG_INVALID");
+        }
+        if (expensePolicy is null)
+            return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("费用报销规则配置内容损坏，无法解析。", "CONFIG_INVALID");
+
+        bundle.ExpenseCategories = expensePolicy.Categories
+            .Where(c => c.IsEnabled)
+            .Select(c => new EffectiveExpenseCategoryOption
+            {
+                Code = !string.IsNullOrWhiteSpace(c.Code) ? c.Code : c.Name,
+                Name = c.Name,
+                SingleLimit = c.SingleLimit,
+                RequiresReceipt = c.RequiresReceipt,
+                RequiresReasonWhenExceeded = c.RequiresReasonWhenExceeded,
+                BlockWhenExceeded = c.BlockWhenExceeded
+            })
+            .ToList();
 
         // 3. Travel
         var travelRecord = GetEffective(ConfigurationDomains.Travel, "TravelPolicy", asOf);
-        var travelPolicy = travelRecord is not null
-            ? JsonSerializer.Deserialize<TravelPolicyConfig>(travelRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultTravelPolicy();
-        if (travelPolicy is not null)
+        if (travelRecord is null)
+            return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("未找到生效中的差旅管理标准配置【TravelPolicy】。", "CONFIG_MISSING");
+        TravelPolicyConfig? travelPolicy;
+        try
         {
-            bundle.TravelCityTiers = travelPolicy.CityTiers;
-            bundle.TravelEmployeeRanks = travelPolicy.EmployeeRanks;
-            bundle.TravelStandards = travelPolicy.Standards;
+            travelPolicy = JsonSerializer.Deserialize<TravelPolicyConfig>(travelRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
         }
+        catch (Exception ex)
+        {
+            return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure($"差旅管理标准配置内容损坏，无法解析: {ex.Message}", "CONFIG_INVALID");
+        }
+        if (travelPolicy is null)
+            return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("差旅管理标准配置内容损坏，无法解析。", "CONFIG_INVALID");
+
+        bundle.TravelCityTiers = travelPolicy.CityTiers;
+        bundle.TravelEmployeeRanks = travelPolicy.EmployeeRanks;
+        bundle.TravelStandards = travelPolicy.Standards;
 
         // 4. Procurement
         var procRecord = GetEffective(ConfigurationDomains.Procurement, "ProcurementPolicy", asOf);
-        var procPolicy = procRecord is not null
-            ? JsonSerializer.Deserialize<ProcurementPolicyConfig>(procRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultProcurementPolicy();
-        if (procPolicy is not null)
+        if (procRecord is null)
+            return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("未找到生效中的采购管理规则配置【ProcurementPolicy】。", "CONFIG_MISSING");
+        ProcurementPolicyConfig? procPolicy;
+        try
         {
-            bundle.ProcurementCategories = procPolicy.Categories
-                .Where(c => c.IsEnabled)
-                .Select(c => new EffectiveProcurementCategoryOption { Code = c.Name, Name = c.Name })
-                .ToList();
-            bundle.ProcurementAmountTiers = procPolicy.AmountTiers
-                .Select(t => new EffectiveProcurementAmountTierOption { Name = t.Name, MaxAmount = t.MaxAmount })
-                .ToList();
-            bundle.ProcurementQuoteThreshold = procPolicy.QuoteAttachmentThreshold;
+            procPolicy = JsonSerializer.Deserialize<ProcurementPolicyConfig>(procRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
         }
+        catch (Exception ex)
+        {
+            return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure($"采购管理规则配置内容损坏，无法解析: {ex.Message}", "CONFIG_INVALID");
+        }
+        if (procPolicy is null)
+            return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("采购管理规则配置内容损坏，无法解析。", "CONFIG_INVALID");
+
+        bundle.ProcurementCategories = procPolicy.Categories
+            .Where(c => c.IsEnabled)
+            .Select(c => new EffectiveProcurementCategoryOption
+            {
+                Code = !string.IsNullOrWhiteSpace(c.Code) ? c.Code : c.Name,
+                Name = c.Name
+            })
+            .ToList();
+        bundle.ProcurementAmountTiers = procPolicy.AmountTiers
+            .Select(t => new EffectiveProcurementAmountTierOption { Name = t.Name, MaxAmount = t.MaxAmount })
+            .ToList();
+        bundle.ProcurementQuoteThreshold = procPolicy.QuoteAttachmentThreshold;
 
         // 5. Seal
         var sealRecord = GetEffective(ConfigurationDomains.Seal, "SealPolicy", asOf);
-        var sealPolicy = sealRecord is not null
-            ? JsonSerializer.Deserialize<SealPolicyConfig>(sealRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultSealPolicy();
-        if (sealPolicy is not null)
+        if (sealRecord is null)
+            return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("未找到生效中的用章管理规则配置【SealPolicy】。", "CONFIG_MISSING");
+        SealPolicyConfig? sealPolicy;
+        try
         {
-            bundle.Seals = sealPolicy.Seals
-                .Where(s => s.IsEnabled)
-                .Select(s => new EffectiveSealOption
-                {
-                    Code = s.Name,
-                    Name = s.Name,
-                    SealType = s.SealType,
-                    AllowOut = s.AllowOut,
-                    MaxOutDays = s.MaxOutDays
-                })
-                .ToList();
-            bundle.SealDocumentCategories = sealPolicy.DocumentCategories
-                .Where(d => d.IsEnabled)
-                .Select(d => new EffectiveSealDocCategoryOption
-                {
-                    Code = d.Name,
-                    Name = d.Name,
-                    RiskLevel = d.RiskLevel
-                })
-                .ToList();
+            sealPolicy = JsonSerializer.Deserialize<SealPolicyConfig>(sealRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
         }
+        catch (Exception ex)
+        {
+            return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure($"用章管理规则配置内容损坏，无法解析: {ex.Message}", "CONFIG_INVALID");
+        }
+        if (sealPolicy is null)
+            return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("用章管理规则配置内容损坏，无法解析。", "CONFIG_INVALID");
+
+        bundle.Seals = sealPolicy.Seals
+            .Where(s => s.IsEnabled)
+            .Select(s => new EffectiveSealOption
+            {
+                Code = !string.IsNullOrWhiteSpace(s.Code) ? s.Code : s.Name,
+                Name = s.Name,
+                SealType = s.SealType,
+                AllowOut = s.AllowOut,
+                MaxOutDays = s.MaxOutDays
+            })
+            .ToList();
+        bundle.SealDocumentCategories = sealPolicy.DocumentCategories
+            .Where(d => d.IsEnabled)
+            .Select(d => new EffectiveSealDocCategoryOption
+            {
+                Code = !string.IsNullOrWhiteSpace(d.Code) ? d.Code : d.Name,
+                Name = d.Name,
+                RiskLevel = d.RiskLevel
+            })
+            .ToList();
 
         // 6. Dictionaries
-        bundle.ContractTypes = ResolveDictionaryOptions("ContractType", asOf, BusinessConfigurationDefaults.CreateDefaultContractTypeDict);
-        bundle.AttachmentTypes = ResolveDictionaryOptions("AttachmentType", asOf, BusinessConfigurationDefaults.CreateDefaultAttachmentTypeDict);
-        bundle.ApprovalCommentPresets = ResolveDictionaryOptions("ApprovalCommentPreset", asOf, BusinessConfigurationDefaults.CreateDefaultApprovalCommentPresetDict);
-        bundle.AnnouncementTypes = ResolveDictionaryOptions("AnnouncementType", asOf, BusinessConfigurationDefaults.CreateDefaultAnnouncementTypeDict);
+        var contractRes = ResolveDictionaryOptions("ContractType", asOf);
+        if (!contractRes.IsSuccess) return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure(contractRes.Error!, contractRes.Code!);
+        bundle.ContractTypes = contractRes.Value!;
 
-        return bundle;
+        var attachRes = ResolveDictionaryOptions("AttachmentType", asOf);
+        if (!attachRes.IsSuccess) return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure(attachRes.Error!, attachRes.Code!);
+        bundle.AttachmentTypes = attachRes.Value!;
+
+        var commentRes = ResolveDictionaryOptions("ApprovalCommentPreset", asOf);
+        if (!commentRes.IsSuccess) return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure(commentRes.Error!, commentRes.Code!);
+        bundle.ApprovalCommentPresets = commentRes.Value!;
+
+        var noticeRes = ResolveDictionaryOptions("AnnouncementType", asOf);
+        if (!noticeRes.IsSuccess) return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure(noticeRes.Error!, noticeRes.Code!);
+        bundle.AnnouncementTypes = noticeRes.Value!;
+
+        return ServiceResult<EffectiveBusinessConfigurationBundle>.Success(bundle);
     }
 
-    private List<EffectiveDictionaryOption> ResolveDictionaryOptions(string code, DateTimeOffset asOf, Func<DictionaryConfig> defaultFactory)
+    private ServiceResult<List<EffectiveDictionaryOption>> ResolveDictionaryOptions(string code, DateTimeOffset asOf)
     {
         var record = GetEffective(ConfigurationDomains.Dictionary, code, asOf);
-        DictionaryConfig? dict = null;
-        if (record is not null)
+        if (record is null)
+            return ServiceResult<List<EffectiveDictionaryOption>>.Failure($"未找到生效中的字典配置【{code}】。", "CONFIG_MISSING");
+
+        DictionaryConfig? dict;
+        try
         {
-            try
-            {
-                dict = JsonSerializer.Deserialize<DictionaryConfig>(record.ContentJson, BusinessConfigurationDefaults.JsonOptions);
-            }
-            catch { }
+            dict = JsonSerializer.Deserialize<DictionaryConfig>(record.ContentJson, BusinessConfigurationDefaults.JsonOptions);
         }
-        dict ??= defaultFactory();
-        return dict.Items
+        catch (Exception ex)
+        {
+            return ServiceResult<List<EffectiveDictionaryOption>>.Failure($"字典配置【{code}】内容损坏，无法解析: {ex.Message}", "CONFIG_INVALID");
+        }
+        if (dict is null)
+            return ServiceResult<List<EffectiveDictionaryOption>>.Failure($"字典配置【{code}】内容损坏，无法解析。", "CONFIG_INVALID");
+
+        return ServiceResult<List<EffectiveDictionaryOption>>.Success(dict.Items
             .Where(i => i.IsEnabled)
             .OrderBy(i => i.SortOrder)
             .Select(i => new EffectiveDictionaryOption { Code = i.Code, Name = i.Name, SortOrder = i.SortOrder })
-            .ToList();
+            .ToList());
     }
 }
