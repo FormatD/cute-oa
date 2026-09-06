@@ -608,6 +608,7 @@ export type EffectiveProcurementAmountTierOption = {
 export type EffectiveSealOption = {
   code: string
   name: string
+  aliases?: string[]
   sealType: string
   allowOut: boolean
   maxOutDays: number
@@ -616,6 +617,7 @@ export type EffectiveSealOption = {
 export type EffectiveSealDocCategoryOption = {
   code: string
   name: string
+  aliases?: string[]
   riskLevel: string
 }
 

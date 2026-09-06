@@ -9,6 +9,7 @@ import { useEmployeeDirectoryStore } from '../stores/employee-directory'
 import { useFileStore } from '../stores/files'
 import { useSealStore } from '../stores/seal'
 import { useUiStore } from '../stores/ui'
+import { useEffectiveConfigurationStore } from '../stores/effective-configurations'
 import { businessStatusLabel } from '../utils/businessLabels'
 
 const props = defineProps<{ id: string }>()
@@ -18,6 +19,7 @@ const employees = useEmployeeDirectoryStore()
 const files = useFileStore()
 const seal = useSealStore()
 const ui = useUiStore()
+const effectiveConfig = useEffectiveConfigurationStore()
 const router = useRouter()
 
 const loading = ref(false)
@@ -30,6 +32,18 @@ const copyNames = computed(() =>
     .map(id => employees.employees.find(item => item.id === id)?.name ?? id)
     .join('、') || '无'
 )
+
+function getSealDisplayName(codeOrName?: string) {
+  if (!codeOrName) return ''
+  const item = effectiveConfig.seals.find(s => s.code === codeOrName || s.name === codeOrName || s.aliases?.includes(codeOrName))
+  return item?.name || codeOrName
+}
+
+function getDocumentCategoryDisplayName(codeOrName?: string) {
+  if (!codeOrName) return ''
+  const item = effectiveConfig.sealDocumentCategories.find(c => c.code === codeOrName || c.name === codeOrName || c.aliases?.includes(codeOrName))
+  return item?.name || codeOrName
+}
 
 async function load() {
   loading.value = true
@@ -75,7 +89,10 @@ async function submitReturn() {
   }
 }
 
-onMounted(load)
+onMounted(() => {
+  void effectiveConfig.load()
+  void load()
+})
 </script>
 
 <template>
@@ -101,8 +118,8 @@ onMounted(load)
       <dl class="detail-grid">
         <div><dt>申请人</dt><dd>{{ seal.sealDetail.applicantName }}</dd></div>
         <div><dt>所属部门</dt><dd>{{ seal.sealDetail.departmentName }}</dd></div>
-        <div><dt>印章类型</dt><dd>{{ seal.sealDetail.sealType }}</dd></div>
-        <div><dt>文件类别</dt><dd>{{ seal.sealDetail.documentCategory }}</dd></div>
+        <div><dt>印章类型</dt><dd>{{ getSealDisplayName(seal.sealDetail.sealType) }}</dd></div>
+        <div><dt>文件类别</dt><dd>{{ getDocumentCategoryDisplayName(seal.sealDetail.documentCategory) }}</dd></div>
         <div><dt>文件名称</dt><dd>{{ seal.sealDetail.documentName }}</dd></div>
         <div><dt>用印份数</dt><dd>{{ seal.sealDetail.copies }} 份</dd></div>
         <div><dt>使用方式</dt><dd>{{ seal.sealDetail.isOut ? '外带借出' : '在司用印' }}</dd></div>

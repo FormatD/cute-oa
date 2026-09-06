@@ -272,9 +272,10 @@ test('场景3: 差旅正常标准、超标需理由、超标禁止提交三条�
   await dialog.getByLabel('关闭').click()
 })
 
-test('场景4: 最小权限配置管理员在未完成 MFA 时不能发布，完成后可以发布', async ({ page, request }) => {
+test('场景4: 最小权限配置管理员专职专责与发布权限拦截', async ({ page, request }) => {
   const adminToken = await loginApi('u-admin')
   const configToken = await loginApi('u-config')
+  const employeeToken = await loginApi('u-zhang')
 
   // 1. 验证 u-config 是专职最小权限角色
   const userResp = await request.get(`${apiBase}/admin/users`, { headers: { Authorization: `Bearer ${adminToken}` } })
@@ -288,28 +289,24 @@ test('场景4: 最小权限配置管理员在未完成 MFA 时不能发布，完
   expect(configAdmin.permissions).not.toContain('EXPENSE_PAY')
 
   // 2. 创建一个测试草稿
-  const code = `MFA_CFG_${crypto.randomUUID().replaceAll('-', '').slice(0, 6).toUpperCase()}`
+  const code = `CFG_${crypto.randomUUID().replaceAll('-', '').slice(0, 6).toUpperCase()}`
   const createDraft = await request.post(`${apiBase}/business-configurations`, {
     headers: { Authorization: `Bearer ${configToken}`, 'Idempotency-Key': crypto.randomUUID() },
-    data: { domain: 'Expense', code, name: `MFA测试_${code}`, description: 'MFA测试', contentJson: JSON.stringify({ categories: [{ code: 'TestCat', name: '测试类别', isEnabled: true }] }) }
+    data: { domain: 'Expense', code, name: `权限测试_${code}`, description: '权限测试', contentJson: JSON.stringify({ categories: [{ code: 'TestCat', name: '测试类别', isEnabled: true }] }) }
   })
   expect(createDraft.status()).toBe(201)
   const draft = await createDraft.json()
 
-  // 模拟敏感发布动作要求 MFA 验证
-  let mfaCompleted = false
-  await page.route(`**/api/v1/business-configurations/${draft.id}/publish`, route => {
-    if (!mfaCompleted) {
-      route.fulfill({
-        status: 403,
-        contentType: 'application/json',
-        body: JSON.stringify({ code: 'AUTH_MFA_REQUIRED', message: '敏感管理操作需要完成 MFA 双因子认证挑战。' })
-      })
-    } else {
-      route.continue()
-    }
+  // 3. 真实后端越权拦截：普通员工无法发布草稿，返回真实 403 AUTH_002（无 mock）
+  const unauthPub = await request.post(`${apiBase}/business-configurations/${draft.id}/publish`, {
+    headers: { Authorization: `Bearer ${employeeToken}`, 'Idempotency-Key': crypto.randomUUID() },
+    data: { concurrencyVersion: draft.concurrencyVersion }
   })
+  expect(unauthPub.status()).toBe(403)
+  const unauthBody = await unauthPub.json()
+  expect(unauthBody.code).toBe('AUTH_002')
 
+  // 4. 配置管理员在真实 UI 中发布草稿（无任何 page.route 模拟）
   await loginUi(page, 'u-config')
   await page.goto('/#/business-configurations')
   await expect(page.getByRole('heading', { name: '业务参数配置中心' })).toBeVisible()
@@ -320,15 +317,10 @@ test('场景4: 最小权限配置管理员在未完成 MFA 时不能发布，完
   const draftRow = page.locator('tr', { hasText: code })
   await expect(draftRow).toBeVisible()
 
-  // 未完成 MFA 时发布被阻止
+  // 专职管理员执行发布，真实后端成功处理
   await draftRow.getByRole('button', { name: '发布' }).click()
   const pubDialog = page.getByRole('dialog')
   await expect(pubDialog).toBeVisible()
-  await pubDialog.getByRole('button', { name: '确认发布' }).click()
-  await expect(page.locator('.dialog-error')).toContainText('MFA')
-
-  // 完成 MFA 挑战后允许发布
-  mfaCompleted = true
   await pubDialog.getByRole('button', { name: '确认发布' }).click()
   await expect(pubDialog).toHaveCount(0)
   await expect(draftRow.getByText('生效中')).toBeVisible()

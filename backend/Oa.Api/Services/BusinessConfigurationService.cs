@@ -168,7 +168,12 @@ public sealed class BusinessConfigurationService
         if (string.IsNullOrWhiteSpace(name) || name.Length > 100)
             return ServiceResult<BusinessConfigurationView>.Failure("配置名称应为 1–100 个字符。", "CONFIG_001");
 
-        var normalizedJson = BusinessConfigurationValidator.ValidateAndNormalize(domain, request.ContentJson, data);
+        var previousRecord = db.BusinessConfigurations.AsNoTracking()
+            .Where(item => item.TenantId == TenantId && item.Domain == domain && item.Code == code && item.Status != ConfigurationStatus.Draft)
+            .OrderByDescending(item => item.Version)
+            .FirstOrDefault();
+
+        var normalizedJson = BusinessConfigurationValidator.ValidateAndNormalize(domain, request.ContentJson, data, previousRecord?.ContentJson);
         if (!normalizedJson.IsSuccess)
         {
             LogAudit(actor, "CONFIG_DRAFT_CREATE_FAILED", string.Empty, $"创建配置草稿校验失败【{domain} / {code}】：{normalizedJson.Error}");
@@ -249,7 +254,7 @@ public sealed class BusinessConfigurationService
             return ServiceResult<BusinessConfigurationView>.Failure("配置名称应为 1–100 个字符。", "CONFIG_001");
 
         var previousRecord = db.BusinessConfigurations.AsNoTracking()
-            .Where(item => item.TenantId == TenantId && item.Domain == record.Domain && item.Code == record.Code && item.Version < record.Version)
+            .Where(item => item.TenantId == TenantId && item.Domain == record.Domain && item.Code == record.Code && item.Version < record.Version && item.Status != ConfigurationStatus.Draft)
             .OrderByDescending(item => item.Version)
             .FirstOrDefault();
         var normalizedJson = BusinessConfigurationValidator.ValidateAndNormalize(record.Domain, request.ContentJson, data, previousRecord?.ContentJson);
@@ -385,14 +390,6 @@ public sealed class BusinessConfigurationService
             return ServiceResult<BusinessConfigurationView>.Failure("配置已被其他人修改，请刷新后重试。", "CONCURRENCY_001");
         }
 
-        var normalizedJson = BusinessConfigurationValidator.ValidateAndNormalize(record.Domain, record.ContentJson, data);
-        if (!normalizedJson.IsSuccess)
-        {
-            LogAudit(actor, "CONFIG_PUBLISH_FAILED", record.Id.ToString(),
-                $"发布【{record.Domain} / {record.Code}】v{record.Version} 校验失败：{normalizedJson.Error}");
-            return ServiceResult<BusinessConfigurationView>.Failure(normalizedJson.Error!, normalizedJson.Code!);
-        }
-
         var effectiveFrom = (request.EffectiveFrom ?? record.EffectiveFrom).ToUniversalTime();
         var effectiveTo = (request.EffectiveTo ?? record.EffectiveTo)?.ToUniversalTime();
 
@@ -478,6 +475,21 @@ public sealed class BusinessConfigurationService
                 }
             }
         }
+
+        var previousRecord = db.BusinessConfigurations.AsNoTracking()
+            .Where(item => item.TenantId == TenantId && item.Domain == record.Domain && item.Code == record.Code && item.Version < record.Version && item.Status != ConfigurationStatus.Draft)
+            .OrderByDescending(item => item.Version)
+            .FirstOrDefault();
+
+        var normalizedJson = BusinessConfigurationValidator.ValidateAndNormalize(record.Domain, record.ContentJson, data, previousRecord?.ContentJson);
+        if (!normalizedJson.IsSuccess)
+        {
+            LogAudit(actor, "CONFIG_PUBLISH_FAILED", record.Id.ToString(),
+                $"发布【{record.Domain} / {record.Code}】v{record.Version} 校验失败：{normalizedJson.Error}");
+            return ServiceResult<BusinessConfigurationView>.Failure(normalizedJson.Error!, normalizedJson.Code!);
+        }
+
+        record.ContentJson = normalizedJson.Value!;
 
         // If new status is Effective, retire any active versions that have ended
         if (newStatus == ConfigurationStatus.Effective)
@@ -998,6 +1010,7 @@ public sealed class BusinessConfigurationService
             {
                 Code = s.Code,
                 Name = s.Name,
+                Aliases = s.Aliases,
                 SealType = s.SealType,
                 AllowOut = s.AllowOut,
                 MaxOutDays = s.MaxOutDays
@@ -1009,6 +1022,7 @@ public sealed class BusinessConfigurationService
             {
                 Code = d.Code,
                 Name = d.Name,
+                Aliases = d.Aliases,
                 RiskLevel = d.RiskLevel
             })
             .ToList();

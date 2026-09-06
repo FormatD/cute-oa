@@ -264,6 +264,39 @@ public static class BusinessConfigurationDefaults
         {
             db.SaveChanges();
         }
+
+        // 迁移旧版历史配置数据：补齐缺失的 stable code、aliases 字段，并标准化 JSON
+        var existingConfigs = db.BusinessConfigurations
+            .Where(item => string.IsNullOrEmpty(tenantId) || item.TenantId == tenantId)
+            .ToList();
+        var anyMigrated = false;
+        foreach (var existing in existingConfigs)
+        {
+            try
+            {
+                var normalizeResult = BusinessConfigurationValidator.ValidateAndNormalize(existing.Domain, existing.ContentJson);
+                if (normalizeResult.IsSuccess && !string.IsNullOrWhiteSpace(normalizeResult.Value))
+                {
+                    if (!string.Equals(existing.ContentJson.Trim(), normalizeResult.Value.Trim(), StringComparison.Ordinal))
+                    {
+                        existing.ContentJson = normalizeResult.Value;
+                        existing.UpdatedAt = now;
+                        existing.UpdatedBy = "system_migration";
+                        existing.UpdatedByName = "系统数据迁移";
+                        anyMigrated = true;
+                    }
+                }
+            }
+            catch
+            {
+                // 跳过损坏记录
+            }
+        }
+
+        if (anyMigrated)
+        {
+            db.SaveChanges();
+        }
     }
 }
 

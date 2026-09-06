@@ -463,8 +463,25 @@ public sealed class PurchaseService
                 instance.Status = (int)FlowInstanceStatus.Completed;
                 instance.CompletedAt = DateTimeOffset.UtcNow;
 
-                var policyResult = ResolveProcurementPolicy();
-                var procurementPolicy = policyResult.IsSuccess ? policyResult.Value.Policy : BusinessConfigurationDefaults.CreateDefaultProcurementPolicy();
+                ProcurementPolicyConfig procurementPolicy;
+                if (!string.IsNullOrWhiteSpace(purchase.ConfigSnapshotJson))
+                {
+                    try
+                    {
+                        procurementPolicy = JsonSerializer.Deserialize<ProcurementPolicyConfig>(purchase.ConfigSnapshotJson, BusinessConfigurationDefaults.JsonOptions)
+                            ?? (ResolveProcurementPolicy().IsSuccess ? ResolveProcurementPolicy().Value.Policy : BusinessConfigurationDefaults.CreateDefaultProcurementPolicy());
+                    }
+                    catch
+                    {
+                        var fallbackResult = ResolveProcurementPolicy();
+                        procurementPolicy = fallbackResult.IsSuccess ? fallbackResult.Value.Policy : BusinessConfigurationDefaults.CreateDefaultProcurementPolicy();
+                    }
+                }
+                else
+                {
+                    var policyResult = ResolveProcurementPolicy();
+                    procurementPolicy = policyResult.IsSuccess ? policyResult.Value.Policy : BusinessConfigurationDefaults.CreateDefaultProcurementPolicy();
+                }
                 if (!string.IsNullOrWhiteSpace(procurementPolicy.DefaultPurchaserUserId))
                 {
                     var purchaser = data.FindEmployee(procurementPolicy.DefaultPurchaserUserId);

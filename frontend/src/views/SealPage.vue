@@ -27,6 +27,18 @@ onMounted(() => {
 const documentCategories = computed(() => effectiveConfig.sealDocumentCategories.map(d => d.name))
 const sealTypes = computed(() => effectiveConfig.seals.map(s => s.name))
 
+function getSealDisplayName(codeOrName?: string) {
+  if (!codeOrName) return ''
+  const item = effectiveConfig.seals.find(s => s.code === codeOrName || s.name === codeOrName || s.aliases?.includes(codeOrName))
+  return item?.name || codeOrName
+}
+
+function getDocumentCategoryDisplayName(codeOrName?: string) {
+  if (!codeOrName) return ''
+  const item = effectiveConfig.sealDocumentCategories.find(c => c.code === codeOrName || c.name === codeOrName || c.aliases?.includes(codeOrName))
+  return item?.name || codeOrName
+}
+
 async function selectAttachments(event: Event) {
   const selected = Array.from((event.target as HTMLInputElement).files ?? [])
   try {
@@ -133,8 +145,8 @@ function resetFilters() {
                 {{ item.applicantName }}
                 <small>{{ item.departmentName }}</small>
               </td>
-              <td>{{ item.sealType }}</td>
-              <td>{{ item.documentCategory }} · {{ item.documentName }}</td>
+              <td>{{ getSealDisplayName(item.sealType) }}</td>
+              <td>{{ getDocumentCategoryDisplayName(item.documentCategory) }} · {{ item.documentName }}</td>
               <td>{{ item.copies }} 份</td>
               <td>{{ item.isOut ? '外带借出' : '在司用印' }}</td>
               <td><em>{{ businessStatusLabel(item.status) }}</em></td>

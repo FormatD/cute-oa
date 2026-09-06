@@ -3619,6 +3619,154 @@ await using (var configDb = new OaDbContext(options))
     var d2PurAfter = configDb.PurchaseRequests.AsNoTracking().Single(r => r.Id == d2PurDraft.Value!.Id);
     if (d2PurAfter.ConfigVersionNumber != 2 || !d2PurAfter.ConfigSnapshotJson!.Contains("\"quoteAttachmentThreshold\": 8888"))
         throw new InvalidOperationException("D2采购单驳回重提后未自动回填最新生效的 V2 配置快照。");
+
+    // 12. P0-F3 补充关键回归验收测试
+    // 12.1 旧版数据库升级迁移测试 (Legacy DB upgrade: backfill missing Code and empty Aliases)
+    var legacyConfigId = Guid.NewGuid();
+    var legacyRawJson = """{"categories": [{"name": "历史未迁移类别", "isEnabled": true}]}""";
+    configDb.BusinessConfigurations.Add(new BusinessConfigurationRecord
+    {
+        Id = legacyConfigId,
+        TenantId = IdentityDefaults.TenantId,
+        Domain = ConfigurationDomains.Expense,
+        Code = "LegacyExpenseMigrationTest",
+        Name = "旧版报销配置迁移测试",
+        Version = 1,
+        Status = ConfigurationStatus.Effective,
+        EffectiveFrom = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
+        ContentJson = legacyRawJson,
+        CreatedBy = "system",
+        CreatedByName = "系统初始化",
+        CreatedAt = DateTimeOffset.UtcNow,
+        UpdatedBy = "system",
+        UpdatedByName = "系统初始化",
+        UpdatedAt = DateTimeOffset.UtcNow,
+        ConcurrencyVersion = 1
+    });
+    configDb.SaveChanges();
+
+    BusinessConfigurationDefaults.EnsureDefaultConfigurations(configDb, IdentityDefaults.TenantId);
+    var migratedRecord = configDb.BusinessConfigurations.AsNoTracking().Single(c => c.Id == legacyConfigId);
+    if (!migratedRecord.ContentJson.Contains("\"code\": \"历史未迁移类别\"") || !migratedRecord.ContentJson.Contains("\"aliases\": []"))
+        throw new InvalidOperationException($"旧版历史配置未成功升级回填 stable code 或 aliases：{migratedRecord.ContentJson}");
+
+    // 12.2 用印改名后草稿重提测试 (Seal rename does not break existing draft submission)
+    var sealRenameDraft = sealService.CreateDraft(zhang, new SaveSealRequest(
+        "改名重提测试单", "合同协议", "供货框架协议", "公章", 1, false, null, null, null, "测试改名提交", ["test_contract.pdf"], null));
+    if (!sealRenameDraft.IsSuccess)
+        throw new InvalidOperationException($"用印改名测试草稿创建失败：{sealRenameDraft.Error}");
+
+    var currentSealPolicy = configDb.BusinessConfigurations.Single(c => c.TenantId == IdentityDefaults.TenantId && c.Domain == ConfigurationDomains.Seal && c.Code == "SealPolicy" && c.Status == ConfigurationStatus.Effective);
+    var sealV3Draft = configService.CreateNewVersion(configUser, currentSealPolicy.Id);
+    var sealPolicyV3 = JsonSerializer.Deserialize<SealPolicyConfig>(currentSealPolicy.ContentJson, BusinessConfigurationDefaults.JsonOptions)!;
+    var targetSeal = sealPolicyV3.Seals.First(s => s.Code == "OfficialSeal" || s.Name.Contains("公章"));
+    targetSeal.Name = "总公司综合业务公章";
+    if (!targetSeal.Aliases.Contains("公司公章")) targetSeal.Aliases.Add("公司公章");
+    if (!targetSeal.Aliases.Contains("公章")) targetSeal.Aliases.Add("公章");
+    var targetDocCat = sealPolicyV3.DocumentCategories.First(d => d.Code == "CONTRACT" || d.Name.Contains("合同"));
+    targetDocCat.Name = "业务合同与战略协议";
+    if (!targetDocCat.Aliases.Contains("合同协议")) targetDocCat.Aliases.Add("合同协议");
+
+    var sealV3Json = JsonSerializer.Serialize(sealPolicyV3, BusinessConfigurationDefaults.JsonOptions);
+    var updatedSealV3 = configService.UpdateDraft(configUser, sealV3Draft.Value!.Id, new UpdateBusinessConfigurationRequest(
+        sealV3Draft.Value.Name, sealV3Draft.Value.Description, DateTimeOffset.UtcNow, null, sealV3Json, sealV3Draft.Value.ConcurrencyVersion));
+    var sealV3Pub = configService.Publish(configUser, updatedSealV3.Value!.Id, new PublishBusinessConfigurationRequest(DateTimeOffset.UtcNow, null, updatedSealV3.Value.ConcurrencyVersion));
+    if (!sealV3Pub.IsSuccess)
+        throw new InvalidOperationException($"SealPolicy V3 改名发布失败：{sealV3Pub.Error}");
+
+    var sealRenameSubmit = sealService.Submit(zhang, sealRenameDraft.Value!.Id);
+    if (!sealRenameSubmit.IsSuccess)
+        throw new InvalidOperationException($"用印配置改名后已有草稿提交失败：{sealRenameSubmit.Error}");
+    var submittedSealRec = configDb.SealRequests.AsNoTracking().Single(r => r.Id == sealRenameDraft.Value!.Id);
+    if (submittedSealRec.SealType != targetSeal.Code || submittedSealRec.DocumentCategory != targetDocCat.Code)
+        throw new InvalidOperationException($"用印配置改名后提交单据未正确关联稳定编码：SealType={submittedSealRec.SealType}, DocumentCategory={submittedSealRec.DocumentCategory}");
+
+    // 12.3 采购审批期间配置升版测试 (Procurement approval retains snapshot purchaser rather than newly published v2 policy)
+    var curPurPolicy = configDb.BusinessConfigurations.Single(c => c.TenantId == IdentityDefaults.TenantId && c.Domain == ConfigurationDomains.Procurement && c.Code == "ProcurementPolicy" && c.Status == ConfigurationStatus.Effective);
+    var purPolicyObj = JsonSerializer.Deserialize<ProcurementPolicyConfig>(curPurPolicy.ContentJson, BusinessConfigurationDefaults.JsonOptions)!;
+    var originalPurchaserId = purPolicyObj.DefaultPurchaserUserId;
+    if (string.IsNullOrWhiteSpace(originalPurchaserId)) originalPurchaserId = "u-admin";
+
+    var purSnapDraft = purchaseService.CreateDraft(zhang, new SavePurchaseRequest(
+        "快照采购测试申请", "办公采购", DateOnly.FromDateTime(DateTime.Today).AddDays(5), "联想自营",
+        [new SavePurchaseItem("IT设备", "研发测试机", "M1", 1, "台", 3000m, "快照测试机")]));
+    if (!purSnapDraft.IsSuccess)
+        throw new InvalidOperationException($"采购快照测试草稿创建失败：{purSnapDraft.Error}");
+    var purSnapSubmit = purchaseService.Submit(zhang, purSnapDraft.Value!.Id);
+    if (!purSnapSubmit.IsSuccess)
+        throw new InvalidOperationException($"采购快照测试单提交失败：{purSnapSubmit.Error}");
+
+    var newPurchaserId = originalPurchaserId == "u-admin" ? "u-lin" : "u-admin";
+    var purV3Draft = configService.CreateNewVersion(configUser, curPurPolicy.Id);
+    purPolicyObj.DefaultPurchaserUserId = newPurchaserId;
+    var purV3Json = JsonSerializer.Serialize(purPolicyObj, BusinessConfigurationDefaults.JsonOptions);
+    var updatedPurV3 = configService.UpdateDraft(configUser, purV3Draft.Value!.Id, new UpdateBusinessConfigurationRequest(
+        purV3Draft.Value.Name, purV3Draft.Value.Description, DateTimeOffset.UtcNow, null, purV3Json, purV3Draft.Value.ConcurrencyVersion));
+    var purV3Pub = configService.Publish(configUser, updatedPurV3.Value!.Id, new PublishBusinessConfigurationRequest(DateTimeOffset.UtcNow, null, updatedPurV3.Value.ConcurrencyVersion));
+    if (!purV3Pub.IsSuccess)
+        throw new InvalidOperationException($"ProcurementPolicy V3 发布失败：{purV3Pub.Error}");
+
+    foreach (var purTask in purSnapSubmit.Value!.Tasks.OrderBy(t => t.Sequence))
+    {
+        var approver = configData.GetEmployee(purTask.AssigneeId);
+        var approveResult = purchaseService.Approve(approver, purTask.Id, "同意采购");
+        if (!approveResult.IsSuccess)
+            throw new InvalidOperationException($"采购审批任务批准失败：{approveResult.Error}");
+    }
+    var approvedPurRec = configDb.PurchaseRequests.AsNoTracking().Single(r => r.Id == purSnapDraft.Value!.Id);
+    if (approvedPurRec.PurchaserUserId != originalPurchaserId)
+        throw new InvalidOperationException($"采购审批完成未遵从单据快照中的默认采购负责人：实际指派={approvedPurRec.PurchaserUserId}，快照预期={originalPurchaserId}，新版本负责人={newPurchaserId}");
+
+    // 12.4 稳定编码不可变校验防绕过测试 (Immutability cannot be bypassed via CreateDraft or Publish)
+    var immutabilityTestJson = """
+    {"categories": [{"code": "ModifiedOrDeletedCode", "name": "试图篡改或删除历史编码", "isEnabled": true}]}
+    """;
+    var bypassAttempt = configService.CreateDraft(configUser, new CreateBusinessConfigurationRequest(
+        ConfigurationDomains.Expense, "ExpensePolicy", "篡改编码草稿", null, DateTimeOffset.UtcNow, null, immutabilityTestJson));
+    if (bypassAttempt.IsSuccess || bypassAttempt.Code != "CONFIG_001")
+        throw new InvalidOperationException($"在 CreateDraft 中篡改或删除既有稳定编码未被拦截：IsSuccess={bypassAttempt.IsSuccess}, Code={bypassAttempt.Code}");
+
+    // 12.5 配置损坏 Fail-Closed 测试 (Corrupted config returns CONFIG_INVALID without silent fallback)
+    var corruptConfigId = Guid.NewGuid();
+    configDb.BusinessConfigurations.Add(new BusinessConfigurationRecord
+    {
+        Id = corruptConfigId,
+        TenantId = IdentityDefaults.TenantId,
+        Domain = ConfigurationDomains.Expense,
+        Code = "CorruptExpensePolicy",
+        Name = "损坏配置测试",
+        Version = 1,
+        Status = ConfigurationStatus.Effective,
+        EffectiveFrom = new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero),
+        ContentJson = """{"categories": "invalid_shape_not_an_array"}""",
+        CreatedBy = "system",
+        CreatedByName = "系统",
+        CreatedAt = DateTimeOffset.UtcNow,
+        UpdatedBy = "system",
+        UpdatedByName = "系统",
+        UpdatedAt = DateTimeOffset.UtcNow,
+        ConcurrencyVersion = 1
+    });
+    configDb.SaveChanges();
+    var corruptResult = configService.GetEffective(ConfigurationDomains.Expense, "CorruptExpensePolicy");
+    if (corruptResult is null || !corruptResult.ContentJson.Contains("invalid_shape_not_an_array"))
+        throw new InvalidOperationException("配置损坏时未如实返回记录或发生异常静默回退。");
+
+    var origExpense = configDb.BusinessConfigurations.Single(c => c.TenantId == IdentityDefaults.TenantId && c.Domain == ConfigurationDomains.Expense && c.Code == "ExpensePolicy" && c.Status == ConfigurationStatus.Effective);
+    var savedExpenseContent = origExpense.ContentJson;
+    try
+    {
+        origExpense.ContentJson = """{"categories": "invalid_shape_not_an_array"}""";
+        configDb.SaveChanges();
+        var corruptBundle = configService.GetEffectiveBundle();
+        if (corruptBundle.IsSuccess || corruptBundle.Code != "CONFIG_INVALID")
+            throw new InvalidOperationException($"配置损坏时 GetEffectiveBundle 应返回 CONFIG_INVALID，实际为 IsSuccess={corruptBundle.IsSuccess}, Code={corruptBundle.Code}");
+    }
+    finally
+    {
+        origExpense.ContentJson = savedExpenseContent;
+        configDb.SaveChanges();
+    }
 }
 
 // -------------------------------------------------------------

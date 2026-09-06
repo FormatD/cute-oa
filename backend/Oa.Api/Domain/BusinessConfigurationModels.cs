@@ -306,6 +306,7 @@ public sealed class EffectiveSealOption
 {
     public string Code { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
+    public List<string> Aliases { get; set; } = [];
     public string SealType { get; set; } = string.Empty;
     public bool AllowOut { get; set; } = true;
     public int MaxOutDays { get; set; } = 7;
@@ -315,6 +316,7 @@ public sealed class EffectiveSealDocCategoryOption
 {
     public string Code { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
+    public List<string> Aliases { get; set; } = [];
     public string RiskLevel { get; set; } = "LOW";
 }
 

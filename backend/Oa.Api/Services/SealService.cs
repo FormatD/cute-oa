@@ -155,9 +155,9 @@ public sealed class SealService
             ApplicantName = actor.Name,
             DepartmentName = actor.DepartmentName,
             Title = request.Title.Trim(),
-            DocumentCategory = docCategory.Name,
+            DocumentCategory = docCategory.Code,
             DocumentName = request.DocumentName.Trim(),
-            SealType = sealItem.Name,
+            SealType = sealItem.Code,
             CustodianUserId = sealItem.CustodianUserId,
             MaxOutDays = sealItem.MaxOutDays,
             RiskMetric = metric,
@@ -208,9 +208,9 @@ public sealed class SealService
             : (riskLevel == "MEDIUM" || request.Copies > 3 ? riskRules.MediumRiskMetric : riskRules.LowRiskMetric);
 
         record.Title = request.Title.Trim();
-        record.DocumentCategory = docCategory.Name;
+        record.DocumentCategory = docCategory.Code;
         record.DocumentName = request.DocumentName.Trim();
-        record.SealType = sealItem.Name;
+        record.SealType = sealItem.Code;
         record.CustodianUserId = sealItem.CustodianUserId;
         record.MaxOutDays = sealItem.MaxOutDays;
         record.RiskMetric = metric;
@@ -240,8 +240,7 @@ public sealed class SealService
         if (!policyResult.IsSuccess) return ServiceResult<SealRequest>.Failure(policyResult.Error!, policyResult.Code!);
         var (policy, configRecord) = policyResult.Value;
 
-        var normSealType = NormalizeSealType(record.SealType);
-        var sealItem = policy.Seals.FirstOrDefault(s => (!string.IsNullOrWhiteSpace(s.Code) && s.Code.Equals(normSealType, StringComparison.OrdinalIgnoreCase)) || s.Name.Equals(normSealType, StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(normSealType, StringComparison.OrdinalIgnoreCase));
+        var sealItem = MatchSealItem(policy, record.SealType);
         if (sealItem is null)
             return ServiceResult<SealRequest>.Failure($"印章【{record.SealType}】不存在或已失效。", "SEAL_005");
         if (!sealItem.IsEnabled)
@@ -259,7 +258,7 @@ public sealed class SealService
             }
         }
 
-        var docCategory = policy.DocumentCategories.FirstOrDefault(r => (!string.IsNullOrWhiteSpace(r.Code) && r.Code.Equals(record.DocumentCategory, StringComparison.OrdinalIgnoreCase)) || r.Name.Equals(record.DocumentCategory, StringComparison.OrdinalIgnoreCase));
+        var docCategory = MatchDocumentCategory(policy, record.DocumentCategory);
         if (docCategory is null)
             return ServiceResult<SealRequest>.Failure($"文件类别【{record.DocumentCategory}】不存在或已失效。", "SEAL_007");
         if (!docCategory.IsEnabled)
@@ -267,6 +266,8 @@ public sealed class SealService
 
         var riskLevel = docCategory.RiskLevel ?? "LOW";
         record.RiskLevel = riskLevel;
+        record.SealType = sealItem.Code;
+        record.DocumentCategory = docCategory.Code;
         record.CustodianUserId = sealItem.CustodianUserId;
         record.MaxOutDays = sealItem.MaxOutDays;
 
@@ -600,15 +601,13 @@ public sealed class SealService
         var policyResult = ResolveSealPolicy();
         if (!policyResult.IsSuccess) return ServiceResult<ValidatedSealInput>.Failure(policyResult.Error!, policyResult.Code!);
         var (policy, _) = policyResult.Value;
-        var normSealType = NormalizeSealType(request.SealType);
-        var sealItem = policy.Seals.FirstOrDefault(s => (!string.IsNullOrWhiteSpace(s.Code) && s.Code.Equals(normSealType, StringComparison.OrdinalIgnoreCase)) || s.Name.Equals(normSealType, StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(normSealType, StringComparison.OrdinalIgnoreCase));
+        var sealItem = MatchSealItem(policy, request.SealType);
         if (sealItem is null)
             return ServiceResult<ValidatedSealInput>.Failure($"印章类型【{request.SealType}】不存在。", "SEAL_001");
         if (!sealItem.IsEnabled)
             return ServiceResult<ValidatedSealInput>.Failure($"印章【{sealItem.Name}】已被系统停用，无法申请。", "SEAL_005");
 
-        var normDocCategory = NormalizeDocumentCategory(request.DocumentCategory);
-        var docCategory = policy.DocumentCategories.FirstOrDefault(r => (!string.IsNullOrWhiteSpace(r.Code) && r.Code.Equals(normDocCategory, StringComparison.OrdinalIgnoreCase)) || r.Name.Equals(normDocCategory, StringComparison.OrdinalIgnoreCase));
+        var docCategory = MatchDocumentCategory(policy, request.DocumentCategory);
         if (docCategory is null)
             return ServiceResult<ValidatedSealInput>.Failure($"文件类别【{request.DocumentCategory}】不存在。", "SEAL_001");
         if (!docCategory.IsEnabled)
@@ -793,6 +792,31 @@ public sealed class SealService
             "人事证明" => "人事材料",
             _ => trimmed
         };
+    }
+
+    private static SealRegistryItemConfig? MatchSealItem(SealPolicyConfig policy, string? codeOrName)
+    {
+        if (string.IsNullOrWhiteSpace(codeOrName)) return null;
+        var trimmed = codeOrName.Trim();
+        var norm = NormalizeSealType(trimmed);
+        return policy.Seals.FirstOrDefault(s =>
+            (!string.IsNullOrWhiteSpace(s.Code) && s.Code.Equals(trimmed, StringComparison.OrdinalIgnoreCase)) ||
+            s.Name.Equals(trimmed, StringComparison.OrdinalIgnoreCase) ||
+            s.Name.Equals(norm, StringComparison.OrdinalIgnoreCase) ||
+            (!string.IsNullOrWhiteSpace(s.SealType) && s.SealType.Equals(norm, StringComparison.OrdinalIgnoreCase)) ||
+            (s.Aliases != null && s.Aliases.Any(a => a.Equals(trimmed, StringComparison.OrdinalIgnoreCase) || a.Equals(norm, StringComparison.OrdinalIgnoreCase))));
+    }
+
+    private static SealDocumentCategoryConfig? MatchDocumentCategory(SealPolicyConfig policy, string? codeOrName)
+    {
+        if (string.IsNullOrWhiteSpace(codeOrName)) return null;
+        var trimmed = codeOrName.Trim();
+        var norm = NormalizeDocumentCategory(trimmed);
+        return policy.DocumentCategories.FirstOrDefault(d =>
+            (!string.IsNullOrWhiteSpace(d.Code) && d.Code.Equals(trimmed, StringComparison.OrdinalIgnoreCase)) ||
+            d.Name.Equals(trimmed, StringComparison.OrdinalIgnoreCase) ||
+            d.Name.Equals(norm, StringComparison.OrdinalIgnoreCase) ||
+            (d.Aliases != null && d.Aliases.Any(a => a.Equals(trimmed, StringComparison.OrdinalIgnoreCase) || a.Equals(norm, StringComparison.OrdinalIgnoreCase))));
     }
 
     private sealed record ValidatedSealInput(SealRegistryItemConfig SealItem, SealDocumentCategoryConfig DocCategory, IReadOnlyList<string> Attachments, IReadOnlyList<string> CopyRecipientIds);

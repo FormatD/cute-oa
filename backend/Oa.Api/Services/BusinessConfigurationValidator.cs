@@ -286,6 +286,14 @@ public static class BusinessConfigurationValidator
         if (config is null)
             return ServiceResult<string>.Failure("字典配置内容不能为空。", "CONFIG_001");
 
+        foreach (var item in config.Items)
+        {
+            if (string.IsNullOrWhiteSpace(item.Name))
+                return ServiceResult<string>.Failure("字典项名称不能为空。", "CONFIG_001");
+            if (string.IsNullOrWhiteSpace(item.Code))
+                item.Code = item.Name.Trim();
+        }
+
         var duplicateCodes = config.Items.GroupBy(x => x.Code.Trim(), StringComparer.OrdinalIgnoreCase)
             .Where(g => g.Count() > 1)
             .Select(g => g.Key)
