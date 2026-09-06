@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using Oa.Api.Domain;
 using Oa.Api.Persistence;
+using Microsoft.Extensions.Logging;
 
 namespace Oa.Api.Services;
 
@@ -17,11 +18,12 @@ public sealed class LeaveService
     private readonly IProcessRouter processRouter;
     private readonly FlowInstanceService flowInstances;
     private readonly FlowCopyService copyRecipients;
+    private readonly ILogger<LeaveService>? logger;
     private readonly List<LeaveRequest> _requests;
     private readonly Dictionary<(string UserId, LeaveType Type, int Year), LeaveBalance> _balances = [];
     private readonly List<CompTimeGrantRecord> _compTimeGrants;
 
-    public LeaveService(DemoData data, OaDbContext? db = null, IWorkCalendar? calendar = null, NotificationService? notifications = null, FileService? files = null, IProcessRouter? processRouter = null, FlowInstanceService? flowInstances = null, FlowCopyService? copyRecipients = null)
+    public LeaveService(DemoData data, OaDbContext? db = null, IWorkCalendar? calendar = null, NotificationService? notifications = null, FileService? files = null, IProcessRouter? processRouter = null, FlowInstanceService? flowInstances = null, FlowCopyService? copyRecipients = null, ILogger<LeaveService>? logger = null)
     {
         this.data = data;
         this.db = db;
@@ -31,6 +33,7 @@ public sealed class LeaveService
         this.processRouter = processRouter ?? new DefaultProcessRouter(data);
         this.flowInstances = flowInstances ?? new FlowInstanceService(db);
         this.copyRecipients = copyRecipients ?? new FlowCopyService(data, db);
+        this.logger = logger;
         _requests = db is null ? [] : LoadRequests(db, this.flowInstances, this.copyRecipients);
         _compTimeGrants = db is null ? [] : db.CompTimeGrants.AsNoTracking().Where(x => x.TenantId == TenantId).ToList();
     }
@@ -283,7 +286,10 @@ public sealed class LeaveService
 
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Leave, "LeavePolicy");
         if (db is not null && configRecord is null)
+        {
+            logger?.LogWarning("未找到生效中的请假策略配置【LeavePolicy】。租户：{TenantId}", TenantId);
             return ServiceResult<LeaveRequest>.Failure("未找到生效中的请假策略配置【LeavePolicy】。", "CONFIG_MISSING");
+        }
 
         LeavePolicyConfig? policy = null;
         if (configRecord is not null)
@@ -292,12 +298,16 @@ public sealed class LeaveService
             {
                 policy = JsonSerializer.Deserialize<LeavePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
             }
-            catch
+            catch (Exception ex)
             {
+                logger?.LogError(ex, "请假策略配置内容损坏，无法解析。租户：{TenantId}", TenantId);
                 return ServiceResult<LeaveRequest>.Failure("请假策略配置内容损坏，无法解析。", "CONFIG_INVALID");
             }
             if (policy is null)
+            {
+                logger?.LogError("请假策略配置内容损坏，反序列化为 null。租户：{TenantId}", TenantId);
                 return ServiceResult<LeaveRequest>.Failure("请假策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+            }
         }
         else
         {

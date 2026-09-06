@@ -4,9 +4,11 @@ using Npgsql;
 using Oa.Api.Domain;
 using Oa.Api.Persistence;
 
+using Microsoft.Extensions.Logging;
+
 namespace Oa.Api.Services;
 
-public sealed class EmploymentContractService(OaDbContext db, DemoData data, FileService files, NotificationService notifications, IConfiguration configuration)
+public sealed class EmploymentContractService(OaDbContext db, DemoData data, FileService files, NotificationService notifications, IConfiguration configuration, ILogger<EmploymentContractService>? logger = null)
 {
     private const string TenantId = IdentityDefaults.TenantId;
     private static readonly int[] AlertThresholds = [7, 30, 60, 90];
@@ -253,7 +255,10 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
         var code = contractType?.Trim() ?? string.Empty;
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Dictionary, "ContractType");
         if (db is not null && configRecord is null)
+        {
+            logger?.LogWarning("未找到生效中的合同类型字典配置【ContractType】。租户：{TenantId}", TenantId);
             return ServiceResult<DictionaryItemConfig>.Failure("未找到生效中的合同类型字典配置【ContractType】。", "CONFIG_MISSING");
+        }
 
         DictionaryConfig? dict = null;
         if (configRecord is not null)
@@ -262,12 +267,16 @@ public sealed class EmploymentContractService(OaDbContext db, DemoData data, Fil
             {
                 dict = JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
             }
-            catch
+            catch (Exception ex)
             {
+                logger?.LogError(ex, "合同类型字典配置内容损坏，无法解析。租户：{TenantId}", TenantId);
                 return ServiceResult<DictionaryItemConfig>.Failure("合同类型字典配置内容损坏，无法解析。", "CONFIG_INVALID");
             }
             if (dict is null)
+            {
+                logger?.LogError("合同类型字典配置内容损坏，反序列化为 null。租户：{TenantId}", TenantId);
                 return ServiceResult<DictionaryItemConfig>.Failure("合同类型字典配置内容损坏，无法解析。", "CONFIG_INVALID");
+            }
         }
         else
         {

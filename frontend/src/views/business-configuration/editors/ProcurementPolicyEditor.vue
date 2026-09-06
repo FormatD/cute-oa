@@ -7,7 +7,8 @@ const props = defineProps<{
 }>()
 
 function addCategory() {
-  props.modelValue.categories.push({ name: '新类别', isEnabled: true })
+  const codeSuffix = Math.floor(1000 + Math.random() * 9000).toString()
+  props.modelValue.categories.push({ code: `Proc_${codeSuffix}`, name: '新类别', isEnabled: true })
 }
 
 function removeCategory(idx: number) {
@@ -67,6 +68,7 @@ function removeTier(idx: number) {
       <table class="inner-table">
         <thead>
           <tr>
+            <th style="min-width: 120px;">编码 (Code)</th>
             <th>类别名称</th>
             <th>启用</th>
             <th>操作</th>
@@ -74,6 +76,7 @@ function removeTier(idx: number) {
         </thead>
         <tbody>
           <tr v-for="(cat, idx) in modelValue.categories" :key="idx">
+            <td><input v-model="cat.code" placeholder="如 OfficeSupplies" style="min-width: 110px;" /></td>
             <td><input v-model="cat.name" placeholder="类别名称" /></td>
             <td><input v-model="cat.isEnabled" type="checkbox" /></td>
             <td>

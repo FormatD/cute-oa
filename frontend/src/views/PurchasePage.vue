@@ -222,10 +222,15 @@ async function exportPurchaseCsv() {
     description="按金额分级审批，填写采购主题、到货时间与采购明细清单。"
     submit-label="保存并提交"
     :busy="purchase.submitting"
+    :submit-disabled="!!effectiveConfig.error"
     width="920px"
     @close="purchase.showPurchaseForm = false"
     @submit="app.submitPurchase"
   >
+    <div v-if="effectiveConfig.error" class="dialog-error" data-testid="config-error-alert" style="margin-bottom: 12px; color: #dc2626; background: #fee2e2; padding: 8px 12px; border-radius: 6px;">
+      ⚠️ 业务配置缺失或不可用，禁止提交申请：{{ effectiveConfig.error }}
+    </div>
+
     <!-- 部门采购预算水位卡片 -->
     <div v-if="currentDeptBudget" class="budget-summary-card" style="margin-bottom: 8px;">
       <h4>📊 部门可用预算池（{{ currentDeptBudget.departmentId }} · {{ currentDeptBudget.year }} 年度）</h4>
@@ -252,7 +257,7 @@ async function exportPurchaseCsv() {
       <div v-for="(item, index) in purchase.purchaseForm.items" :key="index" class="itinerary-row purchase-item-row">
         <label>品类
           <select v-model="item.category">
-            <option v-for="category in categories" :key="category">{{ category }}</option>
+            <option v-for="cat in effectiveConfig.procurementCategories" :key="cat.code" :value="cat.code">{{ cat.name }}</option>
           </select>
         </label>
         <label>物品或服务名称<input v-model="item.name" maxlength="100" placeholder="名称"></label>

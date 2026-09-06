@@ -92,6 +92,10 @@ const overBudgetAmount = computed(() => {
   return (Number(travel.travelForm.estimatedBudget) || 0) - allowedBudgetLimit.value
 })
 
+const isOverBudgetBlocked = computed(() => {
+  return isOverBudget.value && (matchedStandard.value?.blockWhenExceeded === true)
+})
+
 function addItinerary() { travel.travelForm.itinerary.push({ destination: '', startDate: '', endDate: '', transportation: '高铁', purpose: '' }) }
 function removeItinerary(index: number) { if (travel.travelForm.itinerary.length > 1) travel.travelForm.itinerary.splice(index, 1) }
 function selectAttachments(event: Event) { const selectedFiles = Array.from((event.target as HTMLInputElement).files ?? []); void Promise.all(selectedFiles.map(file => fileStore.uploadFile(file))).then(ids => { travel.travelForm.attachments = ids }).catch(cause => { ui.error = cause instanceof Error ? cause.message : '附件上传失败。' }) }
@@ -100,9 +104,19 @@ function changePage(offset: number) { travel.travelPage += offset; void travel.l
 function resetFilters() { Object.assign(travel.travelFilters, { keyword: '', status: '', applicantId: '', startDate: '', endDate: '' }); search() }
 
 function handleSubmit() {
-  if (isOverBudget.value && !travel.travelForm.overStandardReason?.trim()) {
-    ui.error = '预估预算已超出标准上限，必须填写超标原因。'
+  if (effectiveConfig.error) {
+    ui.error = `业务配置不可用，禁止提交：${effectiveConfig.error}`
     return
+  }
+  if (isOverBudget.value) {
+    if (isOverBudgetBlocked.value) {
+      ui.error = '当前出差申请预算已超出差旅标准，且策略禁止超标提交。'
+      return
+    }
+    if (!travel.travelForm.overStandardReason?.trim()) {
+      ui.error = '预估预算已超出标准上限，必须填写超标原因。'
+      return
+    }
   }
   void app.submitTravel()
 }
@@ -122,10 +136,18 @@ function handleSubmit() {
     description="填写出差事由、预估预算、同行人及行程明细。"
     submit-label="保存并提交"
     :busy="travel.travelSubmitting"
+    :submit-disabled="!!effectiveConfig.error || isOverBudgetBlocked"
     width="850px"
     @close="travel.showTravelForm = false"
     @submit="handleSubmit"
   >
+    <div v-if="effectiveConfig.error" class="dialog-error" data-testid="config-error-alert" style="margin-bottom: 12px; color: #dc2626; background: #fee2e2; padding: 8px 12px; border-radius: 6px;">
+      ⚠️ 业务配置缺失或不可用，禁止提交申请：{{ effectiveConfig.error }}
+    </div>
+    <div v-else-if="isOverBudgetBlocked" class="dialog-error" style="margin-bottom: 12px; color: #dc2626; background: #fee2e2; padding: 8px 12px; border-radius: 6px;">
+      🚫 预估预算已超出标准上限，当前差旅政策设定为【超标禁止提交】，无法发起申请。
+    </div>
+
     <div class="standard-hint-card">
       <div class="hint-header">
         <strong>差旅标准测算参考</strong>
@@ -140,7 +162,7 @@ function handleSubmit() {
       </div>
     </div>
 
-    <div v-if="isOverBudget" class="over-standard-warning">
+    <div v-if="isOverBudget && !isOverBudgetBlocked" class="over-standard-warning">
       <strong>⚠️ 预估预算超标</strong>
       <p>预估预算 ¥{{ Number(travel.travelForm.estimatedBudget).toFixed(2) }} 超出标准上限 ¥{{ allowedBudgetLimit.toFixed(2) }}（超标 ¥{{ overBudgetAmount.toFixed(2) }}）。按照公司制度，预算超标申请必须如实填报超标原因。</p>
     </div>

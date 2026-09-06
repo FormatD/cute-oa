@@ -56,6 +56,11 @@ function removeStandard(idx: number) {
         @input="emit('update:ranksStr', ($event.target as HTMLInputElement).value)"
       />
     </label>
+
+    <label class="checkbox-inline" style="margin-top: 12px; display: block;">
+      <input v-model="modelValue.blockWhenExceeded" type="checkbox" />
+      全员超标禁止提交（开启后，超出住宿限额或餐补标准的出差申请直接阻断提交）
+    </label>
   </div>
 
   <div class="card-section">
@@ -74,6 +79,7 @@ function removeStandard(idx: number) {
             <th>住宿限额 (元/晚)</th>
             <th>餐补标准 (元/天)</th>
             <th>交通工具标准</th>
+            <th>超标禁止提交</th>
             <th>操作</th>
           </tr>
         </thead>
@@ -84,6 +90,7 @@ function removeStandard(idx: number) {
             <td><input v-model.number="std.hotelDailyLimit" type="number" /></td>
             <td><input v-model.number="std.mealDailyAllowance" type="number" /></td>
             <td><input v-model="std.transportationStandard" placeholder="如 高铁二等座/经济舱" /></td>
+            <td><input v-model="std.blockWhenExceeded" type="checkbox" /></td>
             <td>
               <button type="button" class="del-row-btn" @click="removeStandard(idx)">删除</button>
             </td>

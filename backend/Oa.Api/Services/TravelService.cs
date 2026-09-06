@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore;
 using Oa.Api.Domain;
 using Oa.Api.Persistence;
 
+using Microsoft.Extensions.Logging;
+
 namespace Oa.Api.Services;
 
 public sealed class TravelService
@@ -15,9 +17,10 @@ public sealed class TravelService
     private readonly IProcessRouter processRouter;
     private readonly FlowInstanceService flowInstances;
     private readonly FlowCopyService copyRecipients;
+    private readonly ILogger<TravelService>? logger;
     private readonly List<TravelRequest> requests;
 
-    public TravelService(DemoData data, OaDbContext? db = null, NotificationService? notifications = null, FileService? files = null, IProcessRouter? processRouter = null, FlowInstanceService? flowInstances = null, FlowCopyService? copyRecipients = null)
+    public TravelService(DemoData data, OaDbContext? db = null, NotificationService? notifications = null, FileService? files = null, IProcessRouter? processRouter = null, FlowInstanceService? flowInstances = null, FlowCopyService? copyRecipients = null, ILogger<TravelService>? logger = null)
     {
         this.data = data;
         this.db = db;
@@ -26,6 +29,7 @@ public sealed class TravelService
         this.processRouter = processRouter ?? new DefaultProcessRouter(data);
         this.flowInstances = flowInstances ?? new FlowInstanceService(db);
         this.copyRecipients = copyRecipients ?? new FlowCopyService(data, db);
+        this.logger = logger;
         requests = db is null ? [] : LoadRequests(db, this.flowInstances, this.copyRecipients, data);
     }
 
@@ -223,7 +227,10 @@ public sealed class TravelService
 
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Travel, "TravelPolicy");
         if (db is not null && configRecord is null)
+        {
+            logger?.LogWarning("未找到生效中的差旅管理策略配置【TravelPolicy】。租户：{TenantId}", TenantId);
             return ServiceResult<TravelRequest>.Failure("未找到生效中的差旅管理策略配置【TravelPolicy】。", "CONFIG_MISSING");
+        }
 
         TravelPolicyConfig? policy = null;
         if (configRecord is not null)
@@ -232,12 +239,16 @@ public sealed class TravelService
             {
                 policy = JsonSerializer.Deserialize<TravelPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
             }
-            catch
+            catch (Exception ex)
             {
+                logger?.LogError(ex, "差旅管理策略配置内容损坏，无法解析。租户：{TenantId}", TenantId);
                 return ServiceResult<TravelRequest>.Failure("差旅管理策略配置内容损坏，无法解析。", "CONFIG_INVALID");
             }
             if (policy is null)
+            {
+                logger?.LogError("差旅管理策略配置内容损坏，反序列化为 null。租户：{TenantId}", TenantId);
                 return ServiceResult<TravelRequest>.Failure("差旅管理策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+            }
         }
         else
         {
@@ -254,9 +265,17 @@ public sealed class TravelService
         var travelerCount = 1 + item.CompanionIds.Count;
         var maxDailyBudget = (hotelLimit + mealAllowance) * item.Days * travelerCount;
         var isOver = (maxDailyBudget > 0 && item.EstimatedBudget > maxDailyBudget);
-        if (isOver && string.IsNullOrWhiteSpace(item.OverStandardReason))
+        var blockWhenOver = effectivePolicy?.BlockWhenExceeded == true || std?.BlockWhenExceeded == true;
+        if (isOver)
         {
-            return ServiceResult<TravelRequest>.Failure($"出差预估预算（{item.EstimatedBudget:N2}元）超出该城市等级（{cityTier}）及职级（{rank}）的标准上限（{maxDailyBudget:N2}元），必须填写超标原因。", "TRAVEL_OVER_STANDARD");
+            if (blockWhenOver)
+            {
+                return ServiceResult<TravelRequest>.Failure($"出差预估预算（{item.EstimatedBudget:N2}元）超出该城市等级及职级的标准上限（{maxDailyBudget:N2}元），当前政策已配置超标禁止提交。", "TRAVEL_OVER_STANDARD_BLOCKED");
+            }
+            if (string.IsNullOrWhiteSpace(item.OverStandardReason))
+            {
+                return ServiceResult<TravelRequest>.Failure($"出差预估预算（{item.EstimatedBudget:N2}元）超出该城市等级（{cityTier}）及职级（{rank}）的标准上限（{maxDailyBudget:N2}元），必须填写超标原因。", "TRAVEL_OVER_STANDARD");
+            }
         }
 
         item.EmployeeRank = rank;

@@ -163,10 +163,15 @@ function resetFilters() {
     description="按风险分级审批，填写用印主题、印章类型、文件类别与经办人。"
     submit-label="保存并提交"
     :busy="seal.submitting"
+    :submit-disabled="!!effectiveConfig.error"
     width="780px"
     @close="seal.showSealForm = false"
     @submit="app.submitSeal"
   >
+    <div v-if="effectiveConfig.error" class="dialog-error" data-testid="config-error-alert" style="margin-bottom: 12px; color: #dc2626; background: #fee2e2; padding: 8px 12px; border-radius: 6px;">
+      ⚠️ 业务配置缺失或不可用，禁止提交申请：{{ effectiveConfig.error }}
+    </div>
+
     <div class="dialog-grid">
       <label class="dialog-field">
         用印主题
@@ -175,7 +180,7 @@ function resetFilters() {
       <label class="dialog-field">
         文件类别
         <select v-model="seal.sealForm.documentCategory">
-          <option v-for="category in documentCategories" :key="category" :value="category">{{ category }}</option>
+          <option v-for="category in effectiveConfig.sealDocumentCategories" :key="category.code" :value="category.code">{{ category.name }}</option>
         </select>
       </label>
       <label class="dialog-field">
@@ -185,7 +190,7 @@ function resetFilters() {
       <label class="dialog-field">
         印章类型
         <select v-model="seal.sealForm.sealType">
-          <option v-for="st in sealTypes" :key="st" :value="st">{{ st }}</option>
+          <option v-for="st in effectiveConfig.seals" :key="st.code" :value="st.code">{{ st.name }}</option>
         </select>
       </label>
       <label class="dialog-field">

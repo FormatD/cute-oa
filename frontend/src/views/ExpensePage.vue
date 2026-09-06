@@ -454,10 +454,15 @@ async function exportExpenseCsv() {
     description="录入报销项目、结构化发票与关联出差单，支持防重查验与预算预警。"
     submit-label="保存并提交"
     :busy="ui.submitting"
+    :submit-disabled="!!effectiveConfig.error"
     width="920px"
     @close="expenseStore.showExpenseForm = false"
     @submit="handleExpenseSubmit"
   >
+    <div v-if="effectiveConfig.error" class="dialog-error" data-testid="config-error-alert" style="margin-bottom: 12px; color: #dc2626; background: #fee2e2; padding: 8px 12px; border-radius: 6px;">
+      ⚠️ 业务配置缺失或不可用，禁止提交申请：{{ effectiveConfig.error }}
+    </div>
+
     <!-- 部门预算卡片 -->
     <div v-if="currentDeptBudget" class="budget-summary-card" style="margin-bottom: 8px;">
       <h4>📊 部门预算水位池（{{ currentDeptBudget.departmentId }} · {{ currentDeptBudget.year }} 年度）</h4>
@@ -485,7 +490,7 @@ async function exportExpenseCsv() {
     <div class="dialog-grid">
       <label class="dialog-field">费用类别
         <select v-model="expenseStore.expenseForm.category">
-          <option v-for="cat in effectiveConfig.expenseCategories" :key="cat.code" :value="cat.name">{{ cat.name }}</option>
+          <option v-for="cat in effectiveConfig.expenseCategories" :key="cat.code" :value="cat.code">{{ cat.name }}</option>
         </select>
       </label>
       <label class="dialog-field">费用日期<input v-model="expenseStore.expenseForm.expenseDate" type="date"></label>

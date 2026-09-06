@@ -287,9 +287,12 @@ public sealed class BudgetService
         var matching = FindMatchingBudget(TenantId, request.DepartmentId, request.ExpenseCategory, targetYear, targetMonth);
 
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Expense, "ExpensePolicy");
-        var policy = configRecord is not null
-            ? System.Text.Json.JsonSerializer.Deserialize<ExpensePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultExpensePolicy();
+        ExpensePolicyConfig? policy = null;
+        if (configRecord is not null)
+        {
+            try { policy = System.Text.Json.JsonSerializer.Deserialize<ExpensePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions); }
+            catch { }
+        }
         var blockWhenExceeded = policy?.BlockWhenExceeded ?? false;
 
         if (matching is null)

@@ -202,9 +202,15 @@ public sealed class FileService
     private string ResolveAttachmentTypeName(string code)
     {
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Dictionary, "AttachmentType");
-        var dict = configRecord is not null
-            ? System.Text.Json.JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultAttachmentTypeDict();
+        DictionaryConfig? dict = null;
+        if (configRecord is not null)
+        {
+            try
+            {
+                dict = System.Text.Json.JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
+            }
+            catch { }
+        }
         var item = dict?.Items.FirstOrDefault(i => i.Code.Equals(code, StringComparison.OrdinalIgnoreCase));
         return item?.Name ?? code;
     }

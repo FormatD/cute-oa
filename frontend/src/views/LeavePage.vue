@@ -57,10 +57,14 @@ function resetFilters() { Object.assign(leave.leaveFilters, { keyword: '', statu
     description="填写请假类型、起止时间与请假事由，提交审批流程。"
     submit-label="保存并提交"
     :busy="ui.submitting"
+    :submit-disabled="!!effectiveConfig.error"
     width="680px"
     @close="leave.showForm = false"
     @submit="app.submitLeave"
   >
+    <div v-if="effectiveConfig.error" class="dialog-error" data-testid="config-error-alert" style="margin-bottom: 12px; color: #dc2626; background: #fee2e2; padding: 8px 12px; border-radius: 6px;">
+      ⚠️ 业务配置缺失或不可用，禁止提交申请：{{ effectiveConfig.error }}
+    </div>
     <div class="dialog-grid">
       <label class="dialog-field">假别
         <select v-model="leave.form.type">

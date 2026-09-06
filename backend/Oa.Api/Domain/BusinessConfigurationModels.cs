@@ -147,6 +147,7 @@ public sealed class ExpenseCategoryPolicyConfig
 {
     public string Code { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
+    public List<string> Aliases { get; set; } = [];
     public bool IsEnabled { get; set; } = true;
     public decimal? SingleLimit { get; set; }
     public bool RequiresReceipt { get; set; } = true;
@@ -173,6 +174,7 @@ public sealed class TravelStandardItemConfig
     public decimal HotelDailyLimit { get; set; }
     public decimal MealDailyAllowance { get; set; }
     public string TransportationStandard { get; set; } = string.Empty;
+    public bool BlockWhenExceeded { get; set; }
 }
 
 public sealed class TravelPolicyConfig
@@ -180,12 +182,14 @@ public sealed class TravelPolicyConfig
     public List<TravelCityTierConfig> CityTiers { get; set; } = [];
     public List<string> EmployeeRanks { get; set; } = [];
     public List<TravelStandardItemConfig> Standards { get; set; } = [];
+    public bool BlockWhenExceeded { get; set; }
 }
 
 public sealed class ProcurementCategoryPolicyConfig
 {
     public string Code { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
+    public List<string> Aliases { get; set; } = [];
     public bool IsEnabled { get; set; } = true;
 }
 
@@ -209,6 +213,7 @@ public sealed class SealRegistryItemConfig
 {
     public string Code { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
+    public List<string> Aliases { get; set; } = [];
     public string SealType { get; set; } = string.Empty;
     public string CustodianUserId { get; set; } = string.Empty;
     public bool IsEnabled { get; set; } = true;
@@ -220,6 +225,7 @@ public sealed class SealDocumentCategoryConfig
 {
     public string Code { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
+    public List<string> Aliases { get; set; } = [];
     public bool IsEnabled { get; set; } = true;
     public string RiskLevel { get; set; } = "LOW";
 }

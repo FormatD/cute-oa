@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using Oa.Api.Domain;
 using Oa.Api.Persistence;
+using Microsoft.Extensions.Logging;
 
 namespace Oa.Api.Services;
 
@@ -10,11 +11,16 @@ public sealed class PurchaseService
 {
     private const string TenantId = "demo";
     private const string BusinessType = "Purchase";
+    private readonly ILogger<PurchaseService>? logger;
+
     private ServiceResult<(ProcurementPolicyConfig Policy, BusinessConfigurationRecord? Record)> ResolveProcurementPolicy()
     {
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Procurement, "ProcurementPolicy");
         if (db is not null && configRecord is null)
+        {
+            logger?.LogWarning("未找到生效中的采购管理策略配置【ProcurementPolicy】。租户：{TenantId}", TenantId);
             return ServiceResult<(ProcurementPolicyConfig, BusinessConfigurationRecord?)>.Failure("未找到生效中的采购管理策略配置【ProcurementPolicy】。", "CONFIG_MISSING");
+        }
 
         ProcurementPolicyConfig? policy = null;
         if (configRecord is not null)
@@ -23,12 +29,16 @@ public sealed class PurchaseService
             {
                 policy = JsonSerializer.Deserialize<ProcurementPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
             }
-            catch
+            catch (Exception ex)
             {
+                logger?.LogError(ex, "采购管理策略配置内容损坏，无法解析。租户：{TenantId}", TenantId);
                 return ServiceResult<(ProcurementPolicyConfig, BusinessConfigurationRecord?)>.Failure("采购管理策略配置内容损坏，无法解析。", "CONFIG_INVALID");
             }
             if (policy is null)
+            {
+                logger?.LogError("采购管理策略配置内容损坏，反序列化为 null。租户：{TenantId}", TenantId);
                 return ServiceResult<(ProcurementPolicyConfig, BusinessConfigurationRecord?)>.Failure("采购管理策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+            }
         }
         else
         {
@@ -56,7 +66,8 @@ public sealed class PurchaseService
         FlowInstanceService? flowInstances = null,
         FlowCopyService? copyRecipients = null,
         BudgetService? budgetService = null,
-        PaymentService? paymentService = null)
+        PaymentService? paymentService = null,
+        ILogger<PurchaseService>? logger = null)
     {
         this.data = data;
         this.db = db;
@@ -67,6 +78,7 @@ public sealed class PurchaseService
         this.copyRecipients = copyRecipients ?? new FlowCopyService(data, db);
         this.budgetService = budgetService ?? new BudgetService(data, db);
         this.paymentService = paymentService ?? new PaymentService(data, db, this.budgetService, this.notifications, this.files);
+        this.logger = logger;
     }
 
     public PagedResponse<PurchaseRequestListItem> List(Employee actor, DocumentListQuery query, int? requestedPage, int? requestedPageSize)
@@ -497,7 +509,7 @@ public sealed class PurchaseService
         if (!policyResult.IsSuccess)
             return ServiceResult<(IReadOnlyList<PurchaseItem>, IReadOnlyList<string>, IReadOnlyList<string>)>.Failure(policyResult.Error!, policyResult.Code!);
         var (policy, _) = policyResult.Value;
-        var allowedCategories = policy.Categories.Where(c => c.IsEnabled).SelectMany(c => new[] { c.Code, c.Name }).Where(x => !string.IsNullOrWhiteSpace(x)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var allowedCategories = policy.Categories.Where(c => c.IsEnabled).SelectMany(c => (new[] { c.Code, c.Name }).Concat(c.Aliases ?? [])).Where(x => !string.IsNullOrWhiteSpace(x)).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         var normalized = new List<PurchaseItem>();
         foreach (var item in request.Items)

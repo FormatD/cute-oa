@@ -468,7 +468,9 @@ export type LeavePolicyConfig = {
 }
 
 export type ExpenseCategoryPolicyConfig = {
+  code?: string
   name: string
+  aliases?: string[]
   isEnabled: boolean
   singleLimit?: number | null
   requiresReceipt: boolean
@@ -491,16 +493,20 @@ export type TravelStandardItemConfig = {
   hotelDailyLimit: number
   mealDailyAllowance: number
   transportationStandard: string
+  blockWhenExceeded?: boolean
 }
 
 export type TravelPolicyConfig = {
   cityTiers: TravelCityTierConfig[]
   employeeRanks: string[]
   standards: TravelStandardItemConfig[]
+  blockWhenExceeded?: boolean
 }
 
 export type ProcurementCategoryPolicyConfig = {
+  code?: string
   name: string
+  aliases?: string[]
   isEnabled: boolean
 }
 
@@ -519,7 +525,9 @@ export type ProcurementPolicyConfig = {
 }
 
 export type SealRegistryItemConfig = {
+  code?: string
   name: string
+  aliases?: string[]
   sealType: string
   custodianUserId: string
   isEnabled: boolean
@@ -528,7 +536,9 @@ export type SealRegistryItemConfig = {
 }
 
 export type SealDocumentCategoryConfig = {
+  code?: string
   name: string
+  aliases?: string[]
   isEnabled: boolean
   riskLevel: 'LOW' | 'MEDIUM' | 'HIGH' | string
 }

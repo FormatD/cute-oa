@@ -172,9 +172,15 @@ public sealed class AnnouncementService(OaDbContext db, DemoData data)
     private string ResolveAnnouncementTypeName(string code)
     {
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Dictionary, "AnnouncementType");
-        var dict = configRecord is not null
-            ? System.Text.Json.JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultAnnouncementTypeDict();
+        DictionaryConfig? dict = null;
+        if (configRecord is not null)
+        {
+            try
+            {
+                dict = System.Text.Json.JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
+            }
+            catch { }
+        }
         var item = dict?.Items.FirstOrDefault(i => i.Code.Equals(code, StringComparison.OrdinalIgnoreCase));
         return item?.Name ?? code;
     }

@@ -3060,6 +3060,37 @@ await using (var configDb = new OaDbContext(options))
     if (restoredBalance.Frozen != 0m || restoredBalance.Available != 5.0m)
         throw new InvalidOperationException($"调休撤回后可用额度未恢复：Available={restoredBalance.Available}");
 
+    // 9.6.1 调休申请被驳回 (Reject) 释放冻结并恢复可用额度测试
+    var rejectTestDraft = compTimeLeaveService.CreateDraft(grantUser, new CreateLeaveRequest(
+        LeaveType.CompTime,
+        new DateOnly(2026, 10, 26),
+        LeavePeriod.FullDay,
+        new DateOnly(2026, 10, 26),
+        LeavePeriod.FullDay,
+        "调休驳回释放测试",
+        []));
+    var rejectTestSubmit = compTimeLeaveService.Submit(grantUser, rejectTestDraft.Value!.Id);
+    if (!rejectTestSubmit.IsSuccess)
+        throw new InvalidOperationException($"提交调休申请待驳回失败：{rejectTestSubmit.Error}");
+
+    dbGrantA = configDb.CompTimeGrants.AsNoTracking().Single(g => g.Id == grantA.Id);
+    if (dbGrantA.FrozenDays != 1.0m)
+        throw new InvalidOperationException($"提交调休申请后 GrantA 冻结不符合预期：{dbGrantA.FrozenDays}");
+
+    var firstTask = rejectTestSubmit.Value!.Tasks.First();
+    var approverUser = configData.GetEmployee(firstTask.AssigneeId);
+    var rejectRes = compTimeLeaveService.Reject(approverUser, firstTask.Id, "暂缓调休，项目上线在即");
+    if (!rejectRes.IsSuccess)
+        throw new InvalidOperationException($"驳回调休申请失败：{rejectRes.Error}");
+
+    dbGrantA = configDb.CompTimeGrants.AsNoTracking().Single(g => g.Id == grantA.Id);
+    if (dbGrantA.FrozenDays != 0m)
+        throw new InvalidOperationException($"调休申请被驳回后 Grant 冻结未释放为 0：GrantA Frozen={dbGrantA.FrozenDays}");
+
+    var afterRejectBalance = compTimeLeaveService.GetBalance(grantUser, grantUser.Id, LeaveType.CompTime, today.Year).Value!;
+    if (afterRejectBalance.Frozen != 0m || afterRejectBalance.Available != 5.0m)
+        throw new InvalidOperationException($"调休被驳回后可用余额未全额恢复：Available={afterRejectBalance.Available}");
+
     var reSubmitDraft = compTimeLeaveService.CreateDraft(grantUser, new CreateLeaveRequest(
         LeaveType.CompTime,
         new DateOnly(2026, 10, 26),
@@ -3177,6 +3208,69 @@ await using (var configDb = new OaDbContext(options))
         {
             throw new InvalidOperationException($"并发串行化与OCC验证不符：submittedCount={submittedCount}, FrozenDays={finalGrant.FrozenDays}, Version={finalGrant.Version}");
         }
+    }
+
+    // 9.7.1 超额并发竞争测试：同一批 1.0 天额度被两个 DbContext 同时申请，严格互斥拦截，不得超额冻结或产生 500
+    var compOverUser = configData.GetEmployee("u-li");
+    var existingGrants = configDb.CompTimeGrants.Where(g => g.TenantId == "demo" && g.UserId == compOverUser.Id).ToList();
+    if (existingGrants.Count > 0) configDb.CompTimeGrants.RemoveRange(existingGrants);
+    var existingBals = configDb.LeaveBalances.Where(b => b.TenantId == "demo" && b.UserId == compOverUser.Id && b.LeaveType == (int)LeaveType.CompTime).ToList();
+    if (existingBals.Count > 0) configDb.LeaveBalances.RemoveRange(existingBals);
+
+    var overGrant = new CompTimeGrantRecord
+    {
+        TenantId = "demo",
+        UserId = compOverUser.Id,
+        GrantedDate = today.AddDays(-1),
+        ExpiredAt = today.AddDays(30),
+        Days = 1.0m,
+        UsedDays = 0m,
+        FrozenDays = 0m,
+        Reason = "超额并发竞争测试",
+        Version = 1
+    };
+    configDb.CompTimeGrants.Add(overGrant);
+    configDb.SaveChanges();
+
+    var overDraftA = compTimeLeaveService.CreateDraft(compOverUser, new CreateLeaveRequest(
+        LeaveType.CompTime, new DateOnly(2026, 11, 10), LeavePeriod.FullDay, new DateOnly(2026, 11, 10), LeavePeriod.FullDay, "超额并发申请A", []));
+    var overDraftB = compTimeLeaveService.CreateDraft(compOverUser, new CreateLeaveRequest(
+        LeaveType.CompTime, new DateOnly(2026, 11, 11), LeavePeriod.FullDay, new DateOnly(2026, 11, 11), LeavePeriod.FullDay, "超额并发申请B", []));
+
+    var overBarrier = new ManualResetEventSlim(false);
+    var overTask1 = Task.Run(async () =>
+    {
+        await using var threadDb = new OaDbContext(options);
+        var threadData = new DemoData(threadDb);
+        var threadLeave = new LeaveService(threadData, threadDb);
+        var actor = threadData.GetEmployee("u-li");
+        overBarrier.Wait();
+        return threadLeave.Submit(actor, overDraftA.Value!.Id);
+    });
+    var overTask2 = Task.Run(async () =>
+    {
+        await using var threadDb = new OaDbContext(options);
+        var threadData = new DemoData(threadDb);
+        var threadLeave = new LeaveService(threadData, threadDb);
+        var actor = threadData.GetEmployee("u-li");
+        overBarrier.Wait();
+        return threadLeave.Submit(actor, overDraftB.Value!.Id);
+    });
+    overBarrier.Set();
+    var overResults = await Task.WhenAll(overTask1, overTask2);
+
+    var overSuccessCount = overResults.Count(r => r.IsSuccess);
+    var overFailures = overResults.Where(r => !r.IsSuccess).ToList();
+    if (overSuccessCount != 1 || overFailures.Count != 1)
+        throw new InvalidOperationException($"超额并发竞争未准确互斥：成功数={overSuccessCount}, 失败数={overFailures.Count}");
+    if (overFailures[0].Code is not ("LEAVE_001" or "CONCURRENCY_001"))
+        throw new InvalidOperationException($"超额并发失败返回了非预期错误码：{overFailures[0].Code}, 错误信息={overFailures[0].Error}");
+
+    await using (var verifyDb = new OaDbContext(options))
+    {
+        var finalOverGrant = verifyDb.CompTimeGrants.AsNoTracking().Single(g => g.Id == overGrant.Id);
+        if (finalOverGrant.FrozenDays != 1.0m)
+            throw new InvalidOperationException($"超额并发竞争导致 Grant 发生超额冻结：FrozenDays={finalOverGrant.FrozenDays} (预期 1.0)");
     }
 
     // 10. WP-C (R-C1): 专职最小权限角色、MFA 约束与关键管理失败审计留痕

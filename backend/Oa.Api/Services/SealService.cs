@@ -4,17 +4,24 @@ using Npgsql;
 using Oa.Api.Domain;
 using Oa.Api.Persistence;
 
+using Microsoft.Extensions.Logging;
+
 namespace Oa.Api.Services;
 
 public sealed class SealService
 {
     private const string TenantId = "demo";
     private const string BusinessType = "Seal";
+    private readonly ILogger<SealService>? logger;
+
     private ServiceResult<(SealPolicyConfig Policy, BusinessConfigurationRecord? Record)> ResolveSealPolicy()
     {
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Seal, "SealPolicy");
         if (db is not null && configRecord is null)
+        {
+            logger?.LogWarning("未找到生效中的用章管理策略配置【SealPolicy】。租户：{TenantId}", TenantId);
             return ServiceResult<(SealPolicyConfig, BusinessConfigurationRecord?)>.Failure("未找到生效中的用章管理策略配置【SealPolicy】。", "CONFIG_MISSING");
+        }
 
         SealPolicyConfig? policy = null;
         if (configRecord is not null)
@@ -23,12 +30,16 @@ public sealed class SealService
             {
                 policy = JsonSerializer.Deserialize<SealPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
             }
-            catch
+            catch (Exception ex)
             {
+                logger?.LogError(ex, "用章管理策略配置内容损坏，无法解析。租户：{TenantId}", TenantId);
                 return ServiceResult<(SealPolicyConfig, BusinessConfigurationRecord?)>.Failure("用章管理策略配置内容损坏，无法解析。", "CONFIG_INVALID");
             }
             if (policy is null)
+            {
+                logger?.LogError("用章管理策略配置内容损坏，反序列化为 null。租户：{TenantId}", TenantId);
                 return ServiceResult<(SealPolicyConfig, BusinessConfigurationRecord?)>.Failure("用章管理策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+            }
         }
         else
         {
@@ -53,7 +64,8 @@ public sealed class SealService
         FileService? files = null,
         IProcessRouter? processRouter = null,
         FlowInstanceService? flowInstances = null,
-        FlowCopyService? copyRecipients = null)
+        FlowCopyService? copyRecipients = null,
+        ILogger<SealService>? logger = null)
     {
         this.data = data;
         this.db = db;
@@ -62,6 +74,7 @@ public sealed class SealService
         this.processRouter = processRouter ?? new DefaultProcessRouter(data);
         this.flowInstances = flowInstances ?? new FlowInstanceService(db);
         this.copyRecipients = copyRecipients ?? new FlowCopyService(data, db);
+        this.logger = logger;
     }
 
     public PagedResponse<SealRequestListItem> List(Employee actor, DocumentListQuery query, int? requestedPage, int? requestedPageSize)

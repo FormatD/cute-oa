@@ -7,7 +7,9 @@ const props = defineProps<{
 }>()
 
 function addSeal() {
+  const codeSuffix = Math.floor(1000 + Math.random() * 9000).toString()
   props.modelValue.seals.push({
+    code: `Seal_${codeSuffix}`,
     name: '新印章',
     sealType: 'COMPANY_OFFICIAL',
     custodianUserId: 'admin',
@@ -22,7 +24,9 @@ function removeSeal(idx: number) {
 }
 
 function addDocCategory() {
+  const codeSuffix = Math.floor(1000 + Math.random() * 9000).toString()
   props.modelValue.documentCategories.push({
+    code: `Doc_${codeSuffix}`,
     name: '新文件类别',
     riskLevel: 'LOW',
     isEnabled: true
@@ -46,6 +50,7 @@ function removeDocCategory(idx: number) {
       <table class="inner-table">
         <thead>
           <tr>
+            <th style="min-width: 110px;">编码 (Code)</th>
             <th>印章名称</th>
             <th>印章类型</th>
             <th style="min-width: 140px;">保管人</th>
@@ -57,6 +62,7 @@ function removeDocCategory(idx: number) {
         </thead>
         <tbody>
           <tr v-for="(s, idx) in modelValue.seals" :key="idx">
+            <td><input v-model="s.code" placeholder="如 OfficialSeal" style="min-width: 100px;" /></td>
             <td><input v-model="s.name" placeholder="公章名称" /></td>
             <td>
               <select v-model="s.sealType">
@@ -96,6 +102,7 @@ function removeDocCategory(idx: number) {
       <table class="inner-table">
         <thead>
           <tr>
+            <th style="min-width: 110px;">编码 (Code)</th>
             <th>文件类别</th>
             <th>风险等级</th>
             <th>启用</th>
@@ -104,6 +111,7 @@ function removeDocCategory(idx: number) {
         </thead>
         <tbody>
           <tr v-for="(dc, idx) in modelValue.documentCategories" :key="idx">
+            <td><input v-model="dc.code" placeholder="如 Contract" style="min-width: 100px;" /></td>
             <td><input v-model="dc.name" placeholder="如 工商变更" /></td>
             <td>
               <select v-model="dc.riskLevel">

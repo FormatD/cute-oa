@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore;
 using Oa.Api.Domain;
 using Oa.Api.Persistence;
 
+using Microsoft.Extensions.Logging;
+
 namespace Oa.Api.Services;
 
 public sealed class ExpenseService
@@ -17,13 +19,17 @@ public sealed class ExpenseService
     private readonly FlowCopyService copyRecipients;
     private readonly TravelService? travelRequests;
     private readonly BudgetService? budgetService;
+    private readonly ILogger<ExpenseService>? logger;
     private readonly List<ExpenseClaim> _claims;
 
     private ServiceResult<(ExpensePolicyConfig Policy, BusinessConfigurationRecord? Record)> ResolveExpensePolicy()
     {
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Expense, "ExpensePolicy");
         if (db is not null && configRecord is null)
+        {
+            logger?.LogWarning("未找到生效中的费用报销策略配置【ExpensePolicy】。租户：{TenantId}", TenantId);
             return ServiceResult<(ExpensePolicyConfig, BusinessConfigurationRecord?)>.Failure("未找到生效中的费用报销策略配置【ExpensePolicy】。", "CONFIG_MISSING");
+        }
 
         ExpensePolicyConfig? policy = null;
         if (configRecord is not null)
@@ -32,12 +38,16 @@ public sealed class ExpenseService
             {
                 policy = JsonSerializer.Deserialize<ExpensePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
             }
-            catch
+            catch (Exception ex)
             {
+                logger?.LogError(ex, "费用报销策略配置内容损坏，无法解析。租户：{TenantId}", TenantId);
                 return ServiceResult<(ExpensePolicyConfig, BusinessConfigurationRecord?)>.Failure("费用报销策略配置内容损坏，无法解析。", "CONFIG_INVALID");
             }
             if (policy is null)
+            {
+                logger?.LogError("费用报销策略配置内容损坏，反序列化为 null。租户：{TenantId}", TenantId);
                 return ServiceResult<(ExpensePolicyConfig, BusinessConfigurationRecord?)>.Failure("费用报销策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+            }
         }
         else
         {
@@ -56,7 +66,8 @@ public sealed class ExpenseService
 
             var catRule = policy.Categories.FirstOrDefault(c =>
                 (!string.IsNullOrWhiteSpace(c.Code) && c.Code.Equals(detail.Category, StringComparison.OrdinalIgnoreCase)) ||
-                c.Name.Equals(detail.Category, StringComparison.OrdinalIgnoreCase));
+                c.Name.Equals(detail.Category, StringComparison.OrdinalIgnoreCase) ||
+                (c.Aliases != null && c.Aliases.Contains(detail.Category, StringComparer.OrdinalIgnoreCase)));
             if (catRule is null)
                 return ServiceResult<bool>.Failure($"费用类别【{detail.Category}】已被系统停用或不存在，无法申请。", "EXP_005");
             if (!catRule.IsEnabled)
@@ -76,7 +87,7 @@ public sealed class ExpenseService
         return ServiceResult<bool>.Success(true);
     }
 
-    public ExpenseService(DemoData data, OaDbContext? db = null, NotificationService? notifications = null, FileService? files = null, IProcessRouter? processRouter = null, FlowInstanceService? flowInstances = null, FlowCopyService? copyRecipients = null, TravelService? travelRequests = null, BudgetService? budgetService = null)
+    public ExpenseService(DemoData data, OaDbContext? db = null, NotificationService? notifications = null, FileService? files = null, IProcessRouter? processRouter = null, FlowInstanceService? flowInstances = null, FlowCopyService? copyRecipients = null, TravelService? travelRequests = null, BudgetService? budgetService = null, ILogger<ExpenseService>? logger = null)
     {
         this.data = data;
         this.db = db;
@@ -87,6 +98,7 @@ public sealed class ExpenseService
         this.copyRecipients = copyRecipients ?? new FlowCopyService(data, db);
         this.travelRequests = travelRequests;
         this.budgetService = budgetService ?? new BudgetService(data, db);
+        this.logger = logger;
         _claims = db is null ? [] : LoadClaims(db, this.flowInstances, this.copyRecipients);
     }
 

@@ -10,8 +10,10 @@ const props = withDefaults(defineProps<{
   danger?: boolean
   maskClosable?: boolean
   width?: string
+  submitDisabled?: boolean
 }>(), {
-  maskClosable: false
+  maskClosable: false,
+  submitDisabled: false
 })
 
 const emit = defineEmits<{ close: []; submit: [] }>()
@@ -101,7 +103,7 @@ onBeforeUnmount(() => {
             <button
               :class="{ danger }"
               type="submit"
-              :disabled="busy"
+              :disabled="busy || submitDisabled"
             >
               {{ busy ? '处理中…' : submitLabel }}
             </button>

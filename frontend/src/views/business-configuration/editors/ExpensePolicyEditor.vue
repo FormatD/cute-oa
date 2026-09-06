@@ -6,7 +6,9 @@ const props = defineProps<{
 }>()
 
 function addCategory() {
+  const codeSuffix = Math.floor(1000 + Math.random() * 9000).toString()
   props.modelValue.categories.push({
+    code: `Expense_${codeSuffix}`,
     name: '新费用类别',
     isEnabled: true,
     singleLimit: 1000,
@@ -33,6 +35,7 @@ function removeCategory(idx: number) {
       <table class="inner-table">
         <thead>
           <tr>
+            <th style="min-width: 120px;">编码 (Code)</th>
             <th>类别名称</th>
             <th>启用</th>
             <th>单笔限额 (元, 空为无限制)</th>
@@ -44,6 +47,7 @@ function removeCategory(idx: number) {
         </thead>
         <tbody>
           <tr v-for="(cat, idx) in modelValue.categories" :key="idx">
+            <td><input v-model="cat.code" placeholder="如 Traffic" style="min-width: 110px;" /></td>
             <td><input v-model="cat.name" placeholder="如 办公用品" /></td>
             <td><input v-model="cat.isEnabled" type="checkbox" /></td>
             <td><input v-model.number="cat.singleLimit" type="number" placeholder="留空无上限" /></td>

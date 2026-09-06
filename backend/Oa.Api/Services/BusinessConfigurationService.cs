@@ -5,6 +5,8 @@ using Microsoft.EntityFrameworkCore.Storage;
 using Oa.Api.Domain;
 using Oa.Api.Persistence;
 
+using Microsoft.Extensions.Logging;
+
 namespace Oa.Api.Services;
 
 public sealed class BusinessConfigurationService
@@ -13,11 +15,13 @@ public sealed class BusinessConfigurationService
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> DomainCodeLocks = new();
     private readonly OaDbContext db;
     private readonly DemoData data;
+    private readonly ILogger<BusinessConfigurationService>? logger;
 
-    public BusinessConfigurationService(OaDbContext db, DemoData data)
+    public BusinessConfigurationService(OaDbContext db, DemoData data, ILogger<BusinessConfigurationService>? logger = null)
     {
         this.db = db;
         this.data = data;
+        this.logger = logger;
     }
 
     private IDisposable AcquireLock(string domain, string code)
@@ -244,7 +248,11 @@ public sealed class BusinessConfigurationService
         if (string.IsNullOrWhiteSpace(name) || name.Length > 100)
             return ServiceResult<BusinessConfigurationView>.Failure("配置名称应为 1–100 个字符。", "CONFIG_001");
 
-        var normalizedJson = BusinessConfigurationValidator.ValidateAndNormalize(record.Domain, request.ContentJson, data);
+        var previousRecord = db.BusinessConfigurations.AsNoTracking()
+            .Where(item => item.TenantId == TenantId && item.Domain == record.Domain && item.Code == record.Code && item.Version < record.Version)
+            .OrderByDescending(item => item.Version)
+            .FirstOrDefault();
+        var normalizedJson = BusinessConfigurationValidator.ValidateAndNormalize(record.Domain, request.ContentJson, data, previousRecord?.ContentJson);
         if (!normalizedJson.IsSuccess)
         {
             LogAudit(actor, "CONFIG_DRAFT_UPDATE_FAILED", record.Id.ToString(), $"更新配置草稿校验失败：{normalizedJson.Error}");
@@ -260,7 +268,10 @@ public sealed class BusinessConfigurationService
         var now = DateTimeOffset.UtcNow;
         record.Name = name;
         record.Description = request.Description?.Trim();
-        record.EffectiveFrom = request.EffectiveFrom.ToUniversalTime();
+        if (request.EffectiveFrom != default)
+        {
+            record.EffectiveFrom = request.EffectiveFrom.ToUniversalTime();
+        }
         record.EffectiveTo = request.EffectiveTo?.ToUniversalTime();
         record.ContentJson = normalizedJson.Value!;
         record.UpdatedBy = actor.Id;
@@ -827,7 +838,10 @@ public sealed class BusinessConfigurationService
         // 1. Leave
         var leaveRecord = GetEffective(ConfigurationDomains.Leave, "LeavePolicy", asOf);
         if (leaveRecord is null)
+        {
+            logger?.LogWarning("未找到生效中的假勤规则配置【LeavePolicy】。租户：{TenantId}", TenantId);
             return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("未找到生效中的假勤规则配置【LeavePolicy】。", "CONFIG_MISSING");
+        }
         LeavePolicyConfig? leavePolicy;
         try
         {
@@ -835,10 +849,14 @@ public sealed class BusinessConfigurationService
         }
         catch (Exception ex)
         {
+            logger?.LogError(ex, "假勤规则配置内容损坏，无法解析。租户：{TenantId}", TenantId);
             return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure($"假勤规则配置内容损坏，无法解析: {ex.Message}", "CONFIG_INVALID");
         }
         if (leavePolicy is null)
+        {
+            logger?.LogError("假勤规则配置内容损坏，反序列化为 null。租户：{TenantId}", TenantId);
             return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("假勤规则配置内容损坏，无法解析。", "CONFIG_INVALID");
+        }
 
         bundle.LeaveTypes = leavePolicy.LeaveTypes
             .Where(t => t.IsEnabled)
@@ -855,7 +873,10 @@ public sealed class BusinessConfigurationService
         // 2. Expense
         var expenseRecord = GetEffective(ConfigurationDomains.Expense, "ExpensePolicy", asOf);
         if (expenseRecord is null)
+        {
+            logger?.LogWarning("未找到生效中的费用报销规则配置【ExpensePolicy】。租户：{TenantId}", TenantId);
             return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("未找到生效中的费用报销规则配置【ExpensePolicy】。", "CONFIG_MISSING");
+        }
         ExpensePolicyConfig? expensePolicy;
         try
         {
@@ -863,16 +884,20 @@ public sealed class BusinessConfigurationService
         }
         catch (Exception ex)
         {
+            logger?.LogError(ex, "费用报销规则配置内容损坏，无法解析。租户：{TenantId}", TenantId);
             return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure($"费用报销规则配置内容损坏，无法解析: {ex.Message}", "CONFIG_INVALID");
         }
         if (expensePolicy is null)
+        {
+            logger?.LogError("费用报销规则配置内容损坏，反序列化为 null。租户：{TenantId}", TenantId);
             return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("费用报销规则配置内容损坏，无法解析。", "CONFIG_INVALID");
+        }
 
         bundle.ExpenseCategories = expensePolicy.Categories
             .Where(c => c.IsEnabled)
             .Select(c => new EffectiveExpenseCategoryOption
             {
-                Code = !string.IsNullOrWhiteSpace(c.Code) ? c.Code : c.Name,
+                Code = c.Code,
                 Name = c.Name,
                 SingleLimit = c.SingleLimit,
                 RequiresReceipt = c.RequiresReceipt,
@@ -884,7 +909,10 @@ public sealed class BusinessConfigurationService
         // 3. Travel
         var travelRecord = GetEffective(ConfigurationDomains.Travel, "TravelPolicy", asOf);
         if (travelRecord is null)
+        {
+            logger?.LogWarning("未找到生效中的差旅管理标准配置【TravelPolicy】。租户：{TenantId}", TenantId);
             return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("未找到生效中的差旅管理标准配置【TravelPolicy】。", "CONFIG_MISSING");
+        }
         TravelPolicyConfig? travelPolicy;
         try
         {
@@ -892,10 +920,14 @@ public sealed class BusinessConfigurationService
         }
         catch (Exception ex)
         {
+            logger?.LogError(ex, "差旅管理标准配置内容损坏，无法解析。租户：{TenantId}", TenantId);
             return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure($"差旅管理标准配置内容损坏，无法解析: {ex.Message}", "CONFIG_INVALID");
         }
         if (travelPolicy is null)
+        {
+            logger?.LogError("差旅管理标准配置内容损坏，反序列化为 null。租户：{TenantId}", TenantId);
             return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("差旅管理标准配置内容损坏，无法解析。", "CONFIG_INVALID");
+        }
 
         bundle.TravelCityTiers = travelPolicy.CityTiers;
         bundle.TravelEmployeeRanks = travelPolicy.EmployeeRanks;
@@ -904,7 +936,10 @@ public sealed class BusinessConfigurationService
         // 4. Procurement
         var procRecord = GetEffective(ConfigurationDomains.Procurement, "ProcurementPolicy", asOf);
         if (procRecord is null)
+        {
+            logger?.LogWarning("未找到生效中的采购管理规则配置【ProcurementPolicy】。租户：{TenantId}", TenantId);
             return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("未找到生效中的采购管理规则配置【ProcurementPolicy】。", "CONFIG_MISSING");
+        }
         ProcurementPolicyConfig? procPolicy;
         try
         {
@@ -912,16 +947,20 @@ public sealed class BusinessConfigurationService
         }
         catch (Exception ex)
         {
+            logger?.LogError(ex, "采购管理规则配置内容损坏，无法解析。租户：{TenantId}", TenantId);
             return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure($"采购管理规则配置内容损坏，无法解析: {ex.Message}", "CONFIG_INVALID");
         }
         if (procPolicy is null)
+        {
+            logger?.LogError("采购管理规则配置内容损坏，反序列化为 null。租户：{TenantId}", TenantId);
             return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("采购管理规则配置内容损坏，无法解析。", "CONFIG_INVALID");
+        }
 
         bundle.ProcurementCategories = procPolicy.Categories
             .Where(c => c.IsEnabled)
             .Select(c => new EffectiveProcurementCategoryOption
             {
-                Code = !string.IsNullOrWhiteSpace(c.Code) ? c.Code : c.Name,
+                Code = c.Code,
                 Name = c.Name
             })
             .ToList();
@@ -933,7 +972,10 @@ public sealed class BusinessConfigurationService
         // 5. Seal
         var sealRecord = GetEffective(ConfigurationDomains.Seal, "SealPolicy", asOf);
         if (sealRecord is null)
+        {
+            logger?.LogWarning("未找到生效中的用章管理规则配置【SealPolicy】。租户：{TenantId}", TenantId);
             return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("未找到生效中的用章管理规则配置【SealPolicy】。", "CONFIG_MISSING");
+        }
         SealPolicyConfig? sealPolicy;
         try
         {
@@ -941,16 +983,20 @@ public sealed class BusinessConfigurationService
         }
         catch (Exception ex)
         {
+            logger?.LogError(ex, "用章管理规则配置内容损坏，无法解析。租户：{TenantId}", TenantId);
             return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure($"用章管理规则配置内容损坏，无法解析: {ex.Message}", "CONFIG_INVALID");
         }
         if (sealPolicy is null)
+        {
+            logger?.LogError("用章管理规则配置内容损坏，反序列化为 null。租户：{TenantId}", TenantId);
             return ServiceResult<EffectiveBusinessConfigurationBundle>.Failure("用章管理规则配置内容损坏，无法解析。", "CONFIG_INVALID");
+        }
 
         bundle.Seals = sealPolicy.Seals
             .Where(s => s.IsEnabled)
             .Select(s => new EffectiveSealOption
             {
-                Code = !string.IsNullOrWhiteSpace(s.Code) ? s.Code : s.Name,
+                Code = s.Code,
                 Name = s.Name,
                 SealType = s.SealType,
                 AllowOut = s.AllowOut,
@@ -961,7 +1007,7 @@ public sealed class BusinessConfigurationService
             .Where(d => d.IsEnabled)
             .Select(d => new EffectiveSealDocCategoryOption
             {
-                Code = !string.IsNullOrWhiteSpace(d.Code) ? d.Code : d.Name,
+                Code = d.Code,
                 Name = d.Name,
                 RiskLevel = d.RiskLevel
             })
