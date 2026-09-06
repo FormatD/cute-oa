@@ -13,7 +13,7 @@ public sealed class PurchaseService
     private ServiceResult<(ProcurementPolicyConfig Policy, BusinessConfigurationRecord? Record)> ResolveProcurementPolicy()
     {
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Procurement, "ProcurementPolicy");
-        if (db is not null && configRecord is null)
+        if (configRecord is null)
             return ServiceResult<(ProcurementPolicyConfig, BusinessConfigurationRecord?)>.Failure("未找到生效中的采购管理策略配置【ProcurementPolicy】。", "CONFIG_MISSING");
 
         ProcurementPolicyConfig? policy = null;
@@ -395,7 +395,7 @@ public sealed class PurchaseService
         var validation = Validate(actor, request, BusinessTime.ChinaToday());
         if (!validation.IsSuccess) return ServiceResult<PurchaseRequest>.Failure(validation.Error!, validation.Code!);
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Procurement, "ProcurementPolicy");
-        if (db is not null && configRecord is null)
+        if (configRecord is null)
             return ServiceResult<PurchaseRequest>.Failure("未找到生效中的采购管理策略配置【ProcurementPolicy】。", "CONFIG_MISSING");
         var record = new PurchaseRequestRecord
         {
@@ -403,9 +403,10 @@ public sealed class PurchaseService
             ApplicantId = actor.Id, ApplicantName = actor.Name, DepartmentName = actor.DepartmentName, Status = (int)PurchaseStatus.Draft, Version = 1, IsDemo = isDemo,
             ConfigVersionId = configRecord?.Id, ConfigVersionNumber = configRecord?.Version, ConfigSnapshotJson = configRecord?.ContentJson, ConfigResolvedAt = configRecord is not null ? DateTimeOffset.UtcNow : null
         };
-        Apply(record, request, validation.Value!.Items, validation.Value.Attachments);
+        var valid = validation.Value!;
+        Apply(record, request, valid.Items, valid.Attachments);
         db.PurchaseRequests.Add(record);
-        copyRecipients.Track(BusinessType, record.Id, record.Number, record.ApplicantName, record.Title, validation.Value.CopyRecipientIds);
+        copyRecipients?.Track(BusinessType, record.Id, record.Number, record.ApplicantName, record.Title, valid.CopyRecipientIds);
         Audit(actor, isDemo ? "PURCHASE_DEMO_CREATED" : "PURCHASE_DRAFT_CREATED", record, isDemo ? "生成采购演示草稿" : "创建采购草稿");
         db.SaveChanges();
         return ServiceResult<PurchaseRequest>.Success(Load(record));
@@ -505,14 +506,15 @@ public sealed class PurchaseService
             var unit = item.Unit?.Trim() ?? string.Empty;
             var specification = NormalizeOptional(item.Specification);
             var remark = NormalizeOptional(item.Remark);
-            if (string.IsNullOrWhiteSpace(item.Category) || !allowedCategories.Contains(item.Category))
+            var cat = item.Category?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(cat) || !allowedCategories.Contains(cat))
                 return ServiceResult<(IReadOnlyList<PurchaseItem>, IReadOnlyList<string>, IReadOnlyList<string>)>.Failure($"采购明细品类【{item.Category}】未启用或不存在。", "PURCHASE_001");
             if (name.Length is < 1 or > 100 || unit.Length is < 1 or > 20 || (specification?.Length ?? 0) > 200 || (remark?.Length ?? 0) > 300 ||
                 item.Quantity <= 0 || item.Quantity > 1_000_000m || decimal.Round(item.Quantity, 4) != item.Quantity ||
                 item.EstimatedUnitPrice < 0 || item.EstimatedUnitPrice > 10_000_000m || decimal.Round(item.EstimatedUnitPrice, 2) != item.EstimatedUnitPrice)
                 return ServiceResult<(IReadOnlyList<PurchaseItem>, IReadOnlyList<string>, IReadOnlyList<string>)>.Failure("采购明细的品类、名称、规格、数量、单位、单价或备注不合法。", "PURCHASE_001");
             var amount = decimal.Round(item.Quantity * item.EstimatedUnitPrice, 2, MidpointRounding.AwayFromZero);
-            normalized.Add(new PurchaseItem(item.Category, name, specification, item.Quantity, unit, item.EstimatedUnitPrice, amount, remark));
+            normalized.Add(new PurchaseItem(cat, name, specification, item.Quantity, unit, item.EstimatedUnitPrice, amount, remark));
         }
         var total = normalized.Sum(item => item.EstimatedAmount);
         if (total <= 0 || total > 100_000_000m)

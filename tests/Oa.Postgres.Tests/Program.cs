@@ -2543,6 +2543,21 @@ await using (var configDb = new OaDbContext(options))
     if (!seededConfigs.Any(c => c.Domain == ConfigurationDomains.Dictionary && c.Code == "AnnouncementType" && c.Status == ConfigurationStatus.Effective))
         throw new InvalidOperationException("默认公告字典未自动初始化生效。");
 
+    // 1.1 Effective options bundle verification (R-B1)
+    var effectiveBundle = configService.GetEffectiveBundle();
+    if (effectiveBundle.LeaveTypes.Count == 0 ||
+        effectiveBundle.ExpenseCategories.Count == 0 ||
+        effectiveBundle.TravelStandards.Count == 0 ||
+        effectiveBundle.ProcurementCategories.Count == 0 ||
+        effectiveBundle.Seals.Count == 0 ||
+        effectiveBundle.SealDocumentCategories.Count == 0 ||
+        effectiveBundle.ContractTypes.Count == 0 ||
+        effectiveBundle.ApprovalCommentPresets.Count == 0 ||
+        effectiveBundle.AnnouncementTypes.Count == 0)
+    {
+        throw new InvalidOperationException("统一有效配置 Bundle (GetEffectiveBundle) 选项缺失或解析失败。");
+    }
+
     // 2. Permission enforcement
     var forbiddenDraft = configService.CreateDraft(zhang, new CreateBusinessConfigurationRequest(
         ConfigurationDomains.Dictionary, "FORBIDDEN_DICT", "无权限字典", "测试", DateTimeOffset.UtcNow, null, """{"items": [{"code": "A", "name": "A"}]}"""));

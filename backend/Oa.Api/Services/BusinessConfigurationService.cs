@@ -719,4 +719,137 @@ public sealed class BusinessConfigurationService
         value.Replace("\\", "\\\\", StringComparison.Ordinal)
             .Replace("%", "\\%", StringComparison.Ordinal)
             .Replace("_", "\\_", StringComparison.Ordinal);
+
+    public EffectiveBusinessConfigurationBundle GetEffectiveBundle(DateTimeOffset? asOfDate = null)
+    {
+        var asOf = (asOfDate ?? DateTimeOffset.UtcNow).ToUniversalTime();
+        var bundle = new EffectiveBusinessConfigurationBundle();
+
+        // 1. Leave
+        var leaveRecord = GetEffective(ConfigurationDomains.Leave, "LeavePolicy", asOf);
+        var leavePolicy = leaveRecord is not null
+            ? JsonSerializer.Deserialize<LeavePolicyConfig>(leaveRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultLeavePolicy();
+        if (leavePolicy is not null)
+        {
+            bundle.LeaveTypes = leavePolicy.LeaveTypes
+                .Where(t => t.IsEnabled)
+                .Select(t => new EffectiveLeaveTypeOption
+                {
+                    Code = t.Type,
+                    Name = t.Name,
+                    MinUnit = t.MinUnit,
+                    RequiresAttachment = t.RequiresAttachment,
+                    AttachmentThresholdDays = t.AttachmentThresholdDays
+                })
+                .ToList();
+        }
+
+        // 2. Expense
+        var expenseRecord = GetEffective(ConfigurationDomains.Expense, "ExpensePolicy", asOf);
+        var expensePolicy = expenseRecord is not null
+            ? JsonSerializer.Deserialize<ExpensePolicyConfig>(expenseRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultExpensePolicy();
+        if (expensePolicy is not null)
+        {
+            bundle.ExpenseCategories = expensePolicy.Categories
+                .Where(c => c.IsEnabled)
+                .Select(c => new EffectiveExpenseCategoryOption
+                {
+                    Code = c.Name,
+                    Name = c.Name,
+                    SingleLimit = c.SingleLimit,
+                    RequiresReceipt = c.RequiresReceipt,
+                    RequiresReasonWhenExceeded = c.RequiresReasonWhenExceeded,
+                    BlockWhenExceeded = c.BlockWhenExceeded
+                })
+                .ToList();
+        }
+
+        // 3. Travel
+        var travelRecord = GetEffective(ConfigurationDomains.Travel, "TravelPolicy", asOf);
+        var travelPolicy = travelRecord is not null
+            ? JsonSerializer.Deserialize<TravelPolicyConfig>(travelRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultTravelPolicy();
+        if (travelPolicy is not null)
+        {
+            bundle.TravelCityTiers = travelPolicy.CityTiers;
+            bundle.TravelEmployeeRanks = travelPolicy.EmployeeRanks;
+            bundle.TravelStandards = travelPolicy.Standards;
+        }
+
+        // 4. Procurement
+        var procRecord = GetEffective(ConfigurationDomains.Procurement, "ProcurementPolicy", asOf);
+        var procPolicy = procRecord is not null
+            ? JsonSerializer.Deserialize<ProcurementPolicyConfig>(procRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultProcurementPolicy();
+        if (procPolicy is not null)
+        {
+            bundle.ProcurementCategories = procPolicy.Categories
+                .Where(c => c.IsEnabled)
+                .Select(c => new EffectiveProcurementCategoryOption { Code = c.Name, Name = c.Name })
+                .ToList();
+            bundle.ProcurementAmountTiers = procPolicy.AmountTiers
+                .Select(t => new EffectiveProcurementAmountTierOption { Name = t.Name, MaxAmount = t.MaxAmount })
+                .ToList();
+            bundle.ProcurementQuoteThreshold = procPolicy.QuoteAttachmentThreshold;
+        }
+
+        // 5. Seal
+        var sealRecord = GetEffective(ConfigurationDomains.Seal, "SealPolicy", asOf);
+        var sealPolicy = sealRecord is not null
+            ? JsonSerializer.Deserialize<SealPolicyConfig>(sealRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultSealPolicy();
+        if (sealPolicy is not null)
+        {
+            bundle.Seals = sealPolicy.Seals
+                .Where(s => s.IsEnabled)
+                .Select(s => new EffectiveSealOption
+                {
+                    Code = s.Name,
+                    Name = s.Name,
+                    SealType = s.SealType,
+                    AllowOut = s.AllowOut,
+                    MaxOutDays = s.MaxOutDays
+                })
+                .ToList();
+            bundle.SealDocumentCategories = sealPolicy.DocumentCategories
+                .Where(d => d.IsEnabled)
+                .Select(d => new EffectiveSealDocCategoryOption
+                {
+                    Code = d.Name,
+                    Name = d.Name,
+                    RiskLevel = d.RiskLevel
+                })
+                .ToList();
+        }
+
+        // 6. Dictionaries
+        bundle.ContractTypes = ResolveDictionaryOptions("ContractType", asOf, BusinessConfigurationDefaults.CreateDefaultContractTypeDict);
+        bundle.AttachmentTypes = ResolveDictionaryOptions("AttachmentType", asOf, BusinessConfigurationDefaults.CreateDefaultAttachmentTypeDict);
+        bundle.ApprovalCommentPresets = ResolveDictionaryOptions("ApprovalCommentPreset", asOf, BusinessConfigurationDefaults.CreateDefaultApprovalCommentPresetDict);
+        bundle.AnnouncementTypes = ResolveDictionaryOptions("AnnouncementType", asOf, BusinessConfigurationDefaults.CreateDefaultAnnouncementTypeDict);
+
+        return bundle;
+    }
+
+    private List<EffectiveDictionaryOption> ResolveDictionaryOptions(string code, DateTimeOffset asOf, Func<DictionaryConfig> defaultFactory)
+    {
+        var record = GetEffective(ConfigurationDomains.Dictionary, code, asOf);
+        DictionaryConfig? dict = null;
+        if (record is not null)
+        {
+            try
+            {
+                dict = JsonSerializer.Deserialize<DictionaryConfig>(record.ContentJson, BusinessConfigurationDefaults.JsonOptions);
+            }
+            catch { }
+        }
+        dict ??= defaultFactory();
+        return dict.Items
+            .Where(i => i.IsEnabled)
+            .OrderBy(i => i.SortOrder)
+            .Select(i => new EffectiveDictionaryOption { Code = i.Code, Name = i.Name, SortOrder = i.SortOrder })
+            .ToList();
+    }
 }

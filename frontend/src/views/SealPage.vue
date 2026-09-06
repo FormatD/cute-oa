@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import OaDialog from '../components/OaDialog.vue'
 import { useAppStore } from '../stores/app'
 import { useAuthStore } from '../stores/auth'
+import { useEffectiveConfigurationStore } from '../stores/effective-configurations'
 import { useEmployeeDirectoryStore } from '../stores/employee-directory'
 import { useFileStore } from '../stores/files'
 import { useSealStore } from '../stores/seal'
@@ -11,14 +13,19 @@ import { businessStatusLabel } from '../utils/businessLabels'
 
 const app = useAppStore()
 const auth = useAuthStore()
+const effectiveConfig = useEffectiveConfigurationStore()
 const employees = useEmployeeDirectoryStore()
 const files = useFileStore()
 const seal = useSealStore()
 const ui = useUiStore()
 const router = useRouter()
 
-const documentCategories = ['合同协议', '招投标文件', '证照资质', '财务票据', '人事证明', '其他']
-const sealTypes = ['公章', '法人章', '合同章', '财务章', '电子印章']
+onMounted(() => {
+  void effectiveConfig.load()
+})
+
+const documentCategories = computed(() => effectiveConfig.sealDocumentCategories.map(d => d.name))
+const sealTypes = computed(() => effectiveConfig.seals.map(s => s.name))
 
 async function selectAttachments(event: Event) {
   const selected = Array.from((event.target as HTMLInputElement).files ?? [])

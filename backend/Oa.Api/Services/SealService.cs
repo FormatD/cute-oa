@@ -227,7 +227,8 @@ public sealed class SealService
         if (!policyResult.IsSuccess) return ServiceResult<SealRequest>.Failure(policyResult.Error!, policyResult.Code!);
         var (policy, configRecord) = policyResult.Value;
 
-        var sealItem = policy.Seals.FirstOrDefault(s => s.Name.Equals(record.SealType, StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(record.SealType, StringComparison.OrdinalIgnoreCase));
+        var normSealType = NormalizeSealType(record.SealType);
+        var sealItem = policy.Seals.FirstOrDefault(s => s.Name.Equals(normSealType, StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(normSealType, StringComparison.OrdinalIgnoreCase));
         if (sealItem is null)
             return ServiceResult<SealRequest>.Failure($"印章【{record.SealType}】不存在或已失效。", "SEAL_005");
         if (!sealItem.IsEnabled)
@@ -586,14 +587,15 @@ public sealed class SealService
         var policyResult = ResolveSealPolicy();
         if (!policyResult.IsSuccess) return ServiceResult<ValidatedSealInput>.Failure(policyResult.Error!, policyResult.Code!);
         var (policy, _) = policyResult.Value;
-
-        var sealItem = policy.Seals.FirstOrDefault(s => s.Name.Equals(request.SealType.Trim(), StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(request.SealType.Trim(), StringComparison.OrdinalIgnoreCase));
+        var normSealType = NormalizeSealType(request.SealType);
+        var sealItem = policy.Seals.FirstOrDefault(s => s.Name.Equals(normSealType, StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(normSealType, StringComparison.OrdinalIgnoreCase));
         if (sealItem is null)
             return ServiceResult<ValidatedSealInput>.Failure($"印章类型【{request.SealType}】不存在。", "SEAL_001");
         if (!sealItem.IsEnabled)
             return ServiceResult<ValidatedSealInput>.Failure($"印章【{sealItem.Name}】已被系统停用，无法申请。", "SEAL_005");
 
-        var docCategory = policy.DocumentCategories.FirstOrDefault(r => r.Name.Equals(request.DocumentCategory.Trim(), StringComparison.OrdinalIgnoreCase));
+        var normDocCategory = NormalizeDocumentCategory(request.DocumentCategory);
+        var docCategory = policy.DocumentCategories.FirstOrDefault(r => r.Name.Equals(normDocCategory, StringComparison.OrdinalIgnoreCase));
         if (docCategory is null)
             return ServiceResult<ValidatedSealInput>.Failure($"文件类别【{request.DocumentCategory}】不存在。", "SEAL_001");
         if (!docCategory.IsEnabled)
@@ -754,6 +756,30 @@ public sealed class SealService
             .Select(item => item.Number).ToList().Select(number => int.TryParse(number[prefix.Length..], out var sequence) ? sequence : 0)
             .DefaultIfEmpty(0).Max();
         return $"{prefix}{max + 1:D3}";
+    }
+
+    private static string NormalizeSealType(string? value)
+    {
+        var trimmed = value?.Trim() ?? string.Empty;
+        return trimmed switch
+        {
+            "合同章" => "合同专用章",
+            "财务章" => "财务专用章",
+            "人事章" => "人事专用章",
+            _ => trimmed
+        };
+    }
+
+    private static string NormalizeDocumentCategory(string? value)
+    {
+        var trimmed = value?.Trim() ?? string.Empty;
+        return trimmed switch
+        {
+            "证照资质" => "资质证明",
+            "财务票据" => "财务报表",
+            "人事证明" => "人事材料",
+            _ => trimmed
+        };
     }
 
     private sealed record ValidatedSealInput(SealRegistryItemConfig SealItem, SealDocumentCategoryConfig DocCategory, IReadOnlyList<string> Attachments, IReadOnlyList<string> CopyRecipientIds);

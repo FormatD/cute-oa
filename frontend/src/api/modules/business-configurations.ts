@@ -5,6 +5,7 @@ import type {
   BusinessConfigurationRecord,
   ConfigurationVersionSummary,
   CreateBusinessConfigurationRequest,
+  EffectiveBusinessConfigurationBundle,
   PagedResponse,
   PublishBusinessConfigurationRequest,
   RetireBusinessConfigurationRequest,
@@ -29,6 +30,13 @@ export const createBusinessConfigurationApi = ({ request }: HttpClient) => ({
     const query = new URLSearchParams({ domain, code })
     if (asOf) query.set('asOf', asOf)
     return request<BusinessConfigurationRecord>(`/business-configurations/effective?${query.toString()}`)
+  },
+
+  getEffectiveOptions: (asOf?: string): Promise<EffectiveBusinessConfigurationBundle> => {
+    const query = new URLSearchParams()
+    if (asOf) query.set('asOf', asOf)
+    const qs = query.toString()
+    return request<EffectiveBusinessConfigurationBundle>(`/business-configurations/effective-options${qs ? `?${qs}` : ''}`)
   },
 
   get: (id: string): Promise<BusinessConfigurationRecord> =>

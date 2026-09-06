@@ -56,6 +56,17 @@ public static class BusinessConfigurationEndpoints
                 : Results.NotFound(new { code = "DATA_001", message = "未找到生效中的配置。" });
         });
 
+        group.MapGet("/effective-options", (
+            DateTimeOffset? asOf,
+            HttpRequest request,
+            DemoAuthService auth,
+            BusinessConfigurationService service) =>
+        {
+            _ = auth.Resolve(request);
+            var bundle = service.GetEffectiveBundle(asOf);
+            return Results.Ok(bundle);
+        });
+
         group.MapGet("/{id:guid}", (
             Guid id,
             HttpRequest request,

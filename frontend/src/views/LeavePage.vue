@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import OaDialog from '../components/OaDialog.vue'
 import { useAppStore } from '../stores/app'
 import { useAuthStore } from '../stores/auth'
+import { useEffectiveConfigurationStore } from '../stores/effective-configurations'
 import { useEmployeeDirectoryStore } from '../stores/employee-directory'
 import { useFileStore } from '../stores/files'
 import { useLeaveStore } from '../stores/leave'
@@ -10,11 +12,28 @@ import { useUiStore } from '../stores/ui'
 
 const app = useAppStore()
 const auth = useAuthStore()
+const effectiveConfig = useEffectiveConfigurationStore()
 const employeeDirectory = useEmployeeDirectoryStore()
 const fileStore = useFileStore()
 const leave = useLeaveStore()
 const ui = useUiStore()
 const router = useRouter()
+
+onMounted(() => {
+  void effectiveConfig.load()
+})
+
+const leaveTypeMap = computed(() => {
+  const map = new Map<string, string>()
+  for (const t of effectiveConfig.leaveTypes) {
+    map.set(t.code, t.name)
+  }
+  return map
+})
+
+function leaveTypeLabel(type: string): string {
+  return leaveTypeMap.value.get(type) ?? type
+}
 
 function selectAttachments(event: Event) {
   const selectedFiles = Array.from((event.target as HTMLInputElement).files ?? [])
@@ -29,7 +48,7 @@ function resetFilters() { Object.assign(leave.leaveFilters, { keyword: '', statu
   <div class="page-heading"><div><p class="eyebrow">LEAVE MANAGEMENT</p><h1>请假管理</h1><p>发起、查看和跟进个人请假申请。</p></div><button class="primary-action" @click="leave.showForm = true">＋ 发起请假</button></div>
   <form class="filter-bar" @submit.prevent="search"><input v-model="leave.leaveFilters.keyword" placeholder="单号、事由或申请人"><select v-model="leave.leaveFilters.status"><option value="">全部状态</option><option value="0">草稿</option><option value="1">审批中</option><option value="2">已驳回</option><option value="3">已完成</option><option value="4">已撤回</option></select><select v-model="leave.leaveFilters.applicantId"><option value="">全部申请人</option><option v-for="employee in employeeDirectory.employees" :key="employee.id" :value="employee.id">{{ employee.name }}</option></select><label>开始<input v-model="leave.leaveFilters.startDate" type="date"></label><label>结束<input v-model="leave.leaveFilters.endDate" type="date"></label><button type="submit">查询</button><button class="secondary" type="button" @click="resetFilters">重置</button></form>
   <section class="panel"><div class="section-title"><div><p class="eyebrow">LEAVE</p><h2>请假申请</h2></div><button class="secondary" @click="leave.showForm = true">新建请假</button></div>
-    <template v-if="leave.leaves.length"><div class="table-wrap"><table class="data-table"><thead><tr><th>申请单号</th><th>假别</th><th>请假时间</th><th>时长</th><th>事由</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in leave.pagedLeaves.items" :key="item.id"><td>{{ item.number }}</td><td>{{ item.type }}</td><td>{{ item.startDate }} 至 {{ item.endDate }}</td><td>{{ item.days }} 天</td><td>{{ item.reason }}</td><td><em>{{ item.status }}</em></td><td><button class="secondary" @click="router.push(`/leave/${item.id}`)">详情</button></td></tr></tbody></table></div><div class="pagination"><span>共 {{ leave.pagedLeaves.total }} 条</span><div><button class="secondary" :disabled="leave.pagedLeaves.currentPage === 1" @click="changePage(-1)">上一页</button><b>{{ leave.pagedLeaves.currentPage }} / {{ leave.pagedLeaves.totalPages }}</b><button class="secondary" :disabled="leave.pagedLeaves.currentPage === leave.pagedLeaves.totalPages" @click="changePage(1)">下一页</button></div></div></template><p v-else class="empty">当前筛选条件下暂无请假记录。</p>
+    <template v-if="leave.leaves.length"><div class="table-wrap"><table class="data-table"><thead><tr><th>申请单号</th><th>假别</th><th>请假时间</th><th>时长</th><th>事由</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="item in leave.pagedLeaves.items" :key="item.id"><td>{{ item.number }}</td><td>{{ leaveTypeLabel(item.type) }}</td><td>{{ item.startDate }} 至 {{ item.endDate }}</td><td>{{ item.days }} 天</td><td>{{ item.reason }}</td><td><em>{{ item.status }}</em></td><td><button class="secondary" @click="router.push(`/leave/${item.id}`)">详情</button></td></tr></tbody></table></div><div class="pagination"><span>共 {{ leave.pagedLeaves.total }} 条</span><div><button class="secondary" :disabled="leave.pagedLeaves.currentPage === 1" @click="changePage(-1)">上一页</button><b>{{ leave.pagedLeaves.currentPage }} / {{ leave.pagedLeaves.totalPages }}</b><button class="secondary" :disabled="leave.pagedLeaves.currentPage === leave.pagedLeaves.totalPages" @click="changePage(1)">下一页</button></div></div></template><p v-else class="empty">当前筛选条件下暂无请假记录。</p>
   </section>
 
   <OaDialog
@@ -45,10 +64,7 @@ function resetFilters() { Object.assign(leave.leaveFilters, { keyword: '', statu
     <div class="dialog-grid">
       <label class="dialog-field">假别
         <select v-model="leave.form.type">
-          <option value="Annual">年假</option>
-          <option value="Personal">事假</option>
-          <option value="Sick">病假</option>
-          <option value="CompTime">调休</option>
+          <option v-for="lt in effectiveConfig.leaveTypes" :key="lt.code" :value="lt.code">{{ lt.name }}</option>
         </select>
       </label>
       <label class="dialog-field">开始日期<input v-model="leave.form.startDate" type="date"></label>

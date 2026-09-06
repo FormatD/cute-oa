@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import type { WorkItem, WorkItemTab } from '../api/types'
 import OaDialog from '../components/OaDialog.vue'
 import { useAuthStore } from '../stores/auth'
+import { useEffectiveConfigurationStore } from '../stores/effective-configurations'
 import { useEmployeeDirectoryStore } from '../stores/employee-directory'
 import { useOrganizationStore } from '../stores/organization'
 import { useUiStore } from '../stores/ui'
@@ -13,6 +14,7 @@ type DialogMode = 'decision' | 'transfer'
 
 const router = useRouter()
 const auth = useAuthStore()
+const effectiveConfig = useEffectiveConfigurationStore()
 const employees = useEmployeeDirectoryStore()
 const organization = useOrganizationStore()
 const ui = useUiStore()
@@ -78,7 +80,7 @@ function actionLabel(item: WorkItem) {
   return '查看详情'
 }
 function dateText(value?: string | null) { return value ? new Date(value).toLocaleString('zh-CN', { hour12: false }) : '—' }
-onMounted(() => { void organization.loadOrganization(); void workItems.load() })
+onMounted(() => { void organization.loadOrganization(); void workItems.load(); void effectiveConfig.load() })
 </script>
 
 <template>
@@ -119,12 +121,31 @@ onMounted(() => { void organization.loadOrganization(); void workItems.load() })
   <OaDialog :open="dialog.open" :title="dialogTitle" :description="dialog.item ? `${businessLabel(dialog.item.businessType)} · ${dialog.item.number}` : ''" :submit-label="dialog.mode === 'transfer' ? '确认转办' : dialog.action === 'reject' ? '确认驳回' : '确认同意'" :busy="processing" :danger="dialog.mode === 'decision' && dialog.action === 'reject'" @close="closeDialog" @submit="submitDialog">
     <div v-if="dialog.item" class="operation-summary"><strong>{{ dialog.item.title }}</strong><span>{{ dialog.item.currentNode }}</span></div>
     <label v-if="dialog.mode === 'transfer'" class="dialog-field">转办人<select v-model="dialog.assigneeId"><option value="">请选择在职用户</option><option v-for="employee in transferCandidates" :key="employee.id" :value="employee.id">{{ employee.name }} · {{ employee.role }} · {{ employee.departmentName }}</option></select></label>
-    <label class="dialog-field">{{ dialog.mode === 'transfer' ? '转办意见' : dialog.action === 'reject' ? '驳回意见' : '审批意见（可选）' }}<textarea v-model="dialog.comment" maxlength="500" :placeholder="dialog.action === 'reject' ? '说明驳回原因，便于申请人修改' : '可填写处理意见'" /></label><p v-if="dialogError" class="dialog-error">{{ dialogError }}</p>
+    <label class="dialog-field">{{ dialog.mode === 'transfer' ? '转办意见' : dialog.action === 'reject' ? '驳回意见' : '审批意见（可选）' }}
+      <div v-if="effectiveConfig.approvalCommentPresets.length" class="comment-presets">
+        <span class="preset-label">快捷意见：</span>
+        <button
+          v-for="preset in effectiveConfig.approvalCommentPresets"
+          :key="preset.code"
+          type="button"
+          class="preset-chip"
+          @click="dialog.comment = preset.name"
+        >
+          {{ preset.name }}
+        </button>
+      </div>
+      <textarea v-model="dialog.comment" maxlength="500" :placeholder="dialog.action === 'reject' ? '说明驳回原因，便于申请人修改' : '可填写处理意见'" />
+    </label>
+    <p v-if="dialogError" class="dialog-error">{{ dialogError }}</p>
   </OaDialog>
 </template>
 
 <style scoped>
 .work-item-overview { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }.work-item-overview article { padding: 15px 17px; border: 1px solid #e4e9f1; border-radius: 8px; background: #fff; }.work-item-overview small, .work-item-overview strong { display: block; }.work-item-overview small { color: #758298; font-size: .75rem; }.work-item-overview strong { margin-top: 8px; color: #26354d; font-size: 1.45rem; }
 .work-item-tabs { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid #dde4ee; }.work-item-tabs button { border: 0; border-bottom: 2px solid transparent; padding: 11px 15px; background: transparent; color: #66758b; white-space: nowrap; }.work-item-tabs button.active { border-bottom-color: #3478e8; color: #286acb; font-weight: 700; }.work-item-tabs b { margin-left: 5px; border-radius: 99px; padding: 2px 6px; background: #eaf2ff; font-size: .68rem; }.filter-bar { margin-top: 14px; }.work-item-panel { margin-top: 0; }.work-item-table { min-width: 1040px; }.work-item-table td:first-child { min-width: 230px; }.work-item-table strong, .work-item-table small { display: block; }.work-item-table small { margin-top: 4px; color: #8b97a9; font-size: .69rem; }.work-item-table tr.unread td:first-child { box-shadow: inset 3px 0 #3478e8; }.type-chip { display: inline-block; margin-right: 6px; color: #4d5c72; }
+.comment-presets { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 6px; }
+.preset-label { font-size: 0.75rem; color: #64748b; }
+.preset-chip { padding: 2px 8px; font-size: 0.75rem; border-radius: 4px; border: 1px solid #cbd5e1; background: #f8fafc; color: #334155; cursor: pointer; transition: all 0.15s; }
+.preset-chip:hover { border-color: #94a3b8; background: #f1f5f9; color: #1e293b; }
 @media (max-width: 900px) { .work-item-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>

@@ -516,3 +516,67 @@ export type BusinessRuleSnapshot = {
   resolvedAt: string
   parameters: Record<string, unknown>
 }
+
+export type EffectiveLeaveTypeOption = {
+  code: string
+  name: string
+  minUnit: number
+  requiresAttachment: boolean
+  attachmentThresholdDays?: number | null
+}
+
+export type EffectiveExpenseCategoryOption = {
+  code: string
+  name: string
+  singleLimit?: number | null
+  requiresReceipt: boolean
+  requiresReasonWhenExceeded: boolean
+  blockWhenExceeded: boolean
+}
+
+export type EffectiveProcurementCategoryOption = {
+  code: string
+  name: string
+}
+
+export type EffectiveProcurementAmountTierOption = {
+  name: string
+  maxAmount?: number | null
+}
+
+export type EffectiveSealOption = {
+  code: string
+  name: string
+  sealType: string
+  allowOut: boolean
+  maxOutDays: number
+}
+
+export type EffectiveSealDocCategoryOption = {
+  code: string
+  name: string
+  riskLevel: string
+}
+
+export type EffectiveDictionaryOption = {
+  code: string
+  name: string
+  sortOrder: number
+}
+
+export type EffectiveBusinessConfigurationBundle = {
+  leaveTypes: EffectiveLeaveTypeOption[]
+  expenseCategories: EffectiveExpenseCategoryOption[]
+  travelCityTiers: TravelCityTierConfig[]
+  travelEmployeeRanks: string[]
+  travelStandards: TravelStandardItemConfig[]
+  procurementCategories: EffectiveProcurementCategoryOption[]
+  procurementAmountTiers: EffectiveProcurementAmountTierOption[]
+  procurementQuoteThreshold: number
+  seals: EffectiveSealOption[]
+  sealDocumentCategories: EffectiveSealDocCategoryOption[]
+  contractTypes: EffectiveDictionaryOption[]
+  attachmentTypes: EffectiveDictionaryOption[]
+  approvalCommentPresets: EffectiveDictionaryOption[]
+  announcementTypes: EffectiveDictionaryOption[]
+}
