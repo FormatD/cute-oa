@@ -42,6 +42,7 @@ public sealed class LeaveRequest
     public int? ProcessDefinitionVersion { get; set; }
     public Guid? CurrentFlowInstanceId { get; set; }
     public int? BalanceYear { get; set; }
+    public List<CompTimeGrantAllocation> CompTimeAllocations { get; set; } = [];
     public Guid? ConfigVersionId { get; set; }
     public int? ConfigVersionNumber { get; set; }
     public string? ConfigSnapshotJson { get; set; }
@@ -51,6 +52,18 @@ public sealed class LeaveRequest
     public List<FlowTask> Tasks { get; } = [];
     public List<FlowInstance> FlowInstances { get; } = [];
 }
+
+public sealed record CompTimeGrantAllocation(Guid GrantId, decimal Days);
+
+public sealed record CompTimeGrantItem(
+    Guid Id,
+    DateOnly GrantedDate,
+    DateOnly ExpiredAt,
+    decimal Days,
+    decimal UsedDays,
+    decimal FrozenDays,
+    decimal AvailableDays,
+    string Reason);
 
 public sealed class FlowTask
 {
@@ -68,7 +81,15 @@ public sealed class FlowTask
     public DateTimeOffset? ProcessedAt { get; set; }
 }
 
-public sealed record LeaveBalance(decimal Entitled, decimal Frozen, decimal Used, int Year = 0, decimal StatutoryEntitled = 0, decimal Adjustment = 0, int Version = 0)
+public sealed record LeaveBalance(
+    decimal Entitled,
+    decimal Frozen,
+    decimal Used,
+    int Year = 0,
+    decimal StatutoryEntitled = 0,
+    decimal Adjustment = 0,
+    int Version = 0,
+    IReadOnlyList<CompTimeGrantItem>? Grants = null)
 {
     public decimal Available => Entitled - Frozen - Used;
 }

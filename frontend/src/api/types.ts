@@ -1,4 +1,4 @@
-export type Employee = { id: string; name: string; role: string; departmentId?: string; departmentName: string; roles?: string[]; permissions?: string[]; positionId?: string | null; positionName?: string | null }
+export type Employee = { id: string; name: string; role: string; departmentId?: string; departmentName: string; roles?: string[]; permissions?: string[]; positionId?: string | null; positionName?: string | null; managerId?: string | null }
 export type LoginSession = { accessToken: string; expiresAt: string; user: Employee }
 export type LoginChallengeState = 'PASSWORD_CHANGE_REQUIRED' | 'MFA_REQUIRED' | 'MFA_SETUP_REQUIRED'
 export type LoginResult = { status: 'AUTHENTICATED'; session: LoginSession } | { status: LoginChallengeState; challengeToken: string; challengeExpiresAt: string }
@@ -42,8 +42,49 @@ export type PaymentRecord = { paymentDate: string; paymentMethod: string; transa
 export type PaymentInput = { paymentDate: string; paymentMethod: string; transactionNumber: string; proofFile: string }
 export type ExpenseClaim = { id: string; number: string; totalAmount: number; description?: string; status: string; applicantName?: string; createdAt?: string; payeeAccountName?: string; bankName?: string; travelRequestId?: string | null; travelRequestNumber?: string | null; items?: ExpenseItem[]; payment?: PaymentRecord | null; copyRecipientIds?: string[]; tasks?: FlowTask[]; processDefinitionCode?: string | null; processDefinitionVersion?: number | null; currentFlowInstanceId?: string | null; flowInstances?: FlowInstance[]; budgetPoolId?: string | null; paymentStatus?: string; paidTotalAmount?: number; invoiceCount?: number; invoices?: ExpenseInvoice[]; paymentTransactions?: PaymentTransactionListItem[] }
 export type TravelItineraryItem = { destination: string; startDate: string; endDate: string; transportation: string; purpose: string }
-export type TravelRequest = { id: string; number: string; applicantId: string; applicantName: string; departmentName: string; purpose: string; startDate: string; endDate: string; days: number; estimatedBudget: number; itinerary: TravelItineraryItem[]; companionIds: string[]; companionNames: string[]; attachments: string[]; copyRecipientIds: string[]; version: number; status: string; createdAt: string; tasks: FlowTask[]; processDefinitionCode?: string | null; processDefinitionVersion?: number | null; currentFlowInstanceId?: string | null; flowInstances?: FlowInstance[] }
-export type TravelForm = { purpose: string; estimatedBudget: string; itinerary: TravelItineraryItem[]; companionIds: string[]; attachments: string[]; copyRecipientIds: string[] }
+export type TravelRequest = {
+  id: string;
+  number: string;
+  applicantId: string;
+  applicantName: string;
+  departmentName: string;
+  purpose: string;
+  startDate: string;
+  endDate: string;
+  days: number;
+  estimatedBudget: number;
+  itinerary: TravelItineraryItem[];
+  companionIds: string[];
+  companionNames: string[];
+  attachments: string[];
+  copyRecipientIds: string[];
+  employeeRank?: string | null;
+  primaryCityTier?: string | null;
+  cityTier?: string | null;
+  standardHotelDailyLimit?: number | null;
+  hotelBudgetPerDay?: number | null;
+  standardMealDailyAllowance?: number | null;
+  mealAllowancePerDay?: number | null;
+  standardTransportation?: string | null;
+  transportationStandard?: string | null;
+  allowedBudgetCap?: number | null;
+  isOverStandard?: boolean;
+  overStandardReason?: string | null;
+  configVersionId?: string | null;
+  configVersionNumber?: number | null;
+  configurationSnapshotVersion?: number | null;
+  configSnapshotJson?: string | null;
+  configResolvedAt?: string | null;
+  version: number;
+  status: string;
+  createdAt: string;
+  tasks: FlowTask[];
+  processDefinitionCode?: string | null;
+  processDefinitionVersion?: number | null;
+  currentFlowInstanceId?: string | null;
+  flowInstances?: FlowInstance[];
+}
+export type TravelForm = { purpose: string; estimatedBudget: string; itinerary: TravelItineraryItem[]; companionIds: string[]; attachments: string[]; copyRecipientIds: string[]; overStandardReason?: string }
 export type PurchaseStatus = 'Draft' | 'Approving' | 'Rejected' | 'Approved' | 'Withdrawn' | 'Ordered' | 'Received'
 export type PurchaseItem = { category: string; name: string; specification?: string | null; quantity: number; unit: string; estimatedUnitPrice: number; estimatedAmount: number; remark?: string | null }
 export type PurchaseFormItem = { category: string; name: string; specification: string; quantity: string; unit: string; estimatedUnitPrice: string; remark: string }
@@ -118,7 +159,17 @@ export type PersonnelEvent = { id: string; eventType: string; effectiveDate: str
 export type PersonnelProfile = { userId: string; employeeNumber: string; name: string; departmentId: string; departmentName: string; positionId?: string | null; positionName?: string | null; managerId?: string | null; managerName?: string | null; workEmail: string; workPhone: string; workLocation: string; employmentType: EmploymentType; personnelStatus: PersonnelStatus; accountStatus: 'ACTIVE' | 'DISABLED'; hireDate: string; probationEndDate?: string | null; regularizedDate?: string | null; cumulativeWorkStartDate?: string | null; cumulativeWorkYears: number; departureDate?: string | null; departureReason?: string | null; version: number; createdAt: string; updatedAt: string; events: PersonnelEvent[] }
 export type UpdatePersonnelProfile = { departmentId: string; positionId: string | null; managerId: string | null; workEmail: string; workPhone: string; workLocation: string; employmentType: EmploymentType; personnelStatus: PersonnelStatus; hireDate: string; probationEndDate: string | null; regularizedDate: string | null; cumulativeWorkStartDate: string | null; departureDate: string | null; departureReason: string | null; version: number; effectiveDate: string; changeReason: string }
 export type LeaveBalanceType = 'Annual' | 'CompTime'
-export type LeaveBalance = { entitled: number; frozen: number; used: number; available: number; year: number; statutoryEntitled: number; adjustment: number; version: number }
+export type CompTimeGrantItem = {
+  id: string
+  grantedDate: string
+  expiredAt: string
+  days: number
+  usedDays: number
+  frozenDays: number
+  availableDays: number
+  reason: string
+}
+export type LeaveBalance = { entitled: number; frozen: number; used: number; available: number; year: number; statutoryEntitled: number; adjustment: number; version: number; grants?: CompTimeGrantItem[] }
 export type AdjustLeaveBalance = { type: LeaveBalanceType; year: number; adjustment: number; reason: string; version: number }
 export type PersonnelCaseType = 'ONBOARDING' | 'REGULARIZATION' | 'TRANSFER' | 'OFFBOARDING'
 export type PersonnelCaseStatus = 'OPEN' | 'COMPLETED' | 'CANCELLED'

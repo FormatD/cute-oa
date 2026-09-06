@@ -110,14 +110,43 @@ public sealed class TravelService
         if (db is not null && configRecord is null)
             return ServiceResult<TravelRequest>.Failure("未找到生效中的差旅管理策略配置【TravelPolicy】。", "CONFIG_MISSING");
 
+        TravelPolicyConfig? policy = null;
+        if (configRecord is not null)
+        {
+            try { policy = JsonSerializer.Deserialize<TravelPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions); }
+            catch { return ServiceResult<TravelRequest>.Failure("差旅管理策略配置内容损坏，无法解析。", "CONFIG_INVALID"); }
+            if (policy is null) return ServiceResult<TravelRequest>.Failure("差旅管理策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+        }
+        else
+        {
+            policy = BusinessConfigurationDefaults.CreateDefaultTravelPolicy();
+        }
+
+        var rank = ResolveRank(actor);
+        var cityTier = ResolveCityTier(itinerary, policy);
+        var std = MatchStandard(policy, cityTier, rank);
+        decimal hotelLimit = std?.HotelDailyLimit ?? 0;
+        decimal mealAllowance = std?.MealDailyAllowance ?? 0;
+        string transport = std?.TransportationStandard ?? "高铁二等座/飞机经济舱";
+        var days = itinerary.Max(line => line.EndDate).DayNumber - itinerary.Min(line => line.StartDate).DayNumber + 1;
+        var travelerCount = 1 + companions.Count;
+        var maxDailyBudget = (hotelLimit + mealAllowance) * days * travelerCount;
+        var isOver = (maxDailyBudget > 0 && request.EstimatedBudget > maxDailyBudget);
+
         var item = new TravelRequest
         {
             Number = $"CC-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}",
             ApplicantId = actor.Id, ApplicantName = actor.Name, DepartmentName = actor.DepartmentName,
             Purpose = request.Purpose.Trim(), StartDate = itinerary.Min(line => line.StartDate), EndDate = itinerary.Max(line => line.EndDate),
-            Days = itinerary.Max(line => line.EndDate).DayNumber - itinerary.Min(line => line.StartDate).DayNumber + 1,
+            Days = days,
             EstimatedBudget = request.EstimatedBudget, Itinerary = itinerary, CompanionIds = companions.Select(value => value.Id).ToList(), CompanionNames = companions.Select(value => value.Name).ToList(),
             Attachments = request.Attachments?.Distinct().ToList() ?? [], CopyRecipientIds = validated.Value!,
+            EmployeeRank = rank,
+            PrimaryCityTier = cityTier,
+            StandardHotelDailyLimit = hotelLimit,
+            StandardMealDailyAllowance = mealAllowance,
+            StandardTransportation = transport,
+            IsOverStandard = isOver,
             OverStandardReason = request.OverStandardReason?.Trim(),
             ConfigVersionId = configRecord?.Id, ConfigVersionNumber = configRecord?.Version, ConfigSnapshotJson = configRecord?.ContentJson, ConfigResolvedAt = configRecord is not null ? DateTimeOffset.UtcNow : null
         };
@@ -135,18 +164,46 @@ public sealed class TravelService
         if (!validated.IsSuccess) return ServiceResult<TravelRequest>.Failure(validated.Error!, validated.Code!);
         var itinerary = request.Itinerary.OrderBy(item => item.StartDate).ToList();
         var companions = request.CompanionIds?.Distinct().Select(data.FindEmployee).Where(item => item is not null).Cast<Employee>().ToList() ?? [];
+
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Travel, "TravelPolicy");
+        if (db is not null && configRecord is null)
+            return ServiceResult<TravelRequest>.Failure("未找到生效中的差旅管理策略配置【TravelPolicy】。", "CONFIG_MISSING");
+
+        TravelPolicyConfig? policy = null;
+        if (configRecord is not null)
+        {
+            try { policy = JsonSerializer.Deserialize<TravelPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions); }
+            catch { return ServiceResult<TravelRequest>.Failure("差旅管理策略配置内容损坏，无法解析。", "CONFIG_INVALID"); }
+            if (policy is null) return ServiceResult<TravelRequest>.Failure("差旅管理策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+        }
+        else
+        {
+            policy = BusinessConfigurationDefaults.CreateDefaultTravelPolicy();
+        }
+
+        var rank = ResolveRank(actor);
+        var cityTier = ResolveCityTier(itinerary, policy);
+        var std = MatchStandard(policy, cityTier, rank);
+        decimal hotelLimit = std?.HotelDailyLimit ?? 0;
+        decimal mealAllowance = std?.MealDailyAllowance ?? 0;
+        string transport = std?.TransportationStandard ?? "高铁二等座/飞机经济舱";
+        var days = itinerary.Max(line => line.EndDate).DayNumber - itinerary.Min(line => line.StartDate).DayNumber + 1;
+        var travelerCount = 1 + companions.Count;
+        var maxDailyBudget = (hotelLimit + mealAllowance) * days * travelerCount;
+        var isOver = (maxDailyBudget > 0 && request.EstimatedBudget > maxDailyBudget);
+
         var updated = new TravelRequest
         {
             Id = original.Id, Number = original.Number, ApplicantId = original.ApplicantId, ApplicantName = original.ApplicantName, DepartmentName = original.DepartmentName,
-            Purpose = request.Purpose.Trim(), StartDate = itinerary.Min(line => line.StartDate), EndDate = itinerary.Max(line => line.EndDate), Days = itinerary.Max(line => line.EndDate).DayNumber - itinerary.Min(line => line.StartDate).DayNumber + 1,
+            Purpose = request.Purpose.Trim(), StartDate = itinerary.Min(line => line.StartDate), EndDate = itinerary.Max(line => line.EndDate), Days = days,
             EstimatedBudget = request.EstimatedBudget, Itinerary = itinerary, CompanionIds = companions.Select(value => value.Id).ToList(), CompanionNames = companions.Select(value => value.Name).ToList(), Attachments = request.Attachments?.Distinct().ToList() ?? [], CopyRecipientIds = validated.Value!,
             OverStandardReason = request.OverStandardReason?.Trim() ?? original.OverStandardReason,
-            EmployeeRank = original.EmployeeRank,
-            PrimaryCityTier = original.PrimaryCityTier,
-            StandardHotelDailyLimit = original.StandardHotelDailyLimit,
-            StandardMealDailyAllowance = original.StandardMealDailyAllowance,
-            StandardTransportation = original.StandardTransportation,
-            IsOverStandard = original.IsOverStandard,
+            EmployeeRank = rank,
+            PrimaryCityTier = cityTier,
+            StandardHotelDailyLimit = hotelLimit,
+            StandardMealDailyAllowance = mealAllowance,
+            StandardTransportation = transport,
+            IsOverStandard = isOver,
             Version = original.Version + 1, Status = original.Status, ProcessDefinitionId = original.ProcessDefinitionId, ProcessDefinitionCode = original.ProcessDefinitionCode, ProcessDefinitionVersion = original.ProcessDefinitionVersion, CurrentFlowInstanceId = original.CurrentFlowInstanceId, CreatedAt = original.CreatedAt
         };
         updated.Tasks.AddRange(original.Tasks); updated.FlowInstances.AddRange(original.FlowInstances);

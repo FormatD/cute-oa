@@ -6,7 +6,7 @@ import { PAGE_SIZE } from './pagination'
 import { useUiStore } from './ui'
 
 const blankFilters = (): ListFilters => ({ keyword: '', status: '', applicantId: '', startDate: '', endDate: '' })
-export const blankTravelForm = (): TravelForm => ({ purpose: '', estimatedBudget: '', itinerary: [{ destination: '', startDate: '', endDate: '', transportation: '高铁', purpose: '' }], companionIds: [], attachments: [], copyRecipientIds: [] })
+export const blankTravelForm = (): TravelForm => ({ purpose: '', estimatedBudget: '', itinerary: [{ destination: '', startDate: '', endDate: '', transportation: '高铁', purpose: '' }], companionIds: [], attachments: [], copyRecipientIds: [], overStandardReason: '' })
 
 export const useTravelStore = defineStore('travel', () => {
   const ui = useUiStore()

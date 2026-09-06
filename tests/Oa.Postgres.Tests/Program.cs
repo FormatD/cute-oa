@@ -2892,6 +2892,208 @@ await using (var configDb = new OaDbContext(options))
     if (invalidContract.IsSuccess || invalidContract.Code != "CONTRACT_001")
         throw new InvalidOperationException("不存在或未启用的合同类型未被拦截。");
 
+    // 9.5 WP-B2: 差旅标准限额测算、超标阻断与超标填因成功闭环
+    var travelService = new TravelService(configData, configDb);
+    var itineraryShanghaiOk = new List<TravelItineraryItem>
+    {
+        new("上海", new DateOnly(2026, 10, 12), new DateOnly(2026, 10, 13), "高铁二等座", "客户方案对接")
+    };
+    var itineraryShanghaiOverNoReason = new List<TravelItineraryItem>
+    {
+        new("上海", new DateOnly(2026, 10, 15), new DateOnly(2026, 10, 16), "高铁二等座", "客户方案对接")
+    };
+    var itineraryShanghaiOverWithReason = new List<TravelItineraryItem>
+    {
+        new("上海", new DateOnly(2026, 10, 22), new DateOnly(2026, 10, 23), "高铁二等座", "客户方案对接")
+    };
+
+    var okTravelDraft = travelService.CreateDraft(zhang, new SaveTravelRequest(
+        "合规出差申请", 1000m, itineraryShanghaiOk, [], [], []));
+    if (!okTravelDraft.IsSuccess)
+        throw new InvalidOperationException($"合规出差草稿创建失败：{okTravelDraft.Error}");
+    var okTravelSubmit = travelService.Submit(zhang, okTravelDraft.Value!.Id);
+    if (!okTravelSubmit.IsSuccess)
+        throw new InvalidOperationException($"合规出差提交失败：{okTravelSubmit.Error}");
+
+    var persistedOkTravel = configDb.TravelRequests.AsNoTracking().Single(r => r.Id == okTravelDraft.Value.Id);
+    if (persistedOkTravel.IsOverStandard ||
+        persistedOkTravel.PrimaryCityTier != "一线城市" ||
+        persistedOkTravel.StandardHotelDailyLimit != 450m ||
+        persistedOkTravel.StandardMealDailyAllowance != 100m ||
+        persistedOkTravel.ConfigVersionNumber == null ||
+        string.IsNullOrWhiteSpace(persistedOkTravel.ConfigSnapshotJson))
+    {
+        throw new InvalidOperationException($"合规出差单标准与快照信息持久化不符合预期: IsOver={persistedOkTravel.IsOverStandard}, Tier={persistedOkTravel.PrimaryCityTier}, Hotel={persistedOkTravel.StandardHotelDailyLimit}, Meal={persistedOkTravel.StandardMealDailyAllowance}, ConfigVer={persistedOkTravel.ConfigVersionNumber}");
+    }
+
+    var overTravelDraftNoReason = travelService.CreateDraft(zhang, new SaveTravelRequest(
+        "超标未填原因申请", 1500m, itineraryShanghaiOverNoReason, [], [], []));
+    if (!overTravelDraftNoReason.IsSuccess)
+        throw new InvalidOperationException($"超标草稿创建失败：{overTravelDraftNoReason.Error}");
+    var overSubmitFail = travelService.Submit(zhang, overTravelDraftNoReason.Value!.Id);
+    if (overSubmitFail.IsSuccess || overSubmitFail.Code != "TRAVEL_OVER_STANDARD")
+        throw new InvalidOperationException($"出差预估预算超标且未填写原因时，未被 TRAVEL_OVER_STANDARD 拦截: Success={overSubmitFail.IsSuccess}, Code={overSubmitFail.Code}, Error={overSubmitFail.Error}");
+
+    var overTravelDraftWithReason = travelService.CreateDraft(zhang, new SaveTravelRequest(
+        "超标填原因申请", 1500m, itineraryShanghaiOverWithReason, [], [], [], "重要客户紧急技术驻场，展会周边酒店溢价"));
+    if (!overTravelDraftWithReason.IsSuccess)
+        throw new InvalidOperationException($"超标且有原因草稿创建失败：{overTravelDraftWithReason.Error}");
+    var overSubmitSuccess = travelService.Submit(zhang, overTravelDraftWithReason.Value!.Id);
+    if (!overSubmitSuccess.IsSuccess)
+        throw new InvalidOperationException($"超标且填报原因后提交失败：{overSubmitSuccess.Error}");
+
+    var persistedOverTravel = configDb.TravelRequests.AsNoTracking().Single(r => r.Id == overTravelDraftWithReason.Value.Id);
+    if (!persistedOverTravel.IsOverStandard ||
+        persistedOverTravel.OverStandardReason != "重要客户紧急技术驻场，展会周边酒店溢价" ||
+        persistedOverTravel.ConfigVersionNumber == null ||
+        string.IsNullOrWhiteSpace(persistedOverTravel.ConfigSnapshotJson))
+    {
+        throw new InvalidOperationException("超标出差单原因留痕及快照持久化不符合预期。");
+    }
+
+    // 9.6 WP-B3: 调休多批次 Grant 账本、FIFO 冻结/结转/释放、过期隔离与负向调整闭环
+    var today = DateOnly.FromDateTime(DateTime.Today);
+    var grantUser = zhang;
+    var oldGrants = configDb.CompTimeGrants.Where(g => g.TenantId == "demo" && g.UserId == grantUser.Id).ToList();
+    if (oldGrants.Count > 0) { configDb.CompTimeGrants.RemoveRange(oldGrants); }
+    var oldBalances = configDb.LeaveBalances.Where(b => b.TenantId == "demo" && b.UserId == grantUser.Id && b.LeaveType == (int)LeaveType.CompTime).ToList();
+    if (oldBalances.Count > 0) { configDb.LeaveBalances.RemoveRange(oldBalances); }
+    configDb.SaveChanges();
+
+    var grantA = new CompTimeGrantRecord
+    {
+        TenantId = "demo",
+        UserId = grantUser.Id,
+        GrantedDate = today.AddDays(-10),
+        ExpiredAt = today.AddDays(30),
+        Days = 2.0m,
+        UsedDays = 0m,
+        FrozenDays = 0m,
+        Reason = "9月首周加班授予",
+        Version = 1
+    };
+    var grantB = new CompTimeGrantRecord
+    {
+        TenantId = "demo",
+        UserId = grantUser.Id,
+        GrantedDate = today.AddDays(-5),
+        ExpiredAt = today.AddDays(60),
+        Days = 3.0m,
+        UsedDays = 0m,
+        FrozenDays = 0m,
+        Reason = "9月中旬值班授予",
+        Version = 1
+    };
+    var grantC = new CompTimeGrantRecord
+    {
+        TenantId = "demo",
+        UserId = grantUser.Id,
+        GrantedDate = today.AddDays(-30),
+        ExpiredAt = today.AddDays(-2),
+        Days = 1.0m,
+        UsedDays = 0m,
+        FrozenDays = 0m,
+        Reason = "8月历史加班已过期批次",
+        Version = 1
+    };
+    configDb.CompTimeGrants.AddRange(grantA, grantB, grantC);
+    configDb.SaveChanges();
+
+    var compTimeLeaveService = new LeaveService(configData, configDb);
+
+    var initBalance = compTimeLeaveService.GetBalance(grantUser, grantUser.Id, LeaveType.CompTime, today.Year);
+    if (!initBalance.IsSuccess)
+        throw new InvalidOperationException($"加载调休余额失败：{initBalance.Error}");
+    if (initBalance.Value!.Entitled != 5.0m || initBalance.Value.Available != 5.0m || initBalance.Value.Frozen != 0m || initBalance.Value.Used != 0m)
+        throw new InvalidOperationException($"调休初始余额计算错误：预期可用 5.0，实际可用 {initBalance.Value.Available}，总额 {initBalance.Value.Entitled}");
+    if (initBalance.Value.Grants == null || initBalance.Value.Grants.Count != 3)
+        throw new InvalidOperationException("调休明细 Grants 列表下发批次数不正确。");
+
+    var compTimeDraft = compTimeLeaveService.CreateDraft(grantUser, new CreateLeaveRequest(
+        LeaveType.CompTime,
+        new DateOnly(2026, 10, 26),
+        LeavePeriod.FullDay,
+        new DateOnly(2026, 10, 28),
+        LeavePeriod.Morning,
+        "调休FIFO冻结测试",
+        []));
+    if (!compTimeDraft.IsSuccess || compTimeDraft.Value!.Days != 2.5m)
+        throw new InvalidOperationException($"调休申请单天数计算错误：预期 2.5 天，实际 {compTimeDraft.Value?.Days}，错误：{compTimeDraft.Error}");
+
+    var compTimeSubmit = compTimeLeaveService.Submit(grantUser, compTimeDraft.Value.Id);
+    if (!compTimeSubmit.IsSuccess)
+        throw new InvalidOperationException($"提交调休申请失败：{compTimeSubmit.Error}");
+
+    var dbGrantA = configDb.CompTimeGrants.AsNoTracking().Single(g => g.Id == grantA.Id);
+    var dbGrantB = configDb.CompTimeGrants.AsNoTracking().Single(g => g.Id == grantB.Id);
+    var dbGrantC = configDb.CompTimeGrants.AsNoTracking().Single(g => g.Id == grantC.Id);
+    if (dbGrantA.FrozenDays != 2.0m || dbGrantB.FrozenDays != 0.5m || dbGrantC.FrozenDays != 0m)
+        throw new InvalidOperationException($"调休 FIFO 冻结数量不符合预期：GrantA Frozen={dbGrantA.FrozenDays}, GrantB Frozen={dbGrantB.FrozenDays}");
+
+    var frozenBalance = compTimeLeaveService.GetBalance(grantUser, grantUser.Id, LeaveType.CompTime, today.Year).Value!;
+    if (frozenBalance.Frozen != 2.5m || frozenBalance.Available != 2.5m)
+        throw new InvalidOperationException($"调休冻结后余额不符：Frozen={frozenBalance.Frozen}, Available={frozenBalance.Available}");
+
+    var withdrawRes = compTimeLeaveService.Withdraw(grantUser, compTimeDraft.Value.Id);
+    if (!withdrawRes.IsSuccess)
+        throw new InvalidOperationException($"撤回调休申请失败：{withdrawRes.Error}");
+
+    dbGrantA = configDb.CompTimeGrants.AsNoTracking().Single(g => g.Id == grantA.Id);
+    dbGrantB = configDb.CompTimeGrants.AsNoTracking().Single(g => g.Id == grantB.Id);
+    if (dbGrantA.FrozenDays != 0m || dbGrantB.FrozenDays != 0m)
+        throw new InvalidOperationException($"调休撤回后冻结未完全释放：GrantA Frozen={dbGrantA.FrozenDays}, GrantB Frozen={dbGrantB.FrozenDays}");
+
+    var restoredBalance = compTimeLeaveService.GetBalance(grantUser, grantUser.Id, LeaveType.CompTime, today.Year).Value!;
+    if (restoredBalance.Frozen != 0m || restoredBalance.Available != 5.0m)
+        throw new InvalidOperationException($"调休撤回后可用额度未恢复：Available={restoredBalance.Available}");
+
+    var reSubmitDraft = compTimeLeaveService.CreateDraft(grantUser, new CreateLeaveRequest(
+        LeaveType.CompTime,
+        new DateOnly(2026, 10, 26),
+        LeavePeriod.FullDay,
+        new DateOnly(2026, 10, 28),
+        LeavePeriod.Morning,
+        "调休结转测试",
+        []));
+    var reSubmitRes = compTimeLeaveService.Submit(grantUser, reSubmitDraft.Value!.Id);
+    if (!reSubmitRes.IsSuccess)
+        throw new InvalidOperationException($"重新提交调休失败：{reSubmitRes.Error}");
+
+    var pendingTasks = reSubmitRes.Value!.Tasks;
+    foreach (var task in pendingTasks.OrderBy(t => t.Sequence))
+    {
+        var approver = configData.GetEmployee(task.AssigneeId);
+        var appRes = compTimeLeaveService.Approve(approver, task.Id, "同意调休");
+        if (!appRes.IsSuccess)
+            throw new InvalidOperationException($"审批调休任务失败：{appRes.Error}");
+    }
+
+    dbGrantA = configDb.CompTimeGrants.AsNoTracking().Single(g => g.Id == grantA.Id);
+    dbGrantB = configDb.CompTimeGrants.AsNoTracking().Single(g => g.Id == grantB.Id);
+    if (dbGrantA.FrozenDays != 0m || dbGrantA.UsedDays != 2.0m || dbGrantB.FrozenDays != 0m || dbGrantB.UsedDays != 0.5m)
+        throw new InvalidOperationException($"调休审批通过后已用结转不符合预期：GrantA Used={dbGrantA.UsedDays}, GrantB Used={dbGrantB.UsedDays}");
+
+    var completedBalance = compTimeLeaveService.GetBalance(grantUser, grantUser.Id, LeaveType.CompTime, today.Year).Value!;
+    if (completedBalance.Used != 2.5m || completedBalance.Available != 2.5m)
+        throw new InvalidOperationException($"调休审批通过后余额不符：Used={completedBalance.Used}, Available={completedBalance.Available}");
+
+    var adjustRes = compTimeLeaveService.AdjustBalance(admin, grantUser.Id, new AdjustLeaveBalanceRequest(
+        LeaveType.CompTime,
+        today.Year,
+        4.0m,
+        "加班核减1天",
+        completedBalance.Version));
+    if (!adjustRes.IsSuccess)
+        throw new InvalidOperationException($"调休负向调整失败：{adjustRes.Error}");
+
+    dbGrantB = configDb.CompTimeGrants.AsNoTracking().Single(g => g.Id == grantB.Id);
+    if (dbGrantB.Days != 2.0m)
+        throw new InvalidOperationException($"调休负向调整未正确定向核减有效 Grant：GrantB Days={dbGrantB.Days} (预期 2.0)");
+
+    var adjustedBalance = compTimeLeaveService.GetBalance(grantUser, grantUser.Id, LeaveType.CompTime, today.Year).Value!;
+    if (adjustedBalance.Entitled != 4.0m || adjustedBalance.Available != 1.5m || adjustedBalance.Used != 2.5m)
+        throw new InvalidOperationException($"调休调整后余额不符合预期：Entitled={adjustedBalance.Entitled}, Available={adjustedBalance.Available}, Used={adjustedBalance.Used}");
+
     // 10. WP-C: 安全与权限 (BUSINESS_CONFIG_MANAGE 必须强制 MFA)
     var mfaConfig = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Auth:Mfa:Enabled"] = "true" }).Build();
     var mfaSettings = MultiFactorSettings.From(mfaConfig);

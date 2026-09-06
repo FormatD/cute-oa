@@ -39,17 +39,17 @@ const createDefaultBundle = (): EffectiveBusinessConfigurationBundle => ({
     { tierName: '二线城市', cities: ['杭州', '南京', '成都', '武汉', '西安', '苏州', '天津', '重庆'] },
     { tierName: '其他城市', cities: [] }
   ],
-  travelEmployeeRanks: ['普通员工', '部门总监', '公司高管'],
+  travelEmployeeRanks: ['员工', '部门负责人', '总经理'],
   travelStandards: [
-    { rank: '普通员工', cityTier: '一线城市', hotelDailyLimit: 500, mealDailyAllowance: 150, transportationStandard: '高铁二等座/飞机经济舱' },
-    { rank: '普通员工', cityTier: '二线城市', hotelDailyLimit: 350, mealDailyAllowance: 120, transportationStandard: '高铁二等座/飞机经济舱' },
-    { rank: '普通员工', cityTier: '其他城市', hotelDailyLimit: 260, mealDailyAllowance: 100, transportationStandard: '高铁二等座/飞机经济舱' },
-    { rank: '部门总监', cityTier: '一线城市', hotelDailyLimit: 800, mealDailyAllowance: 200, transportationStandard: '高铁一等座/飞机经济舱' },
-    { rank: '部门总监', cityTier: '二线城市', hotelDailyLimit: 550, mealDailyAllowance: 160, transportationStandard: '高铁一等座/飞机经济舱' },
-    { rank: '部门总监', cityTier: '其他城市', hotelDailyLimit: 400, mealDailyAllowance: 130, transportationStandard: '高铁一等座/飞机经济舱' },
-    { rank: '公司高管', cityTier: '一线城市', hotelDailyLimit: 1200, mealDailyAllowance: 300, transportationStandard: '高铁商务座/飞机公务舱' },
-    { rank: '公司高管', cityTier: '二线城市', hotelDailyLimit: 850, mealDailyAllowance: 240, transportationStandard: '高铁商务座/飞机公务舱' },
-    { rank: '公司高管', cityTier: '其他城市', hotelDailyLimit: 600, mealDailyAllowance: 180, transportationStandard: '高铁商务座/飞机公务舱' }
+    { rank: '员工', cityTier: '一线城市', hotelDailyLimit: 450, mealDailyAllowance: 100, transportationStandard: '高铁二等座/飞机经济舱' },
+    { rank: '部门负责人', cityTier: '一线城市', hotelDailyLimit: 650, mealDailyAllowance: 150, transportationStandard: '高铁一等座/飞机经济舱' },
+    { rank: '总经理', cityTier: '一线城市', hotelDailyLimit: 900, mealDailyAllowance: 200, transportationStandard: '高铁商务座/飞机公务舱' },
+    { rank: '员工', cityTier: '二线城市', hotelDailyLimit: 350, mealDailyAllowance: 80, transportationStandard: '高铁二等座/飞机经济舱' },
+    { rank: '部门负责人', cityTier: '二线城市', hotelDailyLimit: 500, mealDailyAllowance: 120, transportationStandard: '高铁一等座/飞机经济舱' },
+    { rank: '总经理', cityTier: '二线城市', hotelDailyLimit: 700, mealDailyAllowance: 160, transportationStandard: '高铁商务座/飞机公务舱' },
+    { rank: '员工', cityTier: '其他城市', hotelDailyLimit: 260, mealDailyAllowance: 60, transportationStandard: '高铁二等座/飞机经济舱' },
+    { rank: '部门负责人', cityTier: '其他城市', hotelDailyLimit: 380, mealDailyAllowance: 100, transportationStandard: '高铁一等座/飞机经济舱' },
+    { rank: '总经理', cityTier: '其他城市', hotelDailyLimit: 500, mealDailyAllowance: 130, transportationStandard: '高铁商务座/飞机公务舱' }
   ],
   procurementCategories: [
     { code: '办公用品', name: '办公用品' },

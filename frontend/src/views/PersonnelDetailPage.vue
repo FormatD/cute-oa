@@ -57,7 +57,69 @@ watch([balanceType, balanceYear], () => { void loadBalance() })
   <div class="page-heading"><div><p class="eyebrow">PERSONNEL PROFILE</p><h1>员工档案详情</h1><p>任职主数据和入转调离记录永久留痕。</p></div><div class="heading-actions"><button class="secondary" @click="router.push('/hr/employees')">← 返回花名册</button><button v-if="personnel.detail" class="secondary" @click="router.push({ path: '/hr/personnel-cases', query: { userId: personnel.detail.userId } })">查看办理清单</button><button v-if="canManage && personnel.detail" @click="startEdit">编辑档案</button></div></div>
   <p v-if="personnel.message" class="notice success">{{ personnel.message }}</p><p v-if="personnel.error" class="notice error">{{ personnel.error }}</p><p v-if="personnel.loading" class="empty">正在加载人事档案…</p>
   <template v-else-if="personnel.detail"><section class="panel"><div class="detail-status"><strong>{{ personnel.detail.name }} · {{ personnel.detail.employeeNumber }}</strong><em :class="{ archived: personnel.detail.personnelStatus === 'TERMINATED' }">{{ statusLabel(personnel.detail.personnelStatus) }}</em></div><dl class="detail-grid"><div><dt>用户 ID</dt><dd>{{ personnel.detail.userId }}</dd></div><div><dt>账号状态</dt><dd>{{ personnel.detail.accountStatus === 'ACTIVE' ? '启用' : '停用' }}</dd></div><div><dt>所属部门</dt><dd>{{ personnel.detail.departmentName }}</dd></div><div><dt>主岗位</dt><dd>{{ personnel.detail.positionName || '未分配' }}</dd></div><div><dt>直属上级</dt><dd>{{ personnel.detail.managerName || '无' }}</dd></div><div><dt>办公地点</dt><dd>{{ personnel.detail.workLocation || '未填写' }}</dd></div><div><dt>工作邮箱</dt><dd>{{ personnel.detail.workEmail || '未填写' }}</dd></div><div><dt>工作电话</dt><dd>{{ personnel.detail.workPhone || '未填写' }}</dd></div><div><dt>用工类型</dt><dd>{{ employmentLabel(personnel.detail.employmentType) }}</dd></div><div><dt>入职日期</dt><dd>{{ personnel.detail.hireDate }}</dd></div><div><dt>试用期结束</dt><dd>{{ personnel.detail.probationEndDate || '不适用' }}</dd></div><div><dt>转正日期</dt><dd>{{ personnel.detail.regularizedDate || '未记录' }}</dd></div><div><dt>累计工作起始日</dt><dd>{{ personnel.detail.cumulativeWorkStartDate || '未记录' }}</dd></div><div><dt>社会工龄</dt><dd>{{ personnel.detail.cumulativeWorkYears }} 年</dd></div><div><dt>离职日期</dt><dd>{{ personnel.detail.departureDate || '不适用' }}</dd></div><div class="wide"><dt>离职原因</dt><dd>{{ personnel.detail.departureReason || '不适用' }}</dd></div></dl></section>
-    <section class="panel"><div class="section-title"><div><p class="eyebrow">LEAVE BALANCE</p><h2>年度假期余额</h2></div><div class="heading-actions"><select v-model="balanceType"><option value="Annual">年假</option><option value="CompTime">调休</option></select><input v-model.number="balanceYear" type="number" min="2000" max="2100"><button v-if="canManage && personnel.leaveBalance" class="secondary" @click="openBalanceAdjustment">调整余额</button></div></div><dl v-if="personnel.leaveBalance" class="detail-grid"><div><dt>法定基线</dt><dd>{{ personnel.leaveBalance.statutoryEntitled }} 天</dd></div><div><dt>人工调整</dt><dd>{{ personnel.leaveBalance.adjustment }} 天</dd></div><div><dt>年度总额</dt><dd>{{ personnel.leaveBalance.entitled }} 天</dd></div><div><dt>可用</dt><dd>{{ personnel.leaveBalance.available }} 天</dd></div><div><dt>已冻结</dt><dd>{{ personnel.leaveBalance.frozen }} 天</dd></div><div><dt>已使用</dt><dd>{{ personnel.leaveBalance.used }} 天</dd></div></dl><p v-else class="empty">暂无该年度余额。</p><p class="muted">年假按社会工龄法定档位计算；当年新入职按本单位剩余日历天数向下折算。人工调整不会覆盖法定基线。</p></section>
+    <section class="panel">
+      <div class="section-title">
+        <div>
+          <p class="eyebrow">LEAVE BALANCE</p>
+          <h2>年度假期余额</h2>
+        </div>
+        <div class="heading-actions">
+          <select v-model="balanceType">
+            <option value="Annual">年假</option>
+            <option value="CompTime">调休</option>
+          </select>
+          <input v-model.number="balanceYear" type="number" min="2000" max="2100">
+          <button v-if="canManage && personnel.leaveBalance" class="secondary" @click="openBalanceAdjustment">调整余额</button>
+        </div>
+      </div>
+      <dl v-if="personnel.leaveBalance" class="detail-grid">
+        <div><dt>法定基线</dt><dd>{{ personnel.leaveBalance.statutoryEntitled }} 天</dd></div>
+        <div><dt>人工调整</dt><dd>{{ personnel.leaveBalance.adjustment }} 天</dd></div>
+        <div><dt>年度总额</dt><dd>{{ personnel.leaveBalance.entitled }} 天</dd></div>
+        <div><dt>可用</dt><dd>{{ personnel.leaveBalance.available }} 天</dd></div>
+        <div><dt>已冻结</dt><dd>{{ personnel.leaveBalance.frozen }} 天</dd></div>
+        <div><dt>已使用</dt><dd>{{ personnel.leaveBalance.used }} 天</dd></div>
+      </dl>
+      <p v-else class="empty">暂无该年度余额。</p>
+      <p v-if="balanceType === 'Annual'" class="muted">年假按社会工龄法定档位计算；当年新入职按本单位剩余日历天数向下折算。人工调整不会覆盖法定基线。</p>
+      <p v-else class="muted">调休基于加班授予（Grant）台账独立核算，按有效期至近先出（FIFO）自动消耗，过期批次自动失效，不串扰新年度额度。</p>
+
+      <div v-if="balanceType === 'CompTime' && personnel.leaveBalance?.grants?.length" class="comp-time-ledger" style="margin-top: 18px;">
+        <h3 style="font-size: 0.95rem; margin-bottom: 10px; color: #1e293b;">调休授予明细台账 (Grant Ledger)</h3>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>授予日期</th>
+                <th>有效期至</th>
+                <th>授予天数</th>
+                <th>已使用</th>
+                <th>已冻结</th>
+                <th>可用天数</th>
+                <th>状态</th>
+                <th>授予事由</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="grant in personnel.leaveBalance.grants" :key="grant.id">
+                <td>{{ grant.grantedDate }}</td>
+                <td>{{ grant.expiredAt }}</td>
+                <td>{{ grant.days }} 天</td>
+                <td>{{ grant.usedDays }} 天</td>
+                <td>{{ grant.frozenDays }} 天</td>
+                <td><strong>{{ grant.availableDays }} 天</strong></td>
+                <td>
+                  <span :class="['grant-tag', grant.availableDays > 0 ? 'tag-ok' : 'tag-muted']">
+                    {{ grant.availableDays > 0 ? '有效' : (grant.usedDays + grant.frozenDays >= grant.days ? '已耗尽' : '已过期') }}
+                  </span>
+                </td>
+                <td>{{ grant.reason || '加班授予' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
     <section class="panel"><div class="section-title"><div><p class="eyebrow">LIFECYCLE HISTORY</p><h2>员工生命周期记录</h2></div></div><div v-if="personnel.detail.events.length" class="timeline"><p v-for="event in personnel.detail.events" :key="event.id"><strong>{{ event.effectiveDate }} · {{ eventLabel(event.eventType) }}</strong><span>{{ event.summary }}</span><small>{{ event.changedByName }} · {{ new Date(event.createdAt).toLocaleString('zh-CN') }}</small></p></div><p v-else class="empty">暂无变更历史。</p></section>
   </template>
   <OaDialog
@@ -121,3 +183,22 @@ watch([balanceType, balanceYear], () => { void loadBalance() })
   </OaDialog>
   <OaDialog :open="balanceOpen" title="调整年度假期余额" description="调整值是相对于法定基线的年度增减量，支持 0.5 天粒度。" submit-label="保存调整" :busy="personnel.saving" @close="balanceOpen = false" @submit="adjustBalance"><div class="dialog-grid"><label class="dialog-field">年度<input :value="balanceYear" disabled></label><label class="dialog-field">假别<input :value="balanceType === 'Annual' ? '年假' : '调休'" disabled></label><label class="dialog-field">调整值（天）<input v-model.number="balanceAdjustment" type="number" min="-100" max="100" step="0.5"></label><label class="dialog-field wide">调整原因<textarea v-model="balanceReason" maxlength="500" placeholder="例如：根据公司福利制度增加 2 天年假"></textarea></label></div></OaDialog>
 </template>
+
+<style scoped>
+.grant-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 0.75rem;
+  border-radius: 4px;
+}
+.tag-ok {
+  background: #ecfdf5;
+  color: #047857;
+  border: 1px solid #a7f3d0;
+}
+.tag-muted {
+  background: #f1f5f9;
+  color: #64748b;
+  border: 1px solid #cbd5e1;
+}
+</style>
