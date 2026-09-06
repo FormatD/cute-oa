@@ -279,28 +279,6 @@ function syncVisualToJson(): string {
   return JSON.stringify(obj, null, 2)
 }
 
-async function loadBaseConfigForDomain(domain: ConfigurationDomain) {
-  const existing =
-    store.items.find(i => i.domain === domain && i.status === 'EFFECTIVE') ||
-    store.items.find(i => i.domain === domain)
-  if (existing) {
-    const full = await store.loadDetail(existing.id)
-    if (full && full.contentJson) {
-      form.code = full.code
-      form.name = `${full.name} (新草稿)`
-      form.description = full.description || ''
-      form.contentJson = full.contentJson
-      parseJsonToVisual(domain, full.contentJson)
-      return
-    }
-  }
-  const def = getDefaultConfigForDomain(domain)
-  form.code = def.code
-  form.name = def.name
-  form.description = def.description
-  form.contentJson = def.json
-  parseJsonToVisual(domain, def.json)
-}
 
 function resetToDefaultTemplate() {
   const def = getDefaultConfigForDomain(form.domain)
@@ -329,9 +307,14 @@ async function copyFromExistingConfig() {
   store.message = `当前业务域【${domainLabel(form.domain)}】暂无已有生效配置可供复制。`
 }
 
-async function handleDomainChange() {
+function handleDomainChange() {
   if (props.editingId) return
-  await loadBaseConfigForDomain(form.domain)
+  const def = getDefaultConfigForDomain(form.domain)
+  form.code = def.code
+  form.name = def.name
+  form.description = def.description
+  form.contentJson = def.json
+  parseJsonToVisual(form.domain, def.json)
 }
 
 function switchEditorMode(mode: 'visual' | 'json') {
@@ -352,7 +335,7 @@ function switchEditorMode(mode: 'visual' | 'json') {
 
 watch(
   () => props.open,
-  async isOpen => {
+  isOpen => {
     if (!isOpen) return
     validationError.value = ''
     editorMode.value = 'visual'
@@ -371,7 +354,12 @@ watch(
       form.domain = props.defaultDomain || 'Leave'
       form.effectiveFrom = toLocalInput(new Date().toISOString())
       form.effectiveTo = ''
-      await loadBaseConfigForDomain(form.domain)
+      const def = getDefaultConfigForDomain(form.domain)
+      form.code = def.code
+      form.name = def.name
+      form.description = def.description
+      form.contentJson = def.json
+      parseJsonToVisual(form.domain, def.json)
     }
   }
 )
