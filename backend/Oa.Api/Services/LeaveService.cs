@@ -150,6 +150,9 @@ public sealed class LeaveService
             return ServiceResult<LeaveRequest>.Failure("请假时长必须大于 0。", "LEAVE_003");
 
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Leave, "LeavePolicy");
+        if (db is not null && configRecord is null)
+            return ServiceResult<LeaveRequest>.Failure("未找到生效中的请假策略配置【LeavePolicy】。", "CONFIG_MISSING");
+
         var item = new LeaveRequest
         {
             Number = $"QJ-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}",
@@ -189,9 +192,27 @@ public sealed class LeaveService
             return ServiceResult<LeaveRequest>.Failure("存在时间重叠的有效请假申请。", "LEAVE_002");
 
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Leave, "LeavePolicy");
-        var policy = configRecord is not null
-            ? JsonSerializer.Deserialize<LeavePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultLeavePolicy();
+        if (db is not null && configRecord is null)
+            return ServiceResult<LeaveRequest>.Failure("未找到生效中的请假策略配置【LeavePolicy】。", "CONFIG_MISSING");
+
+        LeavePolicyConfig? policy = null;
+        if (configRecord is not null)
+        {
+            try
+            {
+                policy = JsonSerializer.Deserialize<LeavePolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
+            }
+            catch
+            {
+                return ServiceResult<LeaveRequest>.Failure("请假策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+            }
+            if (policy is null)
+                return ServiceResult<LeaveRequest>.Failure("请假策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+        }
+        else
+        {
+            policy = BusinessConfigurationDefaults.CreateDefaultLeavePolicy();
+        }
 
         var typeRule = policy?.LeaveTypes.FirstOrDefault(t => t.Type.Equals(item.Type.ToString(), StringComparison.OrdinalIgnoreCase));
         if (typeRule is not null && !typeRule.IsEnabled)

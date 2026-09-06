@@ -201,5 +201,3 @@ test('在 390px 移动视口下业务参数配置中心不产生整页横向滚�
   await page.getByRole('dialog').getByLabel('关闭').click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
 })
-
-

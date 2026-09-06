@@ -292,7 +292,14 @@ public sealed class BusinessConfigurationService
         };
 
         db.BusinessConfigurations.Add(entity);
-        db.SaveChanges();
+        try
+        {
+            db.SaveChanges();
+        }
+        catch (DbUpdateException)
+        {
+            return ServiceResult<BusinessConfigurationView>.Failure("版本并发冲突，请重试。", "CONCURRENCY_001");
+        }
 
         LogAudit(actor, "CONFIG_VERSION_CREATED", entity.Id.ToString(),
             $"基于 v{source.Version} 创建【{entity.Domain} / {entity.Code}】v{entity.Version} 新版本草稿");
@@ -304,6 +311,9 @@ public sealed class BusinessConfigurationService
     {
         if (!data.HasPermission(actor, OaPermissions.BusinessConfigManage))
             return ServiceResult<BusinessConfigurationView>.Failure("无权访问业务参数配置中心。", "AUTH_002");
+
+        if (request?.ConcurrencyVersion == null || request.ConcurrencyVersion.Value <= 0)
+            return ServiceResult<BusinessConfigurationView>.Failure("并发版本号为必填项且必须大于 0。", "CONCURRENCY_001");
 
         var record = db.BusinessConfigurations.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null)
@@ -317,7 +327,7 @@ public sealed class BusinessConfigurationService
             return ServiceResult<BusinessConfigurationView>.Failure("只有草稿状态的配置才可发布。", "CONFIG_002");
         }
 
-        if (request?.ConcurrencyVersion.HasValue == true && record.ConcurrencyVersion != request.ConcurrencyVersion.Value)
+        if (record.ConcurrencyVersion != request.ConcurrencyVersion.Value)
             return ServiceResult<BusinessConfigurationView>.Failure("配置已被其他人修改，请刷新后重试。", "CONCURRENCY_001");
 
         var normalizedJson = BusinessConfigurationValidator.ValidateAndNormalize(record.Domain, record.ContentJson, data);
@@ -328,8 +338,8 @@ public sealed class BusinessConfigurationService
             return ServiceResult<BusinessConfigurationView>.Failure(normalizedJson.Error!, normalizedJson.Code!);
         }
 
-        var effectiveFrom = (request?.EffectiveFrom ?? record.EffectiveFrom).ToUniversalTime();
-        var effectiveTo = (request?.EffectiveTo ?? record.EffectiveTo)?.ToUniversalTime();
+        var effectiveFrom = (request.EffectiveFrom ?? record.EffectiveFrom).ToUniversalTime();
+        var effectiveTo = (request.EffectiveTo ?? record.EffectiveTo)?.ToUniversalTime();
 
         if (effectiveTo.HasValue && effectiveTo.Value <= effectiveFrom)
             return ServiceResult<BusinessConfigurationView>.Failure("失效时间必须晚于生效时间。", "CONFIG_001");
@@ -337,6 +347,11 @@ public sealed class BusinessConfigurationService
         using var lockLease = AcquireLock(record.Domain, record.Code);
 
         db.Entry(record).Reload();
+        if (record.ConcurrencyVersion != request.ConcurrencyVersion.Value)
+        {
+            return ServiceResult<BusinessConfigurationView>.Failure("配置已被其他人修改，请刷新后重试。", "CONCURRENCY_001");
+        }
+
         if (record.Status != ConfigurationStatus.Draft)
         {
             return ServiceResult<BusinessConfigurationView>.Failure("只有草稿状态的配置才可发布。", "CONFIG_002");
@@ -360,9 +375,23 @@ public sealed class BusinessConfigurationService
             // Overlap: StartA < EndB && EndA > StartB
             if (effectiveFrom < otherEnd && effectiveEnd > other.EffectiveFrom)
             {
-                // If publishing an immediate version, we can auto-cap the old EFFECTIVE version if start matches or is later
-                if (effectiveFrom >= other.EffectiveFrom && other.Status == ConfigurationStatus.Effective && other.EffectiveTo == null)
+                if (other.Status == ConfigurationStatus.Effective)
                 {
+                    // If other was published after this draft was authored, this draft is based on a stale state!
+                    if (other.PublishedAt.HasValue && other.PublishedAt.Value >= record.CreatedAt)
+                    {
+                        return ServiceResult<BusinessConfigurationView>.Failure(
+                            $"检测到并发发布冲突：配置【{record.Domain} / {record.Code}】在草稿编制后已有更新版本 v{other.Version} 发布生效，请刷新后重试。",
+                            "CONCURRENCY_001");
+                    }
+
+                    if (effectiveFrom <= other.EffectiveFrom)
+                    {
+                        return ServiceResult<BusinessConfigurationView>.Failure(
+                            $"生效起始时间必须晚于已生效版本 v{other.Version} 的起始时间（{other.EffectiveFrom:yyyy-MM-dd HH:mm}）。",
+                            "CONFIG_003");
+                    }
+
                     other.EffectiveTo = effectiveFrom;
                     if (newStatus == ConfigurationStatus.Effective)
                     {
@@ -421,6 +450,9 @@ public sealed class BusinessConfigurationService
         if (!data.HasPermission(actor, OaPermissions.BusinessConfigManage))
             return ServiceResult<BusinessConfigurationView>.Failure("无权访问业务参数配置中心。", "AUTH_002");
 
+        if (request?.ConcurrencyVersion == null || request.ConcurrencyVersion.Value <= 0)
+            return ServiceResult<BusinessConfigurationView>.Failure("并发版本号为必填项且必须大于 0。", "CONCURRENCY_001");
+
         var record = db.BusinessConfigurations.SingleOrDefault(item => item.TenantId == TenantId && item.Id == id);
         if (record is null)
             return ServiceResult<BusinessConfigurationView>.Failure("配置不存在。", "DATA_001");
@@ -435,17 +467,20 @@ public sealed class BusinessConfigurationService
         if (record.Status != ConfigurationStatus.Effective && record.Status != ConfigurationStatus.Scheduled)
             return ServiceResult<BusinessConfigurationView>.Failure("当前状态不允许下线。", "CONFIG_002");
 
-        if (request?.ConcurrencyVersion.HasValue == true && record.ConcurrencyVersion != request.ConcurrencyVersion.Value)
+        if (record.ConcurrencyVersion != request.ConcurrencyVersion.Value)
             return ServiceResult<BusinessConfigurationView>.Failure("配置已被其他人修改，请刷新后重试。", "CONCURRENCY_001");
 
         using var lockLease = AcquireLock(record.Domain, record.Code);
         db.Entry(record).Reload();
+        if (record.ConcurrencyVersion != request.ConcurrencyVersion.Value)
+            return ServiceResult<BusinessConfigurationView>.Failure("配置已被其他人修改，请刷新后重试。", "CONCURRENCY_001");
+
         if (record.Status != ConfigurationStatus.Effective && record.Status != ConfigurationStatus.Scheduled)
             return ServiceResult<BusinessConfigurationView>.Failure("当前状态不允许下线。", "CONFIG_002");
 
         var now = DateTimeOffset.UtcNow;
         DateTimeOffset effectiveTo;
-        if (request?.EffectiveTo.HasValue == true)
+        if (request.EffectiveTo.HasValue)
         {
             effectiveTo = request.EffectiveTo.Value.ToUniversalTime();
             if (effectiveTo < record.EffectiveFrom)
@@ -547,30 +582,37 @@ public sealed class BusinessConfigurationService
     public int ActivateScheduledConfigurations(DateTimeOffset? asOfDate = null)
     {
         var asOf = (asOfDate ?? DateTimeOffset.UtcNow).ToUniversalTime();
-        var pendingScheduled = db.BusinessConfigurations
+        var pendingScheduled = db.BusinessConfigurations.AsNoTracking()
             .Where(item => item.TenantId == TenantId && item.Status == ConfigurationStatus.Scheduled && item.EffectiveFrom <= asOf)
             .OrderBy(item => item.EffectiveFrom)
             .ThenBy(item => item.Version)
+            .Select(item => new { item.Id, item.Domain, item.Code })
             .ToList();
 
         if (pendingScheduled.Count == 0) return 0;
 
         var now = DateTimeOffset.UtcNow;
         var activatedCount = 0;
-        foreach (var item in pendingScheduled)
+        foreach (var pending in pendingScheduled)
         {
-            using var lockLease = AcquireLock(item.Domain, item.Code);
+            using var lockLease = AcquireLock(pending.Domain, pending.Code);
+            var current = db.BusinessConfigurations.SingleOrDefault(item => item.TenantId == TenantId && item.Id == pending.Id);
+            if (current == null || current.Status != ConfigurationStatus.Scheduled || current.EffectiveFrom > asOf)
+            {
+                continue;
+            }
+
             var oldEffectives = db.BusinessConfigurations
-                .Where(other => other.TenantId == TenantId && other.Domain == item.Domain && other.Code == item.Code &&
-                                other.Status == ConfigurationStatus.Effective && other.Id != item.Id)
+                .Where(other => other.TenantId == TenantId && other.Domain == current.Domain && other.Code == current.Code &&
+                                other.Status == ConfigurationStatus.Effective && other.Id != current.Id)
                 .ToList();
 
             foreach (var old in oldEffectives)
             {
                 old.Status = ConfigurationStatus.Retired;
-                if (old.EffectiveTo == null || old.EffectiveTo > item.EffectiveFrom)
+                if (old.EffectiveTo == null || old.EffectiveTo > current.EffectiveFrom)
                 {
-                    old.EffectiveTo = item.EffectiveFrom;
+                    old.EffectiveTo = current.EffectiveFrom;
                 }
                 old.UpdatedAt = now;
                 old.UpdatedBy = "system";
@@ -578,19 +620,20 @@ public sealed class BusinessConfigurationService
                 old.ConcurrencyVersion++;
             }
 
-            item.Status = ConfigurationStatus.Effective;
-            item.UpdatedAt = now;
-            item.UpdatedBy = "system";
-            item.UpdatedByName = "定时生效任务";
-            item.ConcurrencyVersion++;
+            current.Status = ConfigurationStatus.Effective;
+            current.UpdatedAt = now;
+            current.UpdatedBy = "system";
+            current.UpdatedByName = "定时生效任务";
+            current.ConcurrencyVersion++;
             activatedCount++;
 
             LogAudit(new Employee("system", "系统定时任务", "系统管理员", "general", "总经办", null, 0, "ACTIVE"),
-                "CONFIG_SCHEDULED_ACTIVATED", item.Id.ToString(),
-                $"定时生效【{item.Domain} / {item.Code}】v{item.Version}，状态切换为 Effective");
+                "CONFIG_SCHEDULED_ACTIVATED", current.Id.ToString(),
+                $"定时生效【{current.Domain} / {current.Code}】v{current.Version}，状态切换为 Effective");
+
+            db.SaveChanges();
         }
 
-        db.SaveChanges();
         return activatedCount;
     }
 

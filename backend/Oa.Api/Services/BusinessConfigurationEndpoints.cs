@@ -102,32 +102,21 @@ public static class BusinessConfigurationEndpoints
             var config = service.GetEffective(ConfigurationDomains.Dictionary, code.Trim());
             DictionaryConfig? dict = null;
             string name = code;
-            if (config is not null)
+            if (config is null)
+                return Results.NotFound(new { code = "CONFIG_MISSING", message = $"未找到字典【{code}】的生效配置。" });
+
+            name = config.Name;
+            try
             {
-                name = config.Name;
-                try
-                {
-                    dict = JsonSerializer.Deserialize<DictionaryConfig>(config.ContentJson, BusinessConfigurationDefaults.JsonOptions);
-                }
-                catch (Exception ex)
-                {
-                    return Results.BadRequest(new { code = "CONFIG_001", message = $"字典配置反序列化失败：{ex.Message}" });
-                }
+                dict = JsonSerializer.Deserialize<DictionaryConfig>(config.ContentJson, BusinessConfigurationDefaults.JsonOptions);
             }
-            else
+            catch (Exception ex)
             {
-                dict = code.Trim() switch
-                {
-                    "AnnouncementType" => BusinessConfigurationDefaults.CreateDefaultAnnouncementTypeDict(),
-                    "ContractType" => BusinessConfigurationDefaults.CreateDefaultContractTypeDict(),
-                    "AttachmentType" => BusinessConfigurationDefaults.CreateDefaultAttachmentTypeDict(),
-                    "ApprovalCommentPreset" => BusinessConfigurationDefaults.CreateDefaultApprovalCommentPresetDict(),
-                    _ => null
-                };
+                return Results.BadRequest(new { code = "CONFIG_INVALID", message = $"字典配置反序列化失败：{ex.Message}" });
             }
 
             if (dict is null)
-                return Results.NotFound(new { code = "DATA_001", message = $"未找到字典【{code}】的生效配置。" });
+                return Results.BadRequest(new { code = "CONFIG_INVALID", message = $"字典【{code}】配置内容为空。" });
 
             var enabledItems = dict.Items.Where(item => item.IsEnabled).OrderBy(item => item.SortOrder).ToList();
             return Results.Ok(new
@@ -142,11 +131,20 @@ public static class BusinessConfigurationEndpoints
         group.MapPost("/activate-scheduled", (
             HttpRequest request,
             DemoAuthService auth,
-            BusinessConfigurationService service) =>
+            BusinessConfigurationService service,
+            IdempotencyService idempotency,
+            DemoData data) =>
         {
             var actor = auth.Resolve(request);
-            var count = service.ActivateScheduledConfigurations();
-            return Results.Ok(new { activatedCount = count });
+            if (!data.HasPermission(actor, OaPermissions.BusinessConfigManage))
+            {
+                return Results.Json(new { code = "AUTH_002", message = "无权访问业务参数配置中心。" }, statusCode: StatusCodes.Status403Forbidden);
+            }
+            return Write(request, actor, idempotency, () =>
+            {
+                var count = service.ActivateScheduledConfigurations();
+                return ServiceResult<object>.Success(new { activatedCount = count });
+            }, atomic: false, fingerprintPayload: new { action = "activate-scheduled" });
         });
 
         group.MapPost("/", (

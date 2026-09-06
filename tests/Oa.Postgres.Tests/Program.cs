@@ -2724,6 +2724,108 @@ await using (var configDb = new OaDbContext(options))
     if (postActive.Status != ConfigurationStatus.Effective)
         throw new InvalidOperationException("已到期待生效配置状态未转换为 Effective。");
 
+    // 8.6 R-A1 真正并发发布测试 (Dual DbContext + Task.WhenAll)
+    var concurrentDraft = configService.CreateDraft(admin, new CreateBusinessConfigurationRequest(
+        ConfigurationDomains.Dictionary, "CONCURRENT_PUBLISH_TEST", "并发发布测试字典", null, nowUtc, null, """{"items":[{"code":"1","name":"1"}]}"""));
+    if (!concurrentDraft.IsSuccess) throw new InvalidOperationException("创建并发测试草稿失败。");
+
+    var startBarrier = new ManualResetEventSlim(false);
+    var task1 = Task.Run(async () =>
+    {
+        await using var threadDb = new OaDbContext(options);
+        var threadData = new DemoData(threadDb);
+        var threadService = new BusinessConfigurationService(threadDb, threadData);
+        var threadAdmin = threadData.GetEmployee("u-admin");
+        startBarrier.Wait();
+        return threadService.Publish(threadAdmin, concurrentDraft.Value!.Id, new PublishBusinessConfigurationRequest(nowUtc, null, concurrentDraft.Value.ConcurrencyVersion));
+    });
+
+    var task2 = Task.Run(async () =>
+    {
+        await using var threadDb = new OaDbContext(options);
+        var threadData = new DemoData(threadDb);
+        var threadService = new BusinessConfigurationService(threadDb, threadData);
+        var threadAdmin = threadData.GetEmployee("u-admin");
+        startBarrier.Wait();
+        return threadService.Publish(threadAdmin, concurrentDraft.Value!.Id, new PublishBusinessConfigurationRequest(nowUtc, null, concurrentDraft.Value.ConcurrencyVersion));
+    });
+
+    startBarrier.Set();
+    var results = await Task.WhenAll(task1, task2);
+    var successCount = results.Count(r => r.IsSuccess);
+    var conflictCount = results.Count(r => !r.IsSuccess && r.Code == "CONCURRENCY_001");
+    if (successCount != 1 || conflictCount != 1)
+    {
+        throw new InvalidOperationException($"两个独立 DbContext 并发发布同一草稿时，必须恰好一个成功，另一个返回 CONCURRENCY_001。实际成功数：{successCount}，冲突数：{conflictCount}，错误信息：{string.Join("; ", results.Select(r => $"[{r.Code}] {r.Error}"))}");
+    }
+
+    // 必填 ConcurrencyVersion 校验测试（缺失或 <= 0 必须返回 CONCURRENCY_001）
+    var missingVersionPublish = configService.Publish(admin, concurrentDraft.Value!.Id, new PublishBusinessConfigurationRequest(nowUtc, null, null));
+    if (missingVersionPublish.IsSuccess || missingVersionPublish.Code != "CONCURRENCY_001")
+        throw new InvalidOperationException("缺少 ConcurrencyVersion 的发布请求未返回 CONCURRENCY_001。");
+
+    var zeroVersionPublish = configService.Publish(admin, concurrentDraft.Value!.Id, new PublishBusinessConfigurationRequest(nowUtc, null, 0));
+    if (zeroVersionPublish.IsSuccess || zeroVersionPublish.Code != "CONCURRENCY_001")
+        throw new InvalidOperationException("ConcurrencyVersion <= 0 的发布请求未返回 CONCURRENCY_001。");
+
+    // 并发基于陈旧状态的发布冲突测试
+    var draftA = configService.CreateDraft(admin, new CreateBusinessConfigurationRequest(
+        ConfigurationDomains.Dictionary, "STALE_OVERLAP_TEST", "陈旧重叠测试字典", null, nowUtc, null, """{"items":[{"code":"A","name":"A"}]}"""));
+    var draftB = configService.CreateDraft(admin, new CreateBusinessConfigurationRequest(
+        ConfigurationDomains.Dictionary, "STALE_OVERLAP_TEST", "陈旧重叠测试字典", null, nowUtc, null, """{"items":[{"code":"B","name":"B"}]}"""));
+    var pubA = configService.Publish(admin, draftA.Value!.Id, new PublishBusinessConfigurationRequest(nowUtc, null, draftA.Value.ConcurrencyVersion));
+    if (!pubA.IsSuccess) throw new InvalidOperationException("发布 draftA 失败。");
+    var pubB = configService.Publish(admin, draftB.Value!.Id, new PublishBusinessConfigurationRequest(nowUtc, null, draftB.Value.ConcurrencyVersion));
+    if (pubB.IsSuccess || pubB.Code != "CONCURRENCY_001")
+        throw new InvalidOperationException($"基于陈旧状态发布的 draftB 未返回 CONCURRENCY_001，实际返回：[{pubB.Code}] {pubB.Error}");
+
+    // 8.7 R-A2 纯读零写与零副作用测试
+    var configCountBefore = configDb.BusinessConfigurations.Count();
+    var latestUpdatedBefore = configDb.BusinessConfigurations.Max(c => c.UpdatedAt);
+    var resolvedLeave = BusinessConfigurationDefaults.ResolveEffectiveConfig(configDb, ConfigurationDomains.Leave, "LeavePolicy");
+    if (resolvedLeave == null) throw new InvalidOperationException("未能解析到生效中的 LeavePolicy。");
+    var resolvedNonExistent = BusinessConfigurationDefaults.ResolveEffectiveConfig(configDb, "NonExistentDomain", "NonExistentCode");
+    if (resolvedNonExistent != null) throw new InvalidOperationException("不存在的配置解析应返回 null。");
+    var configCountAfter = configDb.BusinessConfigurations.Count();
+    var latestUpdatedAfter = configDb.BusinessConfigurations.Max(c => c.UpdatedAt);
+    if (configCountBefore != configCountAfter || latestUpdatedBefore != latestUpdatedAfter)
+        throw new InvalidOperationException("ResolveEffectiveConfig 执行了写库操作，违反纯查询零副作用约束！");
+
+    // 8.8 R-A3 多实例并发激活与权限门禁测试 (Dual DbContext + Task.WhenAll)
+    if (configData.HasPermission(zhang, OaPermissions.BusinessConfigManage))
+        throw new InvalidOperationException("普通员工不应具备 BusinessConfigManage 权限。");
+
+    var multiSchedDraft = configService.CreateDraft(admin, new CreateBusinessConfigurationRequest(
+        ConfigurationDomains.Dictionary, "MULTI_SCHED_TEST", "多实例并发调度测试", null, nowUtc.AddMinutes(-5), null, """{"items":[]}"""));
+    var schedPubResult = configService.Publish(admin, multiSchedDraft.Value!.Id, new PublishBusinessConfigurationRequest(nowUtc.AddMinutes(-5), null, multiSchedDraft.Value.ConcurrencyVersion));
+    var schedEntity = configDb.BusinessConfigurations.Single(c => c.Id == multiSchedDraft.Value.Id);
+    schedEntity.Status = ConfigurationStatus.Scheduled;
+    schedEntity.EffectiveFrom = nowUtc.AddMinutes(-1);
+    configDb.SaveChanges();
+
+    var schedBarrier = new ManualResetEventSlim(false);
+    var schedTask1 = Task.Run(async () =>
+    {
+        await using var threadDb = new OaDbContext(options);
+        var threadData = new DemoData(threadDb);
+        var threadService = new BusinessConfigurationService(threadDb, threadData);
+        schedBarrier.Wait();
+        return threadService.ActivateScheduledConfigurations(DateTimeOffset.UtcNow);
+    });
+    var schedTask2 = Task.Run(async () =>
+    {
+        await using var threadDb = new OaDbContext(options);
+        var threadData = new DemoData(threadDb);
+        var threadService = new BusinessConfigurationService(threadDb, threadData);
+        schedBarrier.Wait();
+        return threadService.ActivateScheduledConfigurations(DateTimeOffset.UtcNow);
+    });
+    schedBarrier.Set();
+    var schedResults = await Task.WhenAll(schedTask1, schedTask2);
+    var totalActivated = schedResults.Sum();
+    if (totalActivated != 1)
+        throw new InvalidOperationException($"多实例并发激活同一到期待生效配置时，激活总次数必须恰好为 1。实际结果：{totalActivated} (Worker1: {schedResults[0]}, Worker2: {schedResults[1]})");
+
     // 9. WP-B 业务域规则执行闭环测试
     // 9.1 WP-B1: 请假跨年拦截 (AllowCrossYear=false)
     var crossYearDraft = leaveService.CreateDraft(zhang, new CreateLeaveRequest(

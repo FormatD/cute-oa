@@ -10,13 +10,32 @@ public sealed class PurchaseService
 {
     private const string TenantId = "demo";
     private const string BusinessType = "Purchase";
-    private (ProcurementPolicyConfig Policy, BusinessConfigurationRecord? Record) ResolveProcurementPolicy()
+    private ServiceResult<(ProcurementPolicyConfig Policy, BusinessConfigurationRecord? Record)> ResolveProcurementPolicy()
     {
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Procurement, "ProcurementPolicy");
-        var policy = configRecord is not null
-            ? JsonSerializer.Deserialize<ProcurementPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultProcurementPolicy();
-        return (policy ?? BusinessConfigurationDefaults.CreateDefaultProcurementPolicy(), configRecord);
+        if (db is not null && configRecord is null)
+            return ServiceResult<(ProcurementPolicyConfig, BusinessConfigurationRecord?)>.Failure("未找到生效中的采购管理策略配置【ProcurementPolicy】。", "CONFIG_MISSING");
+
+        ProcurementPolicyConfig? policy = null;
+        if (configRecord is not null)
+        {
+            try
+            {
+                policy = JsonSerializer.Deserialize<ProcurementPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
+            }
+            catch
+            {
+                return ServiceResult<(ProcurementPolicyConfig, BusinessConfigurationRecord?)>.Failure("采购管理策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+            }
+            if (policy is null)
+                return ServiceResult<(ProcurementPolicyConfig, BusinessConfigurationRecord?)>.Failure("采购管理策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+        }
+        else
+        {
+            policy = BusinessConfigurationDefaults.CreateDefaultProcurementPolicy();
+        }
+
+        return ServiceResult<(ProcurementPolicyConfig, BusinessConfigurationRecord?)>.Success((policy, configRecord));
     }
     private readonly DemoData data;
     private readonly OaDbContext db;
@@ -131,7 +150,9 @@ public sealed class PurchaseService
         if ((PurchaseStatus)record.Status is not (PurchaseStatus.Draft or PurchaseStatus.Rejected or PurchaseStatus.Withdrawn))
             return ServiceResult<PurchaseRequest>.Failure("当前状态不允许提交。", "STATE_001");
 
-        var (policy, configRecord) = ResolveProcurementPolicy();
+        var policyResult = ResolveProcurementPolicy();
+        if (!policyResult.IsSuccess) return ServiceResult<PurchaseRequest>.Failure(policyResult.Error!, policyResult.Code!);
+        var (policy, configRecord) = policyResult.Value;
         var quoteThreshold = policy.QuoteAttachmentThreshold > 0 ? policy.QuoteAttachmentThreshold : 5000m;
         var doubleQuoteThreshold = 50000m;
         var attachmentCount = DeserializeList(record.AttachmentsJson).Count;
@@ -374,6 +395,8 @@ public sealed class PurchaseService
         var validation = Validate(actor, request, BusinessTime.ChinaToday());
         if (!validation.IsSuccess) return ServiceResult<PurchaseRequest>.Failure(validation.Error!, validation.Code!);
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Procurement, "ProcurementPolicy");
+        if (db is not null && configRecord is null)
+            return ServiceResult<PurchaseRequest>.Failure("未找到生效中的采购管理策略配置【ProcurementPolicy】。", "CONFIG_MISSING");
         var record = new PurchaseRequestRecord
         {
             TenantId = TenantId, Number = $"CG-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}",
@@ -427,7 +450,8 @@ public sealed class PurchaseService
                 instance.Status = (int)FlowInstanceStatus.Completed;
                 instance.CompletedAt = DateTimeOffset.UtcNow;
 
-                var (procurementPolicy, _) = ResolveProcurementPolicy();
+                var policyResult = ResolveProcurementPolicy();
+                var procurementPolicy = policyResult.IsSuccess ? policyResult.Value.Policy : BusinessConfigurationDefaults.CreateDefaultProcurementPolicy();
                 if (!string.IsNullOrWhiteSpace(procurementPolicy.DefaultPurchaserUserId))
                 {
                     var purchaser = data.FindEmployee(procurementPolicy.DefaultPurchaserUserId);
@@ -468,7 +492,10 @@ public sealed class PurchaseService
         if (request.Items is null || request.Items.Count is < 1 or > 50)
             return ServiceResult<(IReadOnlyList<PurchaseItem>, IReadOnlyList<string>, IReadOnlyList<string>)>.Failure("采购明细应为 1–50 行。", "PURCHASE_001");
 
-        var (policy, _) = ResolveProcurementPolicy();
+        var policyResult = ResolveProcurementPolicy();
+        if (!policyResult.IsSuccess)
+            return ServiceResult<(IReadOnlyList<PurchaseItem>, IReadOnlyList<string>, IReadOnlyList<string>)>.Failure(policyResult.Error!, policyResult.Code!);
+        var (policy, _) = policyResult.Value;
         var allowedCategories = policy.Categories.Where(c => c.IsEnabled).Select(c => c.Name).ToHashSet();
 
         var normalized = new List<PurchaseItem>();
@@ -538,7 +565,8 @@ public sealed class PurchaseService
         record.EstimatedTotal = items.Sum(item => item.EstimatedAmount);
         record.AttachmentsJson = JsonSerializer.Serialize(attachments);
 
-        var (policy, _) = ResolveProcurementPolicy();
+        var policyResult = ResolveProcurementPolicy();
+        var policy = policyResult.IsSuccess ? policyResult.Value.Policy : BusinessConfigurationDefaults.CreateDefaultProcurementPolicy();
         var matchingTier = policy.AmountTiers.OrderBy(t => t.MaxAmount ?? decimal.MaxValue)
             .FirstOrDefault(t => t.MaxAmount == null || record.EstimatedTotal <= t.MaxAmount);
         record.AmountTier = matchingTier?.Name ?? "常规采购";

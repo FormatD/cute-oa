@@ -18,26 +18,13 @@ public static class BusinessConfigurationDefaults
     {
         if (db is null) return null;
         var targetTime = (asOf ?? DateTimeOffset.UtcNow).ToUniversalTime();
-        var record = db.BusinessConfigurations.AsNoTracking()
+        return db.BusinessConfigurations.AsNoTracking()
             .Where(item => item.TenantId == tenantId && item.Domain == domain && item.Code == code)
             .Where(item => item.Status == ConfigurationStatus.Effective || item.Status == ConfigurationStatus.Scheduled)
             .Where(item => item.EffectiveFrom <= targetTime && (item.EffectiveTo == null || item.EffectiveTo > targetTime))
             .OrderByDescending(item => item.EffectiveFrom)
             .ThenByDescending(item => item.Version)
             .FirstOrDefault();
-
-        if (record is null)
-        {
-            EnsureDefaultConfigurations(db, tenantId);
-            record = db.BusinessConfigurations.AsNoTracking()
-                .Where(item => item.TenantId == tenantId && item.Domain == domain && item.Code == code)
-                .Where(item => item.Status == ConfigurationStatus.Effective)
-                .OrderByDescending(item => item.EffectiveFrom)
-                .ThenByDescending(item => item.Version)
-                .FirstOrDefault();
-        }
-
-        return record;
     }
 
     public static LeavePolicyConfig CreateDefaultLeavePolicy() => new()

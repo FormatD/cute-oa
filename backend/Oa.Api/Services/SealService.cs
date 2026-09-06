@@ -10,13 +10,32 @@ public sealed class SealService
 {
     private const string TenantId = "demo";
     private const string BusinessType = "Seal";
-    private (SealPolicyConfig Policy, BusinessConfigurationRecord? Record) ResolveSealPolicy()
+    private ServiceResult<(SealPolicyConfig Policy, BusinessConfigurationRecord? Record)> ResolveSealPolicy()
     {
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Seal, "SealPolicy");
-        var policy = configRecord is not null
-            ? JsonSerializer.Deserialize<SealPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultSealPolicy();
-        return (policy ?? BusinessConfigurationDefaults.CreateDefaultSealPolicy(), configRecord);
+        if (db is not null && configRecord is null)
+            return ServiceResult<(SealPolicyConfig, BusinessConfigurationRecord?)>.Failure("未找到生效中的用章管理策略配置【SealPolicy】。", "CONFIG_MISSING");
+
+        SealPolicyConfig? policy = null;
+        if (configRecord is not null)
+        {
+            try
+            {
+                policy = JsonSerializer.Deserialize<SealPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
+            }
+            catch
+            {
+                return ServiceResult<(SealPolicyConfig, BusinessConfigurationRecord?)>.Failure("用章管理策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+            }
+            if (policy is null)
+                return ServiceResult<(SealPolicyConfig, BusinessConfigurationRecord?)>.Failure("用章管理策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+        }
+        else
+        {
+            policy = BusinessConfigurationDefaults.CreateDefaultSealPolicy();
+        }
+
+        return ServiceResult<(SealPolicyConfig, BusinessConfigurationRecord?)>.Success((policy, configRecord));
     }
 
     private readonly DemoData data;
@@ -103,7 +122,9 @@ public sealed class SealService
         if (!validation.IsSuccess) return ServiceResult<SealRequest>.Failure(validation.Error!, validation.Code!);
 
         var today = BusinessTime.ChinaToday();
-        var (policy, configRecord) = ResolveSealPolicy();
+        var policyResult = ResolveSealPolicy();
+        if (!policyResult.IsSuccess) return ServiceResult<SealRequest>.Failure(policyResult.Error!, policyResult.Code!);
+        var (policy, configRecord) = policyResult.Value;
         var sealItem = validation.Value!.SealItem;
         var docCategory = validation.Value.DocCategory;
         var riskLevel = docCategory.RiskLevel ?? "LOW";
@@ -161,7 +182,9 @@ public sealed class SealService
         var validation = Validate(actor, request);
         if (!validation.IsSuccess) return ServiceResult<SealRequest>.Failure(validation.Error!, validation.Code!);
 
-        var (policy, _) = ResolveSealPolicy();
+        var policyResult = ResolveSealPolicy();
+        if (!policyResult.IsSuccess) return ServiceResult<SealRequest>.Failure(policyResult.Error!, policyResult.Code!);
+        var (policy, _) = policyResult.Value;
         var sealItem = validation.Value!.SealItem;
         var docCategory = validation.Value.DocCategory;
         var riskLevel = docCategory.RiskLevel ?? "LOW";
@@ -200,7 +223,9 @@ public sealed class SealService
         if ((SealStatus)record.Status is not (SealStatus.Draft or SealStatus.Rejected or SealStatus.Withdrawn))
             return ServiceResult<SealRequest>.Failure("当前状态不允许提交。", "STATE_001");
 
-        var (policy, configRecord) = ResolveSealPolicy();
+        var policyResult = ResolveSealPolicy();
+        if (!policyResult.IsSuccess) return ServiceResult<SealRequest>.Failure(policyResult.Error!, policyResult.Code!);
+        var (policy, configRecord) = policyResult.Value;
 
         var sealItem = policy.Seals.FirstOrDefault(s => s.Name.Equals(record.SealType, StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(record.SealType, StringComparison.OrdinalIgnoreCase));
         if (sealItem is null)
@@ -558,7 +583,9 @@ public sealed class SealService
         if (string.IsNullOrWhiteSpace(request.Reason) || request.Reason.Trim().Length > 500)
             return ServiceResult<ValidatedSealInput>.Failure("申请事由应为 1–500 个字符。", "SEAL_001");
 
-        var (policy, _) = ResolveSealPolicy();
+        var policyResult = ResolveSealPolicy();
+        if (!policyResult.IsSuccess) return ServiceResult<ValidatedSealInput>.Failure(policyResult.Error!, policyResult.Code!);
+        var (policy, _) = policyResult.Value;
 
         var sealItem = policy.Seals.FirstOrDefault(s => s.Name.Equals(request.SealType.Trim(), StringComparison.OrdinalIgnoreCase) || s.SealType.Equals(request.SealType.Trim(), StringComparison.OrdinalIgnoreCase));
         if (sealItem is null)

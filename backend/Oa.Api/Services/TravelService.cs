@@ -107,6 +107,9 @@ public sealed class TravelService
         var itinerary = request.Itinerary.OrderBy(item => item.StartDate).ToList();
         var companions = request.CompanionIds?.Distinct().Select(data.FindEmployee).Where(item => item is not null).Cast<Employee>().ToList() ?? [];
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Travel, "TravelPolicy");
+        if (db is not null && configRecord is null)
+            return ServiceResult<TravelRequest>.Failure("未找到生效中的差旅管理策略配置【TravelPolicy】。", "CONFIG_MISSING");
+
         var item = new TravelRequest
         {
             Number = $"CC-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}",
@@ -162,11 +165,29 @@ public sealed class TravelService
         if (!route.IsSuccess) return ServiceResult<TravelRequest>.Failure(route.Error!, route.Code!);
 
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Travel, "TravelPolicy");
-        var policy = configRecord is not null
-            ? JsonSerializer.Deserialize<TravelPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
-            : BusinessConfigurationDefaults.CreateDefaultTravelPolicy();
+        if (db is not null && configRecord is null)
+            return ServiceResult<TravelRequest>.Failure("未找到生效中的差旅管理策略配置【TravelPolicy】。", "CONFIG_MISSING");
 
-        var effectivePolicy = policy ?? BusinessConfigurationDefaults.CreateDefaultTravelPolicy();
+        TravelPolicyConfig? policy = null;
+        if (configRecord is not null)
+        {
+            try
+            {
+                policy = JsonSerializer.Deserialize<TravelPolicyConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions);
+            }
+            catch
+            {
+                return ServiceResult<TravelRequest>.Failure("差旅管理策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+            }
+            if (policy is null)
+                return ServiceResult<TravelRequest>.Failure("差旅管理策略配置内容损坏，无法解析。", "CONFIG_INVALID");
+        }
+        else
+        {
+            policy = BusinessConfigurationDefaults.CreateDefaultTravelPolicy();
+        }
+
+        var effectivePolicy = policy;
         var rank = ResolveRank(actor);
         var cityTier = ResolveCityTier(item.Itinerary, effectivePolicy);
         var std = MatchStandard(effectivePolicy, cityTier, rank);
