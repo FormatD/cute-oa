@@ -15,7 +15,8 @@ public sealed record SaveTravelRequest(
     IReadOnlyList<TravelItineraryItem> Itinerary,
     IReadOnlyList<string>? CompanionIds = null,
     IReadOnlyList<string>? Attachments = null,
-    IReadOnlyList<string>? CopyRecipientIds = null);
+    IReadOnlyList<string>? CopyRecipientIds = null,
+    string? OverStandardReason = null);
 
 public sealed class TravelRequest
 {
@@ -34,6 +35,13 @@ public sealed class TravelRequest
     public IReadOnlyList<string> CompanionNames { get; init; } = [];
     public IReadOnlyList<string> Attachments { get; init; } = [];
     public IReadOnlyList<string> CopyRecipientIds { get; init; } = [];
+    public string? EmployeeRank { get; set; }
+    public string? PrimaryCityTier { get; set; }
+    public decimal StandardHotelDailyLimit { get; set; }
+    public decimal StandardMealDailyAllowance { get; set; }
+    public string? StandardTransportation { get; set; }
+    public bool IsOverStandard { get; set; }
+    public string? OverStandardReason { get; set; }
     public int Version { get; init; } = 1;
     public Guid? ProcessDefinitionId { get; set; }
     public string? ProcessDefinitionCode { get; set; }

@@ -52,7 +52,9 @@ public sealed class AnnouncementService(OaDbContext db, DemoData data)
         if (!CanManage(actor)) return ServiceResult<AnnouncementView>.Failure("无公告管理权限。", "AUTH_002");
         var validation = Validate(request.Title, request.Content, request.ExpiresAt);
         if (!validation.IsSuccess) return ServiceResult<AnnouncementView>.Failure(validation.Error!, validation.Code!);
-        var record = new AnnouncementRecord { TenantId = TenantId, Title = request.Title.Trim(), Content = request.Content.Trim(), ExpiresAt = request.ExpiresAt, CreatedBy = actor.Id };
+        var typeValidation = ValidateAnnouncementType(request.Type);
+        if (!typeValidation.IsSuccess) return ServiceResult<AnnouncementView>.Failure(typeValidation.Error!, typeValidation.Code!);
+        var record = new AnnouncementRecord { TenantId = TenantId, Title = request.Title.Trim(), Content = request.Content.Trim(), Type = typeValidation.Value!.Code, ExpiresAt = request.ExpiresAt, CreatedBy = actor.Id };
         db.Announcements.Add(record);
         db.SaveChanges();
         Audit(actor, "ANNOUNCEMENT_CREATED", record.Id, $"创建公告草稿 {record.Title}");
@@ -68,8 +70,11 @@ public sealed class AnnouncementService(OaDbContext db, DemoData data)
         if (request.Version is null || record.Version != request.Version) return ServiceResult<AnnouncementView>.Failure("公告已被其他操作更新，请刷新后重试。", "CONCURRENCY_001");
         var validation = Validate(request.Title, request.Content, request.ExpiresAt);
         if (!validation.IsSuccess) return ServiceResult<AnnouncementView>.Failure(validation.Error!, validation.Code!);
+        var typeValidation = ValidateAnnouncementType(request.Type);
+        if (!typeValidation.IsSuccess) return ServiceResult<AnnouncementView>.Failure(typeValidation.Error!, typeValidation.Code!);
         record.Title = request.Title.Trim();
         record.Content = request.Content.Trim();
+        record.Type = typeValidation.Value!.Code;
         record.ExpiresAt = request.ExpiresAt;
         record.Version++;
         record.UpdatedAt = DateTimeOffset.UtcNow;
@@ -127,7 +132,33 @@ public sealed class AnnouncementService(OaDbContext db, DemoData data)
     {
         var names = db.Users.AsNoTracking().Where(item => item.Id == record.CreatedBy || item.Id == record.PublishedBy).ToDictionary(item => item.Id, item => item.Name);
         var readAt = db.AnnouncementReads.AsNoTracking().Where(item => item.AnnouncementId == record.Id && item.UserId == actor.Id).Select(item => (DateTimeOffset?)item.ReadAt).SingleOrDefault();
-        return new AnnouncementView(record.Id, record.Title, record.Content, record.Status, record.Version, record.CreatedBy, names.GetValueOrDefault(record.CreatedBy, record.CreatedBy), record.CreatedAt, record.UpdatedAt, record.PublishedBy, record.PublishedBy is null ? null : names.GetValueOrDefault(record.PublishedBy, record.PublishedBy), record.PublishedAt, record.WithdrawnAt, record.ExpiresAt, readAt);
+        var typeName = ResolveAnnouncementTypeName(record.Type);
+        return new AnnouncementView(record.Id, record.Title, record.Content, record.Status, record.Version, record.CreatedBy, names.GetValueOrDefault(record.CreatedBy, record.CreatedBy), record.CreatedAt, record.UpdatedAt, record.PublishedBy, record.PublishedBy is null ? null : names.GetValueOrDefault(record.PublishedBy, record.PublishedBy), record.PublishedAt, record.WithdrawnAt, record.ExpiresAt, readAt, record.Type, typeName);
+    }
+
+    private ServiceResult<DictionaryItemConfig> ValidateAnnouncementType(string? typeCode)
+    {
+        var code = string.IsNullOrWhiteSpace(typeCode) ? "COMPANY_NEWS" : typeCode.Trim();
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Dictionary, "AnnouncementType");
+        var dict = configRecord is not null
+            ? System.Text.Json.JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultAnnouncementTypeDict();
+        var item = dict?.Items.FirstOrDefault(i => i.Code.Equals(code, StringComparison.OrdinalIgnoreCase));
+        if (item is null)
+            return ServiceResult<DictionaryItemConfig>.Failure($"公告类型【{code}】不存在。", "VALIDATION_001");
+        if (!item.IsEnabled)
+            return ServiceResult<DictionaryItemConfig>.Failure($"公告类型【{item.Name}】已停用，无法使用。", "VALIDATION_001");
+        return ServiceResult<DictionaryItemConfig>.Success(item);
+    }
+
+    private string ResolveAnnouncementTypeName(string code)
+    {
+        var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Dictionary, "AnnouncementType");
+        var dict = configRecord is not null
+            ? System.Text.Json.JsonSerializer.Deserialize<DictionaryConfig>(configRecord.ContentJson, BusinessConfigurationDefaults.JsonOptions)
+            : BusinessConfigurationDefaults.CreateDefaultAnnouncementTypeDict();
+        var item = dict?.Items.FirstOrDefault(i => i.Code.Equals(code, StringComparison.OrdinalIgnoreCase));
+        return item?.Name ?? code;
     }
 
     private static ServiceResult<bool> Validate(string title, string content, DateTimeOffset? expiresAt)

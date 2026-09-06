@@ -77,6 +77,9 @@ public sealed class SealRequest
     public int? ProcessDefinitionVersion { get; init; }
     public Guid? CurrentFlowInstanceId { get; init; }
     public string? RiskLevel { get; init; }
+    public string? CustodianUserId { get; init; }
+    public int MaxOutDays { get; init; } = 7;
+    public decimal RiskMetric { get; init; } = 1m;
     public Guid? ConfigVersionId { get; init; }
     public int? ConfigVersionNumber { get; init; }
     public string? ConfigSnapshotJson { get; init; }

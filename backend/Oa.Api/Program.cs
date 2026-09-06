@@ -29,6 +29,7 @@ builder.Services.AddScoped<AttendanceService>();
 builder.Services.AddScoped<EmploymentContractService>();
 builder.Services.AddHostedService<ContractAlertWorker>();
 builder.Services.AddHostedService<FlowSlaWorker>();
+builder.Services.AddHostedService<BusinessConfigurationScheduledActivationWorker>();
 builder.Services.AddScoped<WorkCalendarService>();
 builder.Services.AddScoped<IWorkCalendar>(serviceProvider => serviceProvider.GetRequiredService<WorkCalendarService>());
 builder.Services.AddScoped<LeaveService>();
@@ -550,7 +551,10 @@ app.MapPost("/api/v1/files", async (IFormFile? file, HttpRequest request, DemoAu
 {
     var actor = Actor(request, auth);
     if (file is null) return Results.BadRequest(new { code = "FILE_001", message = "请选择要上传的文件。" });
-    return await WriteAsync(request, actor, idempotency, () => service.UploadAsync(actor, file, cancellationToken), true);
+    var attachmentType = request.HasFormContentType && request.Form.TryGetValue("attachmentType", out var formType)
+        ? formType.ToString()
+        : request.Query["attachmentType"].ToString();
+    return await WriteAsync(request, actor, idempotency, () => service.UploadAsync(actor, file, string.IsNullOrWhiteSpace(attachmentType) ? null : attachmentType, cancellationToken), true);
 }).DisableAntiforgery();
 app.MapGet("/api/v1/files/{id:guid}", (Guid id, string resourceType, Guid resourceId, HttpRequest request, DemoAuthService auth, LeaveService leave, ExpenseService expense, TravelService travel, PurchaseService purchase, SealService seal, AttendanceService attendance, EmploymentContractService contracts, KnowledgeDocumentService documents, FileService files) =>
 {

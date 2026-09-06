@@ -32,6 +32,21 @@ public sealed class IdempotencyService(OaDbContext db)
         db.SaveChanges();
     }
 
+    public void LogAudit(string actorId, string action, string resourceType, string resourceId, string summary)
+    {
+        db.AuditLogs.Add(new AuditRecord
+        {
+            TenantId = TenantId,
+            ActorId = actorId,
+            Action = action,
+            ResourceType = resourceType,
+            ResourceId = resourceId,
+            Summary = summary,
+            OccurredAt = DateTimeOffset.UtcNow
+        });
+        db.SaveChanges();
+    }
+
     public IDisposable Acquire(string actorId, string route, string key)
     {
         var lockKey = LockKey(actorId, route, key);

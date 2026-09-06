@@ -32,7 +32,10 @@ public sealed class MultiFactorSettings
         OaPermissions.PersonnelManage,
         OaPermissions.AttendanceManage,
         OaPermissions.ContractManage,
-        OaPermissions.PurchaseManage
+        OaPermissions.PurchaseManage,
+        OaPermissions.SealManage,
+        OaPermissions.DocumentManage,
+        OaPermissions.BusinessConfigManage
     ];
 
     public bool Enabled { get; init; }

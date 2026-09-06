@@ -17,32 +17,27 @@ public static class BusinessConfigurationDefaults
     public static BusinessConfigurationRecord? ResolveEffectiveConfig(OaDbContext? db, string domain, string code, string tenantId = "demo", DateTimeOffset? asOf = null)
     {
         if (db is null) return null;
-        try
+        var targetTime = (asOf ?? DateTimeOffset.UtcNow).ToUniversalTime();
+        var record = db.BusinessConfigurations.AsNoTracking()
+            .Where(item => item.TenantId == tenantId && item.Domain == domain && item.Code == code)
+            .Where(item => item.Status == ConfigurationStatus.Effective || item.Status == ConfigurationStatus.Scheduled)
+            .Where(item => item.EffectiveFrom <= targetTime && (item.EffectiveTo == null || item.EffectiveTo > targetTime))
+            .OrderByDescending(item => item.EffectiveFrom)
+            .ThenByDescending(item => item.Version)
+            .FirstOrDefault();
+
+        if (record is null)
         {
-            var targetTime = (asOf ?? DateTimeOffset.UtcNow).ToUniversalTime();
-            var record = db.BusinessConfigurations.AsNoTracking()
+            EnsureDefaultConfigurations(db, tenantId);
+            record = db.BusinessConfigurations.AsNoTracking()
                 .Where(item => item.TenantId == tenantId && item.Domain == domain && item.Code == code)
-                .Where(item => item.Status == ConfigurationStatus.Effective || item.Status == ConfigurationStatus.Scheduled)
-                .Where(item => item.EffectiveFrom <= targetTime && (item.EffectiveTo == null || item.EffectiveTo > targetTime))
+                .Where(item => item.Status == ConfigurationStatus.Effective)
                 .OrderByDescending(item => item.EffectiveFrom)
+                .ThenByDescending(item => item.Version)
                 .FirstOrDefault();
-
-            if (record is null)
-            {
-                EnsureDefaultConfigurations(db, tenantId);
-                record = db.BusinessConfigurations.AsNoTracking()
-                    .Where(item => item.TenantId == tenantId && item.Domain == domain && item.Code == code)
-                    .Where(item => item.Status == ConfigurationStatus.Effective)
-                    .OrderByDescending(item => item.EffectiveFrom)
-                    .FirstOrDefault();
-            }
-
-            return record;
         }
-        catch
-        {
-            return null;
-        }
+
+        return record;
     }
 
     public static LeavePolicyConfig CreateDefaultLeavePolicy() => new()
@@ -128,7 +123,7 @@ public static class BusinessConfigurationDefaults
         ],
         DefaultPurchaserUserId = "u-admin",
         RequiresAcceptance = true,
-        AcceptanceRoleOrAssignee = "PURCHASE_MANAGE"
+        AcceptanceRoleOrAssignee = "APPLICANT"
     };
 
     public static SealPolicyConfig CreateDefaultSealPolicy() => new()

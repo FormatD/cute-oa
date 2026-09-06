@@ -15,6 +15,8 @@ public sealed record AnnouncementView(
     DateTimeOffset? PublishedAt,
     DateTimeOffset? WithdrawnAt,
     DateTimeOffset? ExpiresAt,
-    DateTimeOffset? ReadAt);
+    DateTimeOffset? ReadAt,
+    string Type = "COMPANY_NEWS",
+    string? TypeName = null);
 
-public sealed record SaveAnnouncementRequest(string Title, string Content, DateTimeOffset? ExpiresAt, int? Version = null);
+public sealed record SaveAnnouncementRequest(string Title, string Content, DateTimeOffset? ExpiresAt, int? Version = null, string? Type = "COMPANY_NEWS");

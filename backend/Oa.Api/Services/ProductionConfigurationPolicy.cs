@@ -56,7 +56,7 @@ public static class ProductionConfigurationPolicy
         }
 
         var requiredPermissions = configuration.GetSection("Authentication:MultiFactor:RequiredPermissions").Get<string[]>() ?? [];
-        foreach (var permission in new[] { OaPermissions.UserManage, OaPermissions.PersonnelExport, OaPermissions.PersonnelManage, OaPermissions.AttendanceManage, OaPermissions.ContractManage, OaPermissions.PurchaseManage, OaPermissions.SealManage, OaPermissions.DocumentManage }.Where(permission => !requiredPermissions.Contains(permission)))
+        foreach (var permission in new[] { OaPermissions.UserManage, OaPermissions.PersonnelExport, OaPermissions.PersonnelManage, OaPermissions.AttendanceManage, OaPermissions.ContractManage, OaPermissions.PurchaseManage, OaPermissions.SealManage, OaPermissions.DocumentManage, OaPermissions.BusinessConfigManage }.Where(permission => !requiredPermissions.Contains(permission)))
             errors.Add($"Authentication:MultiFactor:RequiredPermissions 必须包含 {permission}");
     }
 

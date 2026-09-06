@@ -167,7 +167,7 @@ try
     await using var migrationDb = new OaDbContext(migrationOptions);
     var migrator = migrationDb.Database.GetService<IMigrator>();
     await migrator.MigrateAsync("20260902010000_AddMandatoryInitialPasswordChange");
-    IdentitySeeder.EnsureDemoSeeded(migrationDb);
+    IdentitySeeder.EnsureDemoSeeded(migrationDb, seedContent: false);
     var legacyMonth = new DateOnly(2026, 6, 1);
     migrationDb.AttendanceRecords.Add(new AttendanceRecordEntity
     {
@@ -1477,8 +1477,16 @@ await using (var writeDb = new OaDbContext(options))
         ["u-sun"], [fileId.ToString()], ["u-chen"]));
     if (!travelDraft.IsSuccess || travelDraft.Value!.Days != 4 || travelDraft.Value.CompanionNames.SingleOrDefault() != "孙悦")
         throw new InvalidOperationException(travelDraft.Error ?? "出差草稿、日历天数或同行人快照创建失败。");
+    var overStandardBlocked = travel.Submit(employee, travelDraft.Value.Id);
+    if (overStandardBlocked.IsSuccess || overStandardBlocked.Code != "TRAVEL_OVER_STANDARD")
+        throw new InvalidOperationException("超标且未填写超标原因未被正确阻断。");
+    var updateWithReason = travel.Update(employee, travelDraft.Value.Id, travelDraft.Value.Version, new SaveTravelRequest(
+        "客户现场需求确认和方案汇报", 5600m,
+        [new TravelItineraryItem("上海", travelStart, travelStart.AddDays(3), "高铁", "客户访谈、方案评审与项目计划确认")],
+        ["u-sun"], [fileId.ToString()], ["u-chen"], OverStandardReason: "重要客户现场汇报，需入住临近会议酒店"));
+    if (!updateWithReason.IsSuccess) throw new InvalidOperationException(updateWithReason.Error ?? "补充超标原因失败。");
     var travelSubmitted = travel.Submit(employee, travelDraft.Value.Id);
-    if (!travelSubmitted.IsSuccess || travelSubmitted.Value!.Tasks.Count != 2 || travelSubmitted.Value.ProcessDefinitionCode != "TRAVEL_DEFAULT")
+    if (!travelSubmitted.IsSuccess || travelSubmitted.Value!.Tasks.Count != 2 || travelSubmitted.Value.ProcessDefinitionCode != "TRAVEL_DEFAULT" || !travelSubmitted.Value.IsOverStandard || travelSubmitted.Value.PrimaryCityTier != "一线城市")
         throw new InvalidOperationException(travelSubmitted.Error ?? "超过 3 天出差未按直属上级和总经理两级审批路由。");
     if (!travel.Approve(data.GetEmployee("u-li"), travelSubmitted.Value.Tasks[0].Id, "行程安排合理").IsSuccess ||
         !travel.Approve(data.GetEmployee("u-wang"), travelSubmitted.Value.Tasks[1].Id, "批准出差").IsSuccess || travelSubmitted.Value.Status != TravelStatus.Approved)
@@ -1489,10 +1497,10 @@ await using (var writeDb = new OaDbContext(options))
     travelId = travelSubmitted.Value.Id;
 
     var shortStart = travelStart.AddDays(20);
-    var shortDraft = travel.CreateDraft(employee, new SaveTravelRequest("短期项目启动会", 800m, [new TravelItineraryItem("苏州", shortStart, shortStart, "高铁", "参加项目启动会")]));
+    var shortDraft = travel.CreateDraft(employee, new SaveTravelRequest("短期项目启动会", 400m, [new TravelItineraryItem("苏州", shortStart, shortStart, "高铁", "参加项目启动会")]));
     var shortSubmitted = shortDraft.IsSuccess ? travel.Submit(employee, shortDraft.Value!.Id) : ServiceResult<TravelRequest>.Failure(shortDraft.Error!);
     if (!shortSubmitted.IsSuccess || shortSubmitted.Value!.Tasks.Count != 1 || shortSubmitted.Value.Tasks[0].AssigneeId != "u-li" || !travel.Withdraw(employee, shortSubmitted.Value.Id).IsSuccess || shortSubmitted.Value.Status != TravelStatus.Withdrawn)
-        throw new InvalidOperationException("3 天内出差路由或未审批撤回失败。");
+        throw new InvalidOperationException(shortSubmitted.Error ?? "3 天内出差路由或未审批撤回失败。");
     withdrawnTravelId = shortSubmitted.Value.Id;
 
     var overlapDraft = travel.CreateDraft(employee, new SaveTravelRequest("重复时间验证", 100m, [new TravelItineraryItem("上海", travelStart.AddDays(1), travelStart.AddDays(2), "高铁", "验证重复出差")]))!;
@@ -2674,6 +2682,104 @@ await using (var configDb = new OaDbContext(options))
     {
         throw new InvalidOperationException($"业务配置审计记录不完整，现有审计动作：{string.Join(", ", auditActions)}。");
     }
+
+    // 8. WP-A 状态机严格单向流转与纯查询测试
+    // 8.1 仅草稿可发布：尝试重新发布已下线的 publishedV1，必须返回 CONFIG_002
+    var illegalRepublish = configService.Publish(admin, publishedV1.Value.Id, new PublishBusinessConfigurationRequest(nowUtc, null, 999));
+    if (illegalRepublish.IsSuccess || illegalRepublish.Code != "CONFIG_002")
+        throw new InvalidOperationException("已下线配置被允许重新发布，违反状态机约束。");
+
+    // 8.2 草稿不可下线
+    var unpublishableDraft = configService.CreateDraft(admin, new CreateBusinessConfigurationRequest(
+        ConfigurationDomains.Dictionary, "DRAFT_RETIRE_TEST", "草稿下线测试", null, nowUtc, null, """{"items":[]}"""));
+    var illegalDraftRetire = configService.Retire(admin, unpublishableDraft.Value!.Id, new RetireBusinessConfigurationRequest(nowUtc, unpublishableDraft.Value.ConcurrencyVersion));
+    if (illegalDraftRetire.IsSuccess || illegalDraftRetire.Code != "CONFIG_002")
+        throw new InvalidOperationException("草稿状态配置被允许下线，违反状态机约束。");
+
+    // 8.3 已下线不可重复下线
+    var duplicateRetire = configService.Retire(admin, publishedV1.Value.Id, new RetireBusinessConfigurationRequest(nowUtc, 999));
+    if (duplicateRetire.IsSuccess || duplicateRetire.Code != "CONFIG_002")
+        throw new InvalidOperationException("已下线配置被允许重复下线，违反状态机约束。");
+
+    // 8.4 GetEffective 是纯查询，绝不写库
+    var nonExistentQuery = configService.GetEffective("NON_EXISTENT_DOMAIN", "NON_EXISTENT_CODE");
+    if (nonExistentQuery != null)
+        throw new InvalidOperationException("纯查询不存在的有效配置应返回 null。");
+    if (configDb.BusinessConfigurations.Any(c => c.Domain == "NON_EXISTENT_DOMAIN"))
+        throw new InvalidOperationException("GetEffective 纯查询触发了写入，违反零副作用约束。");
+
+    // 8.5 定时生效后台 Worker 方法测试
+    var schedTestDraft = configService.CreateDraft(admin, new CreateBusinessConfigurationRequest(
+        ConfigurationDomains.Dictionary, "SCHED_TEST_DICT", "定时生效测试", null, nowUtc.AddMinutes(5), null, """{"items":[]}"""));
+    var schedPublished = configService.Publish(admin, schedTestDraft.Value!.Id, new PublishBusinessConfigurationRequest(nowUtc.AddMinutes(5), null, schedTestDraft.Value.ConcurrencyVersion));
+    if (!schedPublished.IsSuccess || schedPublished.Value!.Status != ConfigurationStatus.Scheduled)
+        throw new InvalidOperationException("定时待生效发布失败。");
+    var schedRecord = configDb.BusinessConfigurations.Single(c => c.Id == schedTestDraft.Value.Id);
+    schedRecord.EffectiveFrom = nowUtc.AddMinutes(-1);
+    configDb.SaveChanges();
+    var activatedCount = configService.ActivateScheduledConfigurations(DateTimeOffset.UtcNow);
+    if (activatedCount < 1)
+        throw new InvalidOperationException("定时生效激活调度器未生效已到期配置。");
+    var postActive = configService.Get(admin, schedTestDraft.Value.Id).Value!;
+    if (postActive.Status != ConfigurationStatus.Effective)
+        throw new InvalidOperationException("已到期待生效配置状态未转换为 Effective。");
+
+    // 9. WP-B 业务域规则执行闭环测试
+    // 9.1 WP-B1: 请假跨年拦截 (AllowCrossYear=false)
+    var crossYearDraft = leaveService.CreateDraft(zhang, new CreateLeaveRequest(
+        LeaveType.Personal, new DateOnly(2026, 12, 30), LeavePeriod.FullDay, new DateOnly(2027, 1, 2), LeavePeriod.FullDay, "跨年请假验证", []));
+    if (!crossYearDraft.IsSuccess)
+        throw new InvalidOperationException("跨年请假草稿创建失败。");
+    var crossYearSubmit = leaveService.Submit(zhang, crossYearDraft.Value!.Id);
+    if (crossYearSubmit.IsSuccess || crossYearSubmit.Code != "LEAVE_004")
+        throw new InvalidOperationException("配置禁止跨年后，跨自然年请假未被拦截。");
+
+    // 9.2 WP-B2: 报销未启用类别拦截与超额阻断
+    var expenseService = new ExpenseService(configData, configDb);
+    var invalidCategoryExpense = expenseService.CreateDraft(zhang, new CreateExpenseClaim(
+        null, "张晨", "6222026000001234", "测试银行", "未启用类别报销",
+        [new ExpenseItem(DateOnly.FromDateTime(DateTime.Today), "非法国外考察费", 500m, "未在配置中的类别", "INV-ILLEGAL-01", ["f1"])]));
+    if (invalidCategoryExpense.IsSuccess || invalidCategoryExpense.Code != "EXP_005")
+        throw new InvalidOperationException("未启用费用类别报销申请未被拦截。");
+
+    var overLimitExpense = expenseService.CreateDraft(zhang, new CreateExpenseClaim(
+        null, "张晨", "6222026000001234", "测试银行", null,
+        [new ExpenseItem(DateOnly.FromDateTime(DateTime.Today), "餐饮招待", 2500m, "超额单笔餐费无原因", "INV-OVER-01", ["f2"])]));
+    if (overLimitExpense.IsSuccess || overLimitExpense.Code != "EXP_007")
+        throw new InvalidOperationException("餐饮招待单笔超限且未填写说明未被拦截。");
+
+    // 9.3 WP-B5: 用印外带超限拦截 (MaxOutDays) 与停用印章
+    var overDaysSeal = sealService.CreateDraft(zhang, new SaveSealRequest(
+        "外带超期测试", "合同协议", "补充协议", "公章", 1, true,
+        DateOnly.FromDateTime(DateTime.Today), DateOnly.FromDateTime(DateTime.Today).AddDays(15), "张晨", "超期借出", ["c.pdf"], null));
+    if (overDaysSeal.IsSuccess || overDaysSeal.Code != "SEAL_002")
+        throw new InvalidOperationException("用印外带天数超过配置上限未被拦截。");
+
+    var disabledOutSeal = sealService.CreateDraft(zhang, new SaveSealRequest(
+        "禁止外带测试", "合同协议", "财务对账单", "财务专用章", 1, true,
+        DateOnly.FromDateTime(DateTime.Today), DateOnly.FromDateTime(DateTime.Today).AddDays(1), "张晨", "财务章外带", ["c.pdf"], null));
+    if (disabledOutSeal.IsSuccess || disabledOutSeal.Code != "SEAL_006")
+        throw new InvalidOperationException("禁止外带印章申请外带未被拦截。");
+
+    // 9.4 WP-B6: 公告与合同字典停用项拦截
+    var announcementService = new AnnouncementService(configDb, configData);
+    var invalidAnnouncement = announcementService.Create(admin, new SaveAnnouncementRequest("非法类型公告", "内容", null, null, "NON_EXISTENT_TYPE"));
+    if (invalidAnnouncement.IsSuccess || invalidAnnouncement.Code != "VALIDATION_001")
+        throw new InvalidOperationException("不存在或未启用的公告类型未被拦截。");
+
+    var testFiles = new FileService(configDb, new TestWebHostEnvironment { ContentRootPath = fileRoot, WebRootPath = fileRoot }, new ConfigurationBuilder().AddInMemoryCollection().Build(), new TestFileMalwareScanner(FileScanStatus.Clean));
+    var contractService = new EmploymentContractService(configDb, configData, testFiles, new NotificationService(configDb), new ConfigurationBuilder().Build());
+    var invalidContract = contractService.Create(admin, new SaveEmploymentContractRequest(
+        "u-zhang", "INVALID_CONTRACT_TYPE", DateOnly.FromDateTime(DateTime.Today), DateOnly.FromDateTime(DateTime.Today),
+        DateOnly.FromDateTime(DateTime.Today).AddYears(1), null, null, "北京", "开发工程师", null, null, null, 1, "测试创建"));
+    if (invalidContract.IsSuccess || invalidContract.Code != "CONTRACT_001")
+        throw new InvalidOperationException("不存在或未启用的合同类型未被拦截。");
+
+    // 10. WP-C: 安全与权限 (BUSINESS_CONFIG_MANAGE 必须强制 MFA)
+    var mfaConfig = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["Auth:Mfa:Enabled"] = "true" }).Build();
+    var mfaSettings = MultiFactorSettings.From(mfaConfig);
+    if (!mfaSettings.RequiredPermissions.Contains(OaPermissions.BusinessConfigManage))
+        throw new InvalidOperationException("业务参数配置管理权限未强制纳入 MFA 保护策略。");
 }
 
 // -------------------------------------------------------------

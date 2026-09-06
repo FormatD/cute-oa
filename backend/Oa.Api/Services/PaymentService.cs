@@ -185,7 +185,7 @@ public sealed class PaymentService
                 return ServiceResult<PaymentTransaction>.Failure("尚未登记采购订单，无法付款。", "STATE_001");
 
             var contractAmount = order.ActualAmount;
-            var isAccepted = db.PurchaseReceipts.Any(r => r.TenantId == TenantId && r.PurchaseRequestId == purchaseId && r.Result == "ALL_ACCEPTED") || status == PurchaseStatus.Received;
+            var isAccepted = !purchase.RequiresAcceptance || db.PurchaseReceipts.Any(r => r.TenantId == TenantId && r.PurchaseRequestId == purchaseId && r.Result == "ALL_ACCEPTED") || status == PurchaseStatus.Received;
 
             var limitRate = purchase.PrepaymentLimitRate > 0 ? purchase.PrepaymentLimitRate : 0.50m;
             if (!isAccepted)
