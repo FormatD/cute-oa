@@ -4017,6 +4017,108 @@ await using (var f4Db = new OaDbContext(options))
     var auditCount = f4Db.AuditLogs.Count(a => a.TenantId == "demo" &&
         (a.Action == "EXPENSE_PAYMENT_REGISTERED" || a.Action == "PURCHASE_PAYMENT_REGISTERED" || a.Action == "FINANCE_EXPORT"));
     if (auditCount < 3) throw new InvalidOperationException("PG财务敏感操作审计日志记录不完整。");
+
+    // ---------------------------------------------------------
+    // 6. WP-A 财务权限与敏感数据保护专项测试
+    // ---------------------------------------------------------
+    var hrEmployee = f4Data.GetEmployee("u-sun");
+    var engineeringManager = f4Data.GetEmployee("u-li");
+
+    // 6.1 付款流水权限边界（五类用户用例）
+    // (a) 本人申请人（employee）：可查，但敏感字段脱敏（企业付款账号、银行流水号脱敏）
+    var expPaymentsSelf = paymentService.GetPayments(employee, "Expense", claimId);
+    if (!expPaymentsSelf.IsSuccess) throw new InvalidOperationException($"本人查看报销付款流水失败：{expPaymentsSelf.Error}");
+    var selfItem = expPaymentsSelf.Value!.First();
+    if (!selfItem.TransactionNumber.Contains('*') || !string.IsNullOrEmpty(selfItem.PayerAccount) && selfItem.PayerAccount.Length > 4 && !selfItem.PayerAccount.Contains('*'))
+        throw new InvalidOperationException($"普通员工查看付款流水未对敏感账号或银行流水号做脱敏处理：Tx={selfItem.TransactionNumber}, Payer={selfItem.PayerAccount}");
+
+    // (b) 直属上级/审批人（engineeringManager）：可查且脱敏
+    var expPaymentsMgr = paymentService.GetPayments(engineeringManager, "Expense", claimId);
+    if (!expPaymentsMgr.IsSuccess) throw new InvalidOperationException($"直属审批人查看报销付款流水失败：{expPaymentsMgr.Error}");
+
+    // (c) 无关员工（hrEmployee）：横向越权拦截，返回 AUTH_002
+    var expPaymentsUnrelated = paymentService.GetPayments(hrEmployee, "Expense", claimId);
+    if (expPaymentsUnrelated.IsSuccess || expPaymentsUnrelated.Code != "AUTH_002")
+        throw new InvalidOperationException($"无关员工查看他人付款流水未被拦截：IsSuccess={expPaymentsUnrelated.IsSuccess}, Code={expPaymentsUnrelated.Code}");
+
+    // (d) 财务人员（financeOfficer）：可查且明文显示银行流水号与对公付款账户
+    var expPaymentsFin = paymentService.GetPayments(financeOfficer, "Expense", claimId);
+    if (!expPaymentsFin.IsSuccess || expPaymentsFin.Value!.First().TransactionNumber != txExp1)
+        throw new InvalidOperationException("财务专员查看付款流水失败或流水号被意外脱敏。");
+
+    var purchaser = new Employee(
+        "u-purchaser",
+        "采购专员",
+        "员工",
+        "engineering",
+        "研发部",
+        "u-wang",
+        3,
+        "ACTIVE",
+        Roles: ["员工"],
+        Permissions: [OaPermissions.PurchaseManage]);
+
+    // (e) 采购管理员（仅 PURCHASE_MANAGE，无 EXPENSE_PAY）：对于非本人报销单应被拦截
+    var expPaymentsAdmin = paymentService.GetPayments(purchaser, "Expense", claimId);
+    if (expPaymentsAdmin.IsSuccess || expPaymentsAdmin.Code != "AUTH_002")
+        throw new InvalidOperationException("无财务权限的采购管理员查看他人报销付款流水未被拦截。");
+
+    // (f) 非法业务类型拒绝，返回 400 PARAM_INVALID
+    var expPaymentsInvalid = paymentService.GetPayments(financeOfficer, "InvalidBusinessType", claimId);
+    if (expPaymentsInvalid.IsSuccess || expPaymentsInvalid.Code != "PARAM_INVALID")
+        throw new InvalidOperationException("未知业务类型查询付款流水未返回 PARAM_INVALID。");
+
+    // 6.2 采购付款权限收紧（落实财务与采购职责分离）
+    var purPayAttempt = paymentService.RegisterPurchasePayment(purchaser, pId, new CreatePaymentTransactionRequest(
+        BatchTitle: "越权支付尝试",
+        PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+        PaymentMethod: PaymentMethodNames.BankTransfer,
+        PayerAccount: "955880001",
+        PayeeName: "戴尔(中国)有限公司",
+        PayeeAccount: "110022334455",
+        PayeeBank: "花旗银行",
+        TransactionNumber: $"TX-UNAUTH-{testRunId}",
+        PaidAmount: 100m,
+        FeeAmount: 0m,
+        ProofAttachmentId: null,
+        Remarks: "尝试越权"));
+    if (purPayAttempt.IsSuccess || purPayAttempt.Code != "AUTH_002")
+        throw new InvalidOperationException($"无 EXPENSE_PAY 的采购管理员登记采购付款未被拦截：IsSuccess={purPayAttempt.IsSuccess}, Code={purPayAttempt.Code}");
+
+    // 6.3 预算查询数据范围防旁路测试
+    // 创建财务部预算池用于对比
+    var finBudgetRes = budgetService.Create(financeManager, new CreateBudgetRequest(
+        DepartmentId: "finance",
+        Year: curYear,
+        Month: 0,
+        ExpenseCategory: null,
+        ProjectId: null,
+        AllocatedAmount: 80000m));
+    var finBudgetId = finBudgetRes.IsSuccess ? finBudgetRes.Value!.Id : f4Db.Budgets.First(b => b.TenantId == "demo" && b.DepartmentId == "finance" && b.Year == curYear && b.Month == 0).Id;
+
+    // (a) 普通员工指定 departmentId = "finance" 试图跨部门查询，结果不得返回财务部预算
+    var empBudgets = budgetService.List(employee, departmentId: "finance");
+    if (empBudgets.Any(b => b.DepartmentId == "finance"))
+        throw new InvalidOperationException("普通员工通过 departmentId 筛选参数成功绕过数据范围读取了财务部预算。");
+
+    // (b) 普通员工直接根据 ID 查看财务部预算，必须返回 AUTH_002
+    var empGetFinBudget = budgetService.Get(employee, finBudgetId);
+    if (empGetFinBudget.IsSuccess || empGetFinBudget.Code != "AUTH_002")
+        throw new InvalidOperationException("普通员工通过 ID 越权查看财务部预算未被拦截。");
+
+    // (c) 普通员工查看财务部预算流水，必须返回 AUTH_002
+    var empGetFinTx = budgetService.GetTransactions(employee, finBudgetId, 1, 10);
+    if (empGetFinTx.IsSuccess || empGetFinTx.Code != "AUTH_002")
+        throw new InvalidOperationException("普通员工越权查看财务部预算流水未被拦截。");
+
+    // (d) 普通员工预检其他部门预算，不得泄露该部门的真实编制与占用额度
+    var empCheckFin = budgetService.Check(employee, new BudgetCheckRequest("finance", null, 1000m, curYear, 0));
+    if (empCheckFin.AllocatedAmount > 0 || empCheckFin.AvailableAmount > 0)
+        throw new InvalidOperationException("普通员工跨部门预检预算泄露了财务部实际预算额度。");
+
+    // (e) 财务权限不外溢：财务专员无权查看人事档案
+    if (f4Data.CanView(financeOfficer, employee, "Personnel"))
+        throw new InvalidOperationException("财务权限外溢到了人事档案数据范围。");
 }
 
 Console.WriteLine("PostgreSQL persistence integration passed.");

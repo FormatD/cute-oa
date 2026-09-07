@@ -703,7 +703,17 @@ app.MapPost("/api/v1/purchases/{id:guid}/payments", (Guid id, CreatePaymentTrans
 app.MapPost("/api/v1/purchase-requests/{id:guid}/payments", (Guid id, CreatePaymentTransactionRequest body, HttpRequest request, DemoAuthService auth, PaymentService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.RegisterPurchasePayment(actor, id, body), created: true, atomic: true, fingerprintPayload: new { id, body }); });
 app.MapGet("/api/v1/purchases/{id:guid}/reconciliation", (Guid id, HttpRequest request, DemoAuthService auth, PurchaseService service) => { var result = service.GetReconciliation(Actor(request, auth), id); return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: result.Code == "AUTH_002" ? StatusCodes.Status403Forbidden : StatusCodes.Status404NotFound); });
 app.MapGet("/api/v1/purchase-requests/{id:guid}/reconciliation", (Guid id, HttpRequest request, DemoAuthService auth, PurchaseService service) => { var result = service.GetReconciliation(Actor(request, auth), id); return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: result.Code == "AUTH_002" ? StatusCodes.Status403Forbidden : StatusCodes.Status404NotFound); });
-app.MapGet("/api/v1/payments/{businessType}/{businessId:guid}", (string businessType, Guid businessId, HttpRequest request, DemoAuthService auth, PaymentService service) => Results.Ok(service.GetPayments(Actor(request, auth), businessType, businessId)));
+app.MapGet("/api/v1/payments/{businessType}/{businessId:guid}", (string businessType, Guid businessId, HttpRequest request, DemoAuthService auth, PaymentService service) =>
+{
+    var result = service.GetPayments(Actor(request, auth), businessType, businessId);
+    return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: result.Code switch
+    {
+        "PARAM_INVALID" => StatusCodes.Status400BadRequest,
+        "AUTH_002" => StatusCodes.Status403Forbidden,
+        "DATA_001" => StatusCodes.Status404NotFound,
+        _ => StatusCodes.Status400BadRequest
+    });
+});
 app.MapGet("/api/v1/finance/export/purchases", (string? applicantId, string? departmentId, DateOnly? startDate, DateOnly? endDate, string? paymentStatus, HttpRequest request, DemoAuthService auth, PaymentService service) =>
 {
     var actor = Actor(request, auth);
@@ -740,7 +750,10 @@ app.MapPut("/api/v1/budgets/{id:guid}/adjust", (Guid id, AdjustBudgetRequest bod
     return Write(request, actor, idempotency, () => service.Adjust(actor, id, body), atomic: true, fingerprintPayload: new { id, body });
 });
 app.MapGet("/api/v1/budgets/{id:guid}/transactions", (Guid id, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, BudgetService service) =>
-    Results.Ok(service.GetTransactions(Actor(request, auth), id, page, pageSize)));
+{
+    var result = service.GetTransactions(Actor(request, auth), id, page, pageSize);
+    return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: result.Code == "AUTH_002" ? StatusCodes.Status403Forbidden : StatusCodes.Status404NotFound);
+});
 app.MapPost("/api/v1/budgets/check", (BudgetCheckRequest body, HttpRequest request, DemoAuthService auth, BudgetService service) =>
     Results.Ok(service.Check(Actor(request, auth), body)));
 

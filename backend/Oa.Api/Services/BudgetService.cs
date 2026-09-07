@@ -18,25 +18,67 @@ public sealed class BudgetService
         this.db = db;
     }
 
+    private HashSet<string>? GetVisibleDepartmentIds(Employee actor)
+    {
+        if (CanViewAllBudgets(actor))
+            return null;
+
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            actor.DepartmentId,
+            actor.DepartmentName
+        };
+
+        if (actor.Role == "部门负责人" || actor.Role == "总经理" || data.HasRole(actor, "部门负责人") || data.HasRole(actor, "总经理"))
+        {
+            foreach (var dept in data.Departments)
+            {
+                if (data.IsDepartmentWithin(dept.Id, actor.DepartmentId))
+                {
+                    set.Add(dept.Id);
+                    set.Add(dept.Name);
+                }
+            }
+        }
+
+        return set;
+    }
+
     public IReadOnlyList<Budget> List(Employee actor, string? departmentId = null, int? year = null, int? month = null, string? expenseCategory = null, string? status = null)
     {
+        var visibleDepts = GetVisibleDepartmentIds(actor);
+
         if (db is not null)
         {
             var query = db.Budgets.AsNoTracking().Where(b => b.TenantId == TenantId);
 
-            if (!string.IsNullOrWhiteSpace(departmentId))
-                query = query.Where(b => b.DepartmentId == departmentId);
-            else if (!CanViewAllBudgets(actor))
-                query = query.Where(b => b.DepartmentId == actor.DepartmentName || b.DepartmentId == actor.DepartmentId);
+            if (visibleDepts is not null)
+            {
+                if (!string.IsNullOrWhiteSpace(departmentId))
+                {
+                    if (!visibleDepts.Contains(departmentId.Trim()))
+                        return [];
+                    query = query.Where(b => b.DepartmentId == departmentId.Trim());
+                }
+                else
+                {
+                    query = query.Where(b => visibleDepts.Contains(b.DepartmentId));
+                }
+            }
+            else
+            {
+                if (!string.IsNullOrWhiteSpace(departmentId))
+                    query = query.Where(b => b.DepartmentId == departmentId.Trim());
+            }
 
             if (year.HasValue)
                 query = query.Where(b => b.Year == year.Value);
             if (month.HasValue)
                 query = query.Where(b => b.Month == month.Value);
             if (!string.IsNullOrWhiteSpace(expenseCategory))
-                query = query.Where(b => b.ExpenseCategory == expenseCategory);
+                query = query.Where(b => b.ExpenseCategory == expenseCategory.Trim());
             if (!string.IsNullOrWhiteSpace(status))
-                query = query.Where(b => b.Status == status);
+                query = query.Where(b => b.Status == status.Trim());
 
             return query.OrderByDescending(b => b.Year)
                 .ThenBy(b => b.Month)
@@ -46,17 +88,31 @@ public sealed class BudgetService
         }
 
         var list = _memoryBudgets.AsEnumerable();
-        if (!string.IsNullOrWhiteSpace(departmentId))
-            list = list.Where(b => b.DepartmentId == departmentId);
-        else if (!CanViewAllBudgets(actor))
-            list = list.Where(b => b.DepartmentId == actor.DepartmentName || b.DepartmentId == actor.DepartmentId);
+        if (visibleDepts is not null)
+        {
+            if (!string.IsNullOrWhiteSpace(departmentId))
+            {
+                if (!visibleDepts.Contains(departmentId.Trim()))
+                    return [];
+                list = list.Where(b => b.DepartmentId == departmentId.Trim());
+            }
+            else
+            {
+                list = list.Where(b => visibleDepts.Contains(b.DepartmentId));
+            }
+        }
+        else
+        {
+            if (!string.IsNullOrWhiteSpace(departmentId))
+                list = list.Where(b => b.DepartmentId == departmentId.Trim());
+        }
 
         if (year.HasValue)
             list = list.Where(b => b.Year == year.Value);
         if (month.HasValue)
             list = list.Where(b => b.Month == month.Value);
         if (!string.IsNullOrWhiteSpace(expenseCategory))
-            list = list.Where(b => b.ExpenseCategory == expenseCategory);
+            list = list.Where(b => b.ExpenseCategory == expenseCategory.Trim());
         if (!string.IsNullOrWhiteSpace(status) && Enum.TryParse<BudgetStatus>(status, true, out var s))
             list = list.Where(b => b.Status == s);
 
@@ -77,7 +133,9 @@ public sealed class BudgetService
         }
 
         if (budget is null) return ServiceResult<Budget>.Failure("预算池不存在。", "DATA_001");
-        if (!CanViewAllBudgets(actor) && budget.DepartmentId != actor.DepartmentName && budget.DepartmentId != actor.DepartmentId)
+
+        var visibleDepts = GetVisibleDepartmentIds(actor);
+        if (visibleDepts is not null && !visibleDepts.Contains(budget.DepartmentId))
             return ServiceResult<Budget>.Failure("无权查看该部门预算池。", "AUTH_002");
 
         return ServiceResult<Budget>.Success(budget);
@@ -282,9 +340,25 @@ public sealed class BudgetService
 
     public BudgetCheckResult Check(Employee actor, BudgetCheckRequest request)
     {
+        var targetDept = string.IsNullOrWhiteSpace(request.DepartmentId) ? (actor.DepartmentId ?? string.Empty) : request.DepartmentId.Trim();
+        var visibleDepts = GetVisibleDepartmentIds(actor);
+        if (visibleDepts is not null && !visibleDepts.Contains(targetDept))
+        {
+            return new BudgetCheckResult(
+                IsAllowed: false,
+                IsExceeded: true,
+                AvailableAmount: 0m,
+                AllocatedAmount: 0m,
+                CommittedAmount: 0m,
+                ActualAmount: 0m,
+                RequestedAmount: request.Amount,
+                WarningMessage: "无权预检该部门预算。",
+                BlockWhenExceeded: true);
+        }
+
         var targetYear = request.Year ?? DateTime.Today.Year;
         var targetMonth = request.Month ?? DateTime.Today.Month;
-        var matching = FindMatchingBudget(TenantId, request.DepartmentId, request.ExpenseCategory, targetYear, targetMonth);
+        var matching = FindMatchingBudget(TenantId, targetDept, request.ExpenseCategory, targetYear, targetMonth);
 
         var configRecord = BusinessConfigurationDefaults.ResolveEffectiveConfig(db, ConfigurationDomains.Expense, "ExpensePolicy");
         ExpensePolicyConfig? policy = null;
@@ -593,8 +667,26 @@ public sealed class BudgetService
         return ServiceResult<bool>.Success(true);
     }
 
-    public PagedResponse<BudgetTransaction> GetTransactions(Employee actor, Guid budgetId, int? requestedPage, int? requestedPageSize)
+    public ServiceResult<PagedResponse<BudgetTransaction>> GetTransactions(Employee actor, Guid budgetId, int? requestedPage, int? requestedPageSize)
     {
+        Budget? budget;
+        if (db is not null)
+        {
+            var bRecord = db.Budgets.AsNoTracking().SingleOrDefault(b => b.TenantId == TenantId && b.Id == budgetId);
+            budget = bRecord is null ? null : MapToDomain(bRecord);
+        }
+        else
+        {
+            budget = _memoryBudgets.SingleOrDefault(b => b.Id == budgetId);
+        }
+
+        if (budget is null)
+            return ServiceResult<PagedResponse<BudgetTransaction>>.Failure("预算池不存在。", "DATA_001");
+
+        var visibleDepts = GetVisibleDepartmentIds(actor);
+        if (visibleDepts is not null && !visibleDepts.Contains(budget.DepartmentId))
+            return ServiceResult<PagedResponse<BudgetTransaction>>.Failure("无权查看该部门预算变动流水。", "AUTH_002");
+
         var pageSize = Math.Clamp(requestedPageSize ?? 20, 1, 100);
 
         if (db is not null)
@@ -624,7 +716,7 @@ public sealed class BudgetService
                 })
                 .ToList();
 
-            return new PagedResponse<BudgetTransaction>(items, total, page, pageSize, totalPages);
+            return ServiceResult<PagedResponse<BudgetTransaction>>.Success(new PagedResponse<BudgetTransaction>(items, total, page, pageSize, totalPages));
         }
 
         var memSource = _memoryTransactions.Where(t => t.BudgetId == budgetId).OrderByDescending(t => t.CreatedAt).ToList();
@@ -632,7 +724,7 @@ public sealed class BudgetService
         var memTotalPages = Math.Max(1, (int)Math.Ceiling(memTotal / (decimal)pageSize));
         var memPage = Math.Clamp(requestedPage ?? 1, 1, memTotalPages);
         var paged = memSource.Skip((memPage - 1) * pageSize).Take(pageSize).ToList();
-        return new PagedResponse<BudgetTransaction>(paged, memTotal, memPage, pageSize, memTotalPages);
+        return ServiceResult<PagedResponse<BudgetTransaction>>.Success(new PagedResponse<BudgetTransaction>(paged, memTotal, memPage, pageSize, memTotalPages));
     }
 
     private BudgetRecord? FindMatchingBudgetRecord(string tenantId, string departmentId, string? expenseCategory, int year, int month)
@@ -688,9 +780,9 @@ public sealed class BudgetService
 
     private bool CanManageBudgets(Employee actor) =>
         data.HasPermission(actor, OaPermissions.ExpenseAllView) ||
-        data.HasPermission(actor, OaPermissions.OrgManage) ||
         actor.Role == "总经理" ||
-        actor.Role == "财务经理";
+        actor.Role == "财务经理" ||
+        data.HasRole(actor, "财务经理");
 
     private bool CanViewAllBudgets(Employee actor) =>
         CanManageBudgets(actor) ||

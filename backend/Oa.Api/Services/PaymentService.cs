@@ -160,7 +160,7 @@ public sealed class PaymentService
 
     public ServiceResult<PaymentTransaction> RegisterPurchasePayment(Employee actor, Guid purchaseId, CreatePaymentTransactionRequest request)
     {
-        if (!data.HasPermission(actor, OaPermissions.ExpensePay) && !data.HasPermission(actor, OaPermissions.PurchaseManage))
+        if (!data.HasPermission(actor, OaPermissions.ExpensePay))
             return ServiceResult<PaymentTransaction>.Failure("无采购付款登记权限。", "AUTH_002");
 
         if (request.PaidAmount <= 0)
@@ -298,18 +298,54 @@ public sealed class PaymentService
         return ServiceResult<PaymentTransaction>.Success(memTx);
     }
 
-    public IReadOnlyList<PaymentTransactionListItem> GetPayments(Employee actor, string businessType, Guid businessId)
+    public ServiceResult<IReadOnlyList<PaymentTransactionListItem>> GetPayments(Employee actor, string businessType, Guid businessId)
     {
+        if (businessType != "Expense" && businessType != "Purchase")
+            return ServiceResult<IReadOnlyList<PaymentTransactionListItem>>.Failure("不支持的业务类型。", "PARAM_INVALID");
+
         var canViewRawAccount = data.HasPermission(actor, OaPermissions.ExpensePay) || data.HasPermission(actor, OaPermissions.ExpenseAllView);
 
         if (db is not null)
         {
+            if (businessType == "Expense")
+            {
+                var claim = db.ExpenseClaims.AsNoTracking().SingleOrDefault(x => x.TenantId == TenantId && x.Id == businessId);
+                if (claim is null)
+                    return ServiceResult<IReadOnlyList<PaymentTransactionListItem>>.Failure("报销单不存在。", "DATA_001");
+
+                var canAccess = claim.ApplicantId == actor.Id ||
+                    canViewRawAccount ||
+                    db.ExpenseTasks.Any(t => t.TenantId == TenantId && t.ExpenseClaimId == businessId && t.AssigneeId == actor.Id) ||
+                    db.FlowCopyRecipients.Any(c => c.TenantId == TenantId && c.BusinessType == "Expense" && c.BusinessId == businessId && c.RecipientId == actor.Id && c.AvailableAt != null) ||
+                    data.CanView(actor, data.GetEmployee(claim.ApplicantId), "Expense");
+
+                if (!canAccess)
+                    return ServiceResult<IReadOnlyList<PaymentTransactionListItem>>.Failure("无权查看该报销单付款流水。", "AUTH_002");
+            }
+            else if (businessType == "Purchase")
+            {
+                var purchase = db.PurchaseRequests.AsNoTracking().SingleOrDefault(x => x.TenantId == TenantId && x.Id == businessId);
+                if (purchase is null)
+                    return ServiceResult<IReadOnlyList<PaymentTransactionListItem>>.Failure("采购申请不存在。", "DATA_001");
+
+                var canAccess = purchase.ApplicantId == actor.Id ||
+                    purchase.PurchaserUserId == actor.Id ||
+                    canViewRawAccount ||
+                    data.HasPermission(actor, OaPermissions.PurchaseManage) ||
+                    db.PurchaseTasks.Any(t => t.TenantId == TenantId && t.PurchaseRequestId == businessId && t.AssigneeId == actor.Id) ||
+                    db.FlowCopyRecipients.Any(c => c.TenantId == TenantId && c.BusinessType == "Purchase" && c.BusinessId == businessId && c.RecipientId == actor.Id && c.AvailableAt != null) ||
+                    data.CanView(actor, data.GetEmployee(purchase.ApplicantId), "Purchase");
+
+                if (!canAccess)
+                    return ServiceResult<IReadOnlyList<PaymentTransactionListItem>>.Failure("无权查看该采购申请付款流水。", "AUTH_002");
+            }
+
             var list = db.PaymentTransactions.AsNoTracking()
                 .Where(t => t.TenantId == TenantId && t.BusinessType == businessType && t.BusinessId == businessId)
                 .OrderBy(t => t.Sequence)
                 .ToList();
 
-            return list.Select(t => new PaymentTransactionListItem(
+            var items = list.Select(t => new PaymentTransactionListItem(
                 t.Id,
                 t.BusinessType,
                 t.BusinessId,
@@ -318,11 +354,11 @@ public sealed class PaymentService
                 t.BatchTitle,
                 t.PaymentDate,
                 t.PaymentMethod,
-                t.PayerAccount,
+                canViewRawAccount ? t.PayerAccount : MaskAccount(t.PayerAccount),
                 t.PayeeName,
                 canViewRawAccount ? t.PayeeAccount : MaskAccount(t.PayeeAccount),
                 t.PayeeBank,
-                t.TransactionNumber,
+                canViewRawAccount ? t.TransactionNumber : MaskTransactionNumber(t.TransactionNumber),
                 t.PaidAmount,
                 t.FeeAmount,
                 t.ProofAttachmentId?.ToString(),
@@ -332,10 +368,25 @@ public sealed class PaymentService
                 t.OperatorName,
                 t.CreatedAt
             )).ToList();
+
+            return ServiceResult<IReadOnlyList<PaymentTransactionListItem>>.Success(items);
         }
 
-        return _memoryTransactions
+        var memMatching = _memoryTransactions
             .Where(t => t.BusinessType == businessType && t.BusinessId == businessId)
+            .ToList();
+
+        if (memMatching.Count > 0)
+        {
+            var first = memMatching[0];
+            var canAccess = canViewRawAccount ||
+                first.PayeeName == actor.Name ||
+                first.OperatorId == actor.Id;
+            if (!canAccess)
+                return ServiceResult<IReadOnlyList<PaymentTransactionListItem>>.Failure("无权查看该付款流水。", "AUTH_002");
+        }
+
+        var memList = memMatching
             .OrderBy(t => t.Sequence)
             .Select(t => new PaymentTransactionListItem(
                 t.Id,
@@ -346,11 +397,11 @@ public sealed class PaymentService
                 t.BatchTitle,
                 t.PaymentDate,
                 t.PaymentMethod,
-                t.PayerAccount,
+                canViewRawAccount ? t.PayerAccount : MaskAccount(t.PayerAccount),
                 t.PayeeName,
                 canViewRawAccount ? t.PayeeAccount : MaskAccount(t.PayeeAccount),
                 t.PayeeBank,
-                t.TransactionNumber,
+                canViewRawAccount ? t.TransactionNumber : MaskTransactionNumber(t.TransactionNumber),
                 t.PaidAmount,
                 t.FeeAmount,
                 t.ProofAttachmentId,
@@ -360,6 +411,8 @@ public sealed class PaymentService
                 t.OperatorName,
                 t.CreatedAt
             )).ToList();
+
+        return ServiceResult<IReadOnlyList<PaymentTransactionListItem>>.Success(memList);
     }
 
     public string ExportExpensesCsv(Employee actor, string? applicantId, string? departmentId, DateOnly? startDate, DateOnly? endDate, string? paymentStatus)
@@ -551,12 +604,20 @@ public sealed class PaymentService
         return PaymentMethodNames.All.Contains(upper) ? upper : PaymentMethodNames.BankTransfer;
     }
 
-    private static string MaskAccount(string account)
+    public static string MaskAccount(string? account)
     {
         if (string.IsNullOrWhiteSpace(account)) return string.Empty;
         var clean = account.Trim();
         if (clean.Length <= 4) return "****";
         return $"**** **** **** {clean[^4..]}";
+    }
+
+    public static string MaskTransactionNumber(string? tx)
+    {
+        if (string.IsNullOrWhiteSpace(tx)) return string.Empty;
+        var clean = tx.Trim();
+        if (clean.Length <= 6) return "****";
+        return $"{clean[..3]}****{clean[^3..]}";
     }
 
     private static string EscapeCsv(string? field)

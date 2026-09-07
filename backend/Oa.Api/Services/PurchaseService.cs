@@ -653,7 +653,8 @@ public sealed class PurchaseService
         var contractAmount = order?.ActualAmount ?? 0m;
         var limitRate = record.PrepaymentLimitRate > 0 ? record.PrepaymentLimitRate : 0.50m;
         var maxPrepayment = decimal.Round(contractAmount * limitRate, 2);
-        var payments = paymentService.GetPayments(actor, BusinessType, id);
+        var paymentsResult = paymentService.GetPayments(actor, BusinessType, id);
+        var payments = paymentsResult.IsSuccess ? paymentsResult.Value! : [];
 
         var dto = new PurchaseReconciliation(
             PurchaseRequestId: record.Id,

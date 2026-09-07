@@ -466,7 +466,7 @@ var fOfficer = data.GetEmployee("u-chen");
 var testBudgetService = new BudgetService(data);
 
 var budgetCreate = testBudgetService.Create(fManager, new CreateBudgetRequest(
-    DepartmentId: "技术部",
+    DepartmentId: "研发部",
     Year: 2026,
     Month: 0,
     ExpenseCategory: null,
@@ -480,11 +480,11 @@ var budgetAdjust = testBudgetService.Adjust(fManager, budgetCreate.Value.Id, new
 True(budgetAdjust.IsSuccess, "财务经理可调整追加预算额度");
 Equal(25000m, budgetAdjust.Value!.AllocatedAmount, "追加后预算总额正确");
 
-var preCheckNormal = testBudgetService.Check(employee, new BudgetCheckRequest("技术部", "日常办公", 5000m, 2026, 8));
+var preCheckNormal = testBudgetService.Check(employee, new BudgetCheckRequest("研发部", "日常办公", 5000m, 2026, 8));
 True(preCheckNormal.IsAllowed && !preCheckNormal.IsExceeded, "未超预算申请校验通过");
 Equal(25000m, preCheckNormal.AvailableAmount, "预检返回正确可用预算");
 
-var preCheckExceeded = testBudgetService.Check(employee, new BudgetCheckRequest("技术部", "日常办公", 30000m, 2026, 8));
+var preCheckExceeded = testBudgetService.Check(employee, new BudgetCheckRequest("研发部", "日常办公", 30000m, 2026, 8));
 True(preCheckExceeded.IsExceeded, "超过可用额度触发超预算预警");
 
 // 3. 报销单结构化发票录入、开票日期校验与单据内查重
@@ -585,13 +585,19 @@ var payBatch1 = f4PaymentService.RegisterExpensePayment(fOfficer, claim2.Value.I
     Remarks: "首期付款"));
 True(payBatch1.IsSuccess, "财务专员成功登记第一笔分批付款");
 
-// 4c. 银行账号脱敏查询校验
-var paymentsForNormalUser = f4PaymentService.GetPayments(employee, "Expense", claim2.Value.Id);
-True(paymentsForNormalUser.Count == 1, "查询到1笔付款流水");
-Equal("**** **** **** 9999", paymentsForNormalUser[0].PayeeAccountMasked, "非财务人员查看到的收款账号脱敏");
+// 4c. 银行账号脱敏查询校验与越权拦截
+var applicantLi = data.GetEmployee("u-li");
+var paymentsForNormalUser = f4PaymentService.GetPayments(applicantLi, "Expense", claim2.Value.Id);
+True(paymentsForNormalUser.IsSuccess, "报销申请人成功查看付款流水");
+True(paymentsForNormalUser.Value!.Count == 1, "查询到1笔付款流水");
+Equal("**** **** **** 9999", paymentsForNormalUser.Value[0].PayeeAccountMasked, "非财务人员查看到的收款账号脱敏");
+
+var unrelatedUserPayments = f4PaymentService.GetPayments(employee, "Expense", claim2.Value.Id);
+True(!unrelatedUserPayments.IsSuccess && unrelatedUserPayments.Code == "AUTH_002", "无关员工查看他人付款流水被拦截");
 
 var paymentsForFinanceUser = f4PaymentService.GetPayments(fOfficer, "Expense", claim2.Value.Id);
-Equal("6222026000009999", paymentsForFinanceUser[0].PayeeAccountMasked, "财务人员可查看到明文银行账号");
+True(paymentsForFinanceUser.IsSuccess, "财务专员成功查看付款流水");
+Equal("6222026000009999", paymentsForFinanceUser.Value![0].PayeeAccountMasked, "财务人员可查看到明文银行账号");
 
 // 4d. 重复流水号拦截
 var payDupTx = f4PaymentService.RegisterExpensePayment(fOfficer, claim2.Value.Id, new CreatePaymentTransactionRequest(
