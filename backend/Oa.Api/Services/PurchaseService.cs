@@ -219,7 +219,20 @@ public sealed class PurchaseService
         record.UpdatedAt = DateTimeOffset.UtcNow;
 
         // 预算预占
-        var reserveResult = budgetService.Reserve(TenantId, record.DepartmentName, null, record.EstimatedTotal, BusinessType, record.Id, record.Number, actor.Id, false);
+        var reserveResult = budgetService.Reserve(
+            TenantId,
+            record.DepartmentName,
+            record.Category,
+            record.EstimatedTotal,
+            BusinessType,
+            record.Id,
+            record.Number,
+            actor.Id,
+            blockWhenExceeded: false,
+            targetYear: DateTime.Today.Year,
+            targetMonth: DateTime.Today.Month,
+            projectId: null,
+            actionKeySuffix: record.Category ?? "general");
         if (!reserveResult.IsSuccess)
             return ServiceResult<PurchaseRequest>.Failure(reserveResult.Error!, reserveResult.Code!);
         record.BudgetPoolId = reserveResult.Value;

@@ -2,7 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApiClient } from '../api/client'
-import type { Budget, ExpenseClaim, InvoiceType } from '../api/types'
+import type { Budget, BudgetCheckResult, ExpenseClaim, InvoiceType } from '../api/types'
 import OaDialog from '../components/OaDialog.vue'
 import { useAppStore } from '../stores/app'
 import { useAuthStore } from '../stores/auth'
@@ -41,10 +41,12 @@ const paymentForm = reactive({
   payeeAccount: '',
   payeeBank: '',
   transactionNumber: '',
+  feeAmount: '0.00',
   remarks: ''
 })
 
 const currentDeptBudget = ref<Budget | null>(null)
+const budgetCheck = ref<BudgetCheckResult | null>(null)
 const budgetLoading = ref(false)
 
 interface InvoiceItemState {
@@ -67,9 +69,38 @@ async function loadDeptBudget() {
   if (!dept) return
   budgetLoading.value = true
   try {
-    const list = await api.budgets.getBudgets({ departmentId: dept, year: today.getFullYear(), month: 0 })
-    currentDeptBudget.value = list[0] ?? null
+    const claimAmt = Number(expenseStore.expenseForm.amount || 0)
+    const category = expenseStore.expenseForm.category || undefined
+    const checkRes = await api.budgets.checkBudget({
+      departmentId: dept,
+      expenseCategory: category,
+      amount: claimAmt,
+      year: today.getFullYear(),
+      month: today.getMonth() + 1
+    })
+    budgetCheck.value = checkRes
+    if (checkRes.hasConfiguredBudget) {
+      currentDeptBudget.value = {
+        id: checkRes.budgetId || '',
+        tenantId: '',
+        departmentId: dept,
+        year: today.getFullYear(),
+        month: today.getMonth() + 1,
+        allocatedAmount: checkRes.allocatedAmount,
+        committedAmount: checkRes.committedAmount,
+        actualAmount: checkRes.actualAmount,
+        availableAmount: checkRes.availableAmount,
+        status: 'Active',
+        concurrencyVersion: 1,
+        createdBy: '',
+        createdAt: '',
+        updatedAt: ''
+      }
+    } else {
+      currentDeptBudget.value = null
+    }
   } catch {
+    budgetCheck.value = null
     currentDeptBudget.value = null
   } finally {
     budgetLoading.value = false
@@ -83,6 +114,10 @@ onMounted(() => {
 
 watch(() => expenseStore.showExpenseForm, (open) => {
   if (open) void loadDeptBudget()
+})
+
+watch(() => [expenseStore.expenseForm.amount, expenseStore.expenseForm.category], () => {
+  if (expenseStore.showExpenseForm) void loadDeptBudget()
 })
 
 function addInvoiceRow() {
@@ -130,6 +165,7 @@ async function validateInvoiceFingerprint(row: InvoiceItemState) {
 }
 
 const isOverBudget = computed(() => {
+  if (budgetCheck.value) return budgetCheck.value.isExceeded
   if (!currentDeptBudget.value) return false
   const claimAmt = Number(expenseStore.expenseForm.amount || 0)
   return claimAmt > currentDeptBudget.value.availableAmount
@@ -473,8 +509,11 @@ async function exportExpenseCsv() {
         <div><span>当前可用额度</span><strong :class="{ 'warning-text': isOverBudget }">¥{{ currentDeptBudget.availableAmount.toFixed(2) }}</strong></div>
       </div>
       <p v-if="isOverBudget" class="dialog-error" style="margin-top: 10px;">
-        ⚠️ 提示：当前填写的报销金额（¥{{ Number(expenseStore.expenseForm.amount || 0).toFixed(2) }}）已超出部门可用预算池剩余额度（¥{{ currentDeptBudget.availableAmount.toFixed(2) }}）。
+        ⚠️ 提示：{{ budgetCheck?.warningMessage || `当前填写的报销金额（¥${Number(expenseStore.expenseForm.amount || 0).toFixed(2)}）已超出部门可用预算池剩余额度（¥${currentDeptBudget.availableAmount.toFixed(2)}）。` }}
       </p>
+    </div>
+    <div v-else-if="budgetCheck && !budgetCheck.hasConfiguredBudget" class="budget-summary-card" style="margin-bottom: 8px;">
+      <p class="muted">ℹ️ 当前部门或科目未配置独立预算池，采用免预算放行策略。</p>
     </div>
 
     <label class="dialog-field">关联出差申请（可选）

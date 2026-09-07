@@ -732,8 +732,16 @@ app.MapGet("/api/v1/finance/export/purchases", (string? applicantId, string? dep
 // -------------------------------------------------------------
 // Budget Management Endpoints
 // -------------------------------------------------------------
-app.MapGet("/api/v1/budgets", (string? departmentId, int? year, int? month, string? expenseCategory, string? status, HttpRequest request, DemoAuthService auth, BudgetService service) =>
-    Results.Ok(service.List(Actor(request, auth), departmentId, year, month, expenseCategory, status)));
+app.MapGet("/api/v1/budgets", (string? departmentId, int? year, int? month, string? expenseCategory, string? projectId, string? status, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, BudgetService service) =>
+{
+    var actor = Actor(request, auth);
+    if (page.HasValue || pageSize.HasValue)
+    {
+        var paged = service.ListPaged(actor, new BudgetQuery(departmentId, year, month, expenseCategory, projectId, status, page, pageSize));
+        return Results.Ok(paged.Value);
+    }
+    return Results.Ok(service.List(actor, departmentId, year, month, expenseCategory, status, projectId));
+});
 app.MapGet("/api/v1/budgets/{id:guid}", (Guid id, HttpRequest request, DemoAuthService auth, BudgetService service) =>
 {
     var result = service.Get(Actor(request, auth), id);
@@ -748,6 +756,26 @@ app.MapPut("/api/v1/budgets/{id:guid}/adjust", (Guid id, AdjustBudgetRequest bod
 {
     var actor = Actor(request, auth);
     return Write(request, actor, idempotency, () => service.Adjust(actor, id, body), atomic: true, fingerprintPayload: new { id, body });
+});
+app.MapPost("/api/v1/budgets/{id:guid}/publish", (Guid id, BudgetStatusChangeRequest? body, HttpRequest request, DemoAuthService auth, BudgetService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.Publish(actor, id, body), atomic: true, fingerprintPayload: new { id, action = "publish", body });
+});
+app.MapPost("/api/v1/budgets/{id:guid}/freeze", (Guid id, BudgetStatusChangeRequest? body, HttpRequest request, DemoAuthService auth, BudgetService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.Freeze(actor, id, body), atomic: true, fingerprintPayload: new { id, action = "freeze", body });
+});
+app.MapPost("/api/v1/budgets/{id:guid}/unfreeze", (Guid id, BudgetStatusChangeRequest? body, HttpRequest request, DemoAuthService auth, BudgetService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.Unfreeze(actor, id, body), atomic: true, fingerprintPayload: new { id, action = "unfreeze", body });
+});
+app.MapPost("/api/v1/budgets/{id:guid}/close", (Guid id, BudgetStatusChangeRequest? body, HttpRequest request, DemoAuthService auth, BudgetService service, IdempotencyService idempotency) =>
+{
+    var actor = Actor(request, auth);
+    return Write(request, actor, idempotency, () => service.Close(actor, id, body), atomic: true, fingerprintPayload: new { id, action = "close", body });
 });
 app.MapGet("/api/v1/budgets/{id:guid}/transactions", (Guid id, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, BudgetService service) =>
 {

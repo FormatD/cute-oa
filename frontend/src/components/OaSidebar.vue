@@ -78,6 +78,7 @@ const navSections: NavSection[] = [
     items: [
       { id: 'leave', navKey: 'leave', route: 'leave', icon: '◫', name: '请假管理', keywords: ['qj', 'qingjia', 'leave'] },
       { id: 'expense', navKey: 'expense', route: 'expense', icon: '¥', name: '费用报销', keywords: ['bx', 'baoxiao', 'expense'] },
+      { id: 'budgets', navKey: 'budgets', route: 'budgets', icon: '💰', name: '预算中心', permission: 'EXPENSE_ALL_VIEW', keywords: ['ys', 'yusuan', 'budget'] },
       { id: 'travel', navKey: 'travel', route: 'travel', icon: '⌖', name: '出差管理', keywords: ['cc', 'chuchai', 'travel'] },
       { id: 'purchase', navKey: 'purchase', route: 'purchase', icon: '▦', name: '采购管理', keywords: ['cg', 'caigou', 'purchase'] },
       { id: 'seal', navKey: 'seal', route: 'seal', icon: '印', name: '用章管理', keywords: ['yz', 'yongzhang', 'yinzhang', 'seal'] },

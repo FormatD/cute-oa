@@ -162,7 +162,7 @@ public sealed class ExpenseService
         var item = new ExpenseClaim
         {
             Number = $"BX-{DateTime.UtcNow:yyyyMMdd}-{Guid.NewGuid().ToString("N")[..6].ToUpperInvariant()}", ApplicantId = actor.Id, ApplicantName = actor.Name, DepartmentName = actor.DepartmentName,
-            TravelRequestId = travel.Value?.Id, TravelRequestNumber = travel.Value?.Number, PayeeAccountName = request.PayeeAccountName.Trim(), PayeeAccount = request.PayeeAccount.Trim(), BankName = request.BankName?.Trim(), Description = request.Description?.Trim(), Items = request.Items, CopyRecipientIds = copies.Value!, TotalAmount = total,
+            TravelRequestId = travel.Value?.Id, TravelRequestNumber = travel.Value?.Number, Project = request.Project?.Trim(), PayeeAccountName = request.PayeeAccountName.Trim(), PayeeAccount = request.PayeeAccount.Trim(), BankName = request.BankName?.Trim(), Description = request.Description?.Trim(), Items = request.Items, CopyRecipientIds = copies.Value!, TotalAmount = total,
             Invoices = (request.Invoices ?? []).Select(inv => new ExpenseInvoice
             {
                 InvoiceType = inv.InvoiceType,
@@ -254,10 +254,40 @@ public sealed class ExpenseService
         if (budgetService is not null)
         {
             var blockWhenExceeded = policy?.BlockWhenExceeded ?? false;
-            var reserveResult = budgetService.Reserve(TenantId, item.DepartmentName, null, item.TotalAmount, "Expense", item.Id, item.Number, actor.Id, blockWhenExceeded);
-            if (!reserveResult.IsSuccess)
-                return ServiceResult<ExpenseClaim>.Failure(reserveResult.Error!, reserveResult.Code!);
-            item.BudgetPoolId = reserveResult.Value;
+            var itemGroups = item.Items
+                .GroupBy(i => string.IsNullOrWhiteSpace(i.Category) ? "" : i.Category.Trim())
+                .Select(g => new { Category = string.IsNullOrEmpty(g.Key) ? null : g.Key, Amount = g.Sum(x => x.Amount) })
+                .ToList();
+
+            Guid? primaryPoolId = null;
+            foreach (var grp in itemGroups)
+            {
+                var reserveResult = budgetService.Reserve(
+                    TenantId,
+                    item.DepartmentName,
+                    grp.Category,
+                    grp.Amount,
+                    "Expense",
+                    item.Id,
+                    item.Number,
+                    actor.Id,
+                    blockWhenExceeded,
+                    targetYear: DateTime.Today.Year,
+                    targetMonth: DateTime.Today.Month,
+                    projectId: item.Project,
+                    actionKeySuffix: grp.Category ?? "general");
+
+                if (!reserveResult.IsSuccess)
+                {
+                    budgetService.Release(TenantId, null, "Expense", item.Id, item.Number, item.TotalAmount, actor.Id, "预占失败回滚");
+                    return ServiceResult<ExpenseClaim>.Failure(reserveResult.Error!, reserveResult.Code!);
+                }
+                if (reserveResult.Value.HasValue)
+                {
+                    primaryPoolId ??= reserveResult.Value.Value;
+                }
+            }
+            item.BudgetPoolId = primaryPoolId;
         }
 
         var route = processRouter.Resolve("Expense", actor, item.TotalAmount);
@@ -291,9 +321,9 @@ public sealed class ExpenseService
             foreach (var inv in item.Invoices) inv.Status = InvoiceStatus.Released;
             item.Tasks.Clear();
             item.CurrentFlowInstanceId = null;
-            if (budgetService is not null && item.BudgetPoolId.HasValue)
+            if (budgetService is not null)
             {
-                budgetService.Release(TenantId, item.BudgetPoolId, "Expense", item.Id, item.Number, item.TotalAmount, actor.Id, "并发发票冲突回滚释放预算");
+                budgetService.Release(TenantId, null, "Expense", item.Id, item.Number, item.TotalAmount, actor.Id, "并发发票冲突回滚释放预算");
                 item.BudgetPoolId = null;
             }
             if (pg.ConstraintName != null && pg.ConstraintName.Contains("UX_expense_invoice_active_fingerprint"))
@@ -372,7 +402,7 @@ public sealed class ExpenseService
         var item = _claims.SingleOrDefault(claim => claim.Id == id);
         if (item is null || item.ApplicantId != actor.Id) return ServiceResult<bool>.Failure("报销单不存在或无权限。", "DATA_001");
         if (item.Status is not (ExpenseStatus.Draft or ExpenseStatus.Rejected)) return ServiceResult<bool>.Failure("当前状态不允许删除。", "STATE_001");
-        budgetService?.Release(TenantId, item.BudgetPoolId, "Expense", item.Id, item.Number, item.TotalAmount, actor.Id, "删除报销单释放预算");
+        budgetService?.Release(TenantId, null, "Expense", item.Id, item.Number, item.TotalAmount, actor.Id, "删除报销单释放预算");
         _claims.Remove(item);
         if (db is not null)
         {
@@ -427,7 +457,7 @@ public sealed class ExpenseService
         found.task.ProcessedAt = DateTimeOffset.UtcNow;
         foreach (var task in found.claim.Tasks.Where(task => task.Id != found.task.Id && task.Status == FlowTaskStatus.Pending)) task.Status = FlowTaskStatus.Cancelled;
         found.claim.Status = ExpenseStatus.Rejected;
-        budgetService?.Release(TenantId, found.claim.BudgetPoolId, "Expense", found.claim.Id, found.claim.Number, found.claim.TotalAmount, actor.Id, $"报销单驳回释放预算：{comment.Trim()}");
+        budgetService?.Release(TenantId, null, "Expense", found.claim.Id, found.claim.Number, found.claim.TotalAmount, actor.Id, $"报销单驳回释放预算：{comment.Trim()}");
         foreach (var inv in found.claim.Invoices) inv.Status = InvoiceStatus.Released;
         if (flowInstances.Current(found.claim.FlowInstances, found.task.FlowInstanceId) is { } instance)
             flowInstances.Record(instance, FlowActionType.Rejected, actor, found.task.Id, found.task.Sequence, found.task.Comment);
@@ -467,7 +497,7 @@ public sealed class ExpenseService
         if (item.Tasks.Any(task => task.Status != FlowTaskStatus.Pending)) return ServiceResult<ExpenseClaim>.Failure("已有审批处理，不能撤回。", "STATE_001");
         foreach (var task in item.Tasks) task.Status = FlowTaskStatus.Cancelled;
         item.Status = ExpenseStatus.Withdrawn;
-        budgetService?.Release(TenantId, item.BudgetPoolId, "Expense", item.Id, item.Number, item.TotalAmount, actor.Id, "报销单撤回释放预算");
+        budgetService?.Release(TenantId, null, "Expense", item.Id, item.Number, item.TotalAmount, actor.Id, "报销单撤回释放预算");
         foreach (var inv in item.Invoices) inv.Status = InvoiceStatus.Released;
         if (flowInstances.Current(item.FlowInstances, item.CurrentFlowInstanceId) is { } instance)
             flowInstances.Record(instance, FlowActionType.Withdrawn, actor, comment: "申请人撤回");
@@ -732,6 +762,7 @@ public sealed class ExpenseService
                 DepartmentName = x.DepartmentName,
                 TravelRequestId = x.TravelRequestId,
                 TravelRequestNumber = x.TravelRequestId is { } travelId ? travels.GetValueOrDefault(travelId) : null,
+                Project = x.Project,
                 PayeeAccountName = x.PayeeAccountName,
                 PayeeAccount = x.PayeeAccount,
                 BankName = x.BankName,
@@ -787,7 +818,7 @@ public sealed class ExpenseService
         db.ChangeTracker.Clear();
         var record = db.ExpenseClaims.SingleOrDefault(x => x.Id == claim.Id);
         if (record is null) { record = new ExpenseRecord { Id = claim.Id, TenantId = TenantId }; db.ExpenseClaims.Add(record); }
-        record.Number = claim.Number; record.ApplicantId = claim.ApplicantId; record.ApplicantName = claim.ApplicantName; record.DepartmentName = claim.DepartmentName; record.TravelRequestId = claim.TravelRequestId; record.PayeeAccountName = claim.PayeeAccountName; record.PayeeAccount = claim.PayeeAccount; record.BankName = claim.BankName; record.Description = claim.Description; record.TotalAmount = claim.TotalAmount; record.Status = (int)claim.Status;
+        record.Number = claim.Number; record.ApplicantId = claim.ApplicantId; record.ApplicantName = claim.ApplicantName; record.DepartmentName = claim.DepartmentName; record.TravelRequestId = claim.TravelRequestId; record.Project = claim.Project; record.PayeeAccountName = claim.PayeeAccountName; record.PayeeAccount = claim.PayeeAccount; record.BankName = claim.BankName; record.Description = claim.Description; record.TotalAmount = claim.TotalAmount; record.Status = (int)claim.Status;
         record.BudgetPoolId = claim.BudgetPoolId; record.PaymentStatus = claim.PaymentStatus; record.PaidTotalAmount = claim.PaidTotalAmount; record.InvoiceCount = claim.Invoices.Count;
         record.Version = claim.Version; record.ProcessDefinitionId = claim.ProcessDefinitionId; record.ProcessDefinitionCode = claim.ProcessDefinitionCode; record.ProcessDefinitionVersion = claim.ProcessDefinitionVersion; record.CurrentFlowInstanceId = claim.CurrentFlowInstanceId; record.ConfigVersionId = claim.ConfigVersionId; record.ConfigVersionNumber = claim.ConfigVersionNumber; record.ConfigSnapshotJson = claim.ConfigSnapshotJson; record.ConfigResolvedAt = claim.ConfigResolvedAt; record.UpdatedAt = DateTimeOffset.UtcNow;
         db.ExpenseItems.Where(x => x.ExpenseClaimId == claim.Id).ExecuteDelete();

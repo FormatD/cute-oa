@@ -21,6 +21,7 @@ public sealed class ExpenseClaim
     public IReadOnlyList<ExpenseItem> Items { get; init; } = [];
     public IReadOnlyList<string> CopyRecipientIds { get; init; } = [];
     public decimal TotalAmount { get; init; }
+    public string? Project { get; set; }
     public Guid? BudgetPoolId { get; set; }
     public string PaymentStatus { get; set; } = "UNPAID";
     public decimal PaidTotalAmount { get; set; }

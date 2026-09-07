@@ -94,18 +94,25 @@ public sealed record CreateBudgetRequest(
     string? ProjectId,
     int Year,
     int Month,
-    decimal AllocatedAmount);
+    decimal AllocatedAmount,
+    bool AutoPublish = false);
 
 public sealed record AdjustBudgetRequest(
     decimal Amount, // 正数调增，负数调减
-    string Reason);
+    string Reason,
+    int? ExpectedVersion = null);
+
+public sealed record BudgetStatusChangeRequest(
+    int? ExpectedVersion = null,
+    string? Reason = null);
 
 public sealed record BudgetCheckRequest(
     string DepartmentId,
     string? ExpenseCategory,
     decimal Amount,
     int? Year = null,
-    int? Month = null);
+    int? Month = null,
+    string? ProjectId = null);
 
 public sealed record BudgetCheckResult(
     bool IsAllowed,
@@ -116,7 +123,19 @@ public sealed record BudgetCheckResult(
     decimal ActualAmount,
     decimal RequestedAmount,
     string? WarningMessage,
-    bool BlockWhenExceeded);
+    bool BlockWhenExceeded,
+    Guid? BudgetId = null,
+    bool HasConfiguredBudget = true);
+
+public sealed record BudgetQuery(
+    string? DepartmentId = null,
+    int? Year = null,
+    int? Month = null,
+    string? ExpenseCategory = null,
+    string? ProjectId = null,
+    string? Status = null,
+    int? Page = null,
+    int? PageSize = null);
 
 public sealed class BudgetTransaction
 {

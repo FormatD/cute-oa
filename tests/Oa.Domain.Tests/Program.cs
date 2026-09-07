@@ -471,7 +471,8 @@ var budgetCreate = testBudgetService.Create(fManager, new CreateBudgetRequest(
     Month: 0,
     ExpenseCategory: null,
     ProjectId: null,
-    AllocatedAmount: 20000m));
+    AllocatedAmount: 20000m,
+    AutoPublish: true));
 True(budgetCreate.IsSuccess, "财务经理可编制部门年度预算池");
 Equal(20000m, budgetCreate.Value!.AllocatedAmount, "编制预算初始额度正确");
 Equal(20000m, budgetCreate.Value.AvailableAmount, "期初可用额度等于编制额度");

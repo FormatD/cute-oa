@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useApiClient } from '../api/client'
-import type { Budget } from '../api/types'
+import type { Budget, BudgetCheckResult } from '../api/types'
 import OaDialog from '../components/OaDialog.vue'
 import { useAppStore } from '../stores/app'
 import { useAuthStore } from '../stores/auth'
@@ -27,15 +27,43 @@ const today = new Date()
 const categories = computed(() => effectiveConfig.procurementCategories.map(c => c.name))
 
 const currentDeptBudget = ref<Budget | null>(null)
+const budgetCheck = ref<BudgetCheckResult | null>(null)
 const canFinance = computed(() => auth.currentUser?.permissions?.includes('PURCHASE_MANAGE') === true || auth.currentUser?.permissions?.includes('EXPENSE_PAY') === true)
 
 async function loadDeptBudget() {
   const dept = auth.currentUser?.departmentName
   if (!dept) return
   try {
-    const list = await api.budgets.getBudgets({ departmentId: dept, year: today.getFullYear(), month: 0 })
-    currentDeptBudget.value = list[0] ?? null
+    const total = purchase.estimatedTotal
+    const checkRes = await api.budgets.checkBudget({
+      departmentId: dept,
+      amount: total,
+      year: today.getFullYear(),
+      month: today.getMonth() + 1
+    })
+    budgetCheck.value = checkRes
+    if (checkRes.hasConfiguredBudget) {
+      currentDeptBudget.value = {
+        id: checkRes.budgetId || '',
+        tenantId: '',
+        departmentId: dept,
+        year: today.getFullYear(),
+        month: today.getMonth() + 1,
+        allocatedAmount: checkRes.allocatedAmount,
+        committedAmount: checkRes.committedAmount,
+        actualAmount: checkRes.actualAmount,
+        availableAmount: checkRes.availableAmount,
+        status: 'Active',
+        concurrencyVersion: 1,
+        createdBy: '',
+        createdAt: '',
+        updatedAt: ''
+      }
+    } else {
+      currentDeptBudget.value = null
+    }
   } catch {
+    budgetCheck.value = null
     currentDeptBudget.value = null
   }
 }
@@ -49,7 +77,12 @@ watch(() => purchase.showPurchaseForm, (open) => {
   if (open) void loadDeptBudget()
 })
 
+watch(() => purchase.estimatedTotal, () => {
+  if (purchase.showPurchaseForm) void loadDeptBudget()
+})
+
 const isOverBudget = computed(() => {
+  if (budgetCheck.value) return budgetCheck.value.isExceeded
   if (!currentDeptBudget.value) return false
   return purchase.estimatedTotal > currentDeptBudget.value.availableAmount
 })
@@ -241,8 +274,11 @@ async function exportPurchaseCsv() {
         <div><span>当前可用额度</span><strong :class="{ 'warning-text': isOverBudget }">¥{{ currentDeptBudget.availableAmount.toFixed(2) }}</strong></div>
       </div>
       <p v-if="isOverBudget" class="dialog-error" style="margin-top: 10px;">
-        ⚠️ 提示：预估采购总额（¥{{ purchase.estimatedTotal.toFixed(2) }}）已超出部门可用预算池剩余额度（¥{{ currentDeptBudget.availableAmount.toFixed(2) }}）。
+        ⚠️ 提示：{{ budgetCheck?.warningMessage || `预估采购总额（¥${purchase.estimatedTotal.toFixed(2)}）已超出部门可用预算池剩余额度（¥${currentDeptBudget.availableAmount.toFixed(2)}）。` }}
       </p>
+    </div>
+    <div v-else-if="budgetCheck && !budgetCheck.hasConfiguredBudget" class="budget-summary-card" style="margin-bottom: 8px;">
+      <p class="muted">ℹ️ 当前部门未配置独立预算池，采用免预算放行策略。</p>
     </div>
 
     <div class="dialog-grid">

@@ -3812,7 +3812,8 @@ await using (var f4Db = new OaDbContext(options))
             Month: 0,
             ExpenseCategory: null,
             ProjectId: null,
-            AllocatedAmount: 50000m));
+            AllocatedAmount: 50000m,
+            AutoPublish: true));
         if (!budgetRes.IsSuccess) throw new InvalidOperationException($"PG预算池创建失败：{budgetRes.Error}");
         budgetId = budgetRes.Value!.Id;
 
@@ -4093,7 +4094,8 @@ await using (var f4Db = new OaDbContext(options))
         Month: 0,
         ExpenseCategory: null,
         ProjectId: null,
-        AllocatedAmount: 80000m));
+        AllocatedAmount: 80000m,
+        AutoPublish: true));
     var finBudgetId = finBudgetRes.IsSuccess ? finBudgetRes.Value!.Id : f4Db.Budgets.First(b => b.TenantId == "demo" && b.DepartmentId == "finance" && b.Year == curYear && b.Month == 0).Id;
 
     // (a) 普通员工指定 departmentId = "finance" 试图跨部门查询，结果不得返回财务部预算
@@ -4243,7 +4245,7 @@ await using (var f4Db = new OaDbContext(options))
     var bDept = "engineering";
     var bYear = curYear + 1; // 使用未来年度创建独立预算池
     var bCreate = budgetService.Create(financeManager, new CreateBudgetRequest(
-        DepartmentId: bDept, Year: bYear, Month: 0, ExpenseCategory: null, ProjectId: null, AllocatedAmount: 10000m));
+        DepartmentId: bDept, Year: bYear, Month: 0, ExpenseCategory: null, ProjectId: null, AllocatedAmount: 10000m, AutoPublish: true));
     var concBudgetId = bCreate.Value!.Id;
 
     var bBarrier = new ManualResetEventSlim(false);
@@ -4332,6 +4334,149 @@ await using (var f4Db = new OaDbContext(options))
         if (legacyClaim.PaymentStatus != "PAID" || legacyClaim.PaidTotalAmount != 500m)
             throw new InvalidOperationException("旧付款入口执行后报销单付款状态未正确流转至 PAID。");
     }
+
+    // -------------------------------------------------------------
+    // 8. WP-C 预算领域闭环、状态机与管理页面集成测试
+    // -------------------------------------------------------------
+    // 8.1 预算维度与8级优先级匹配测试（Month > Year, Category > General, Project > General, DepartmentId/Name 双向归一）
+    var normDept = "engineering"; // 研发部
+    var bYearC = curYear; // 使用当期测试年度
+    var existingGen = f4Db.Budgets.AsNoTracking().FirstOrDefault(b => b.TenantId == "demo" && b.DepartmentId == normDept && b.Year == bYearC && b.Month == 0 && b.ExpenseCategory == null && b.ProjectId == null);
+    var pGeneralYear = existingGen != null ? budgetService.Get(financeManager, existingGen.Id).Value! : budgetService.Create(financeManager, new CreateBudgetRequest(normDept, null, null, bYearC, 0, 100000m, AutoPublish: true)).Value!;
+    var pCategoryYear = budgetService.Create(financeManager, new CreateBudgetRequest(normDept, "办公", null, bYearC, 0, 50000m, AutoPublish: true)).Value!;
+    var pGeneralMonth = budgetService.Create(financeManager, new CreateBudgetRequest("研发部", null, null, bYearC, 9, 30000m, AutoPublish: true)).Value!;
+    var pCategoryMonth = budgetService.Create(financeManager, new CreateBudgetRequest("研发部", "办公", null, bYearC, 9, 10000m, AutoPublish: true)).Value!;
+    var pProjectMonth = budgetService.Create(financeManager, new CreateBudgetRequest(normDept, "办公", "proj-alpha", bYearC, 9, 5000m, AutoPublish: true)).Value!;
+
+    // 验证 Check 维度匹配优先级：
+    // (1) 9月 + 办公 + proj-alpha -> 匹配 pProjectMonth
+    var c1 = budgetService.Check(employee, new BudgetCheckRequest("研发部", "办公", 1000m, bYearC, 9, "proj-alpha"));
+    if (c1.BudgetId != pProjectMonth.Id || !c1.HasConfiguredBudget)
+        throw new InvalidOperationException($"预算优先级匹配失败(1)：期望匹配 {pProjectMonth.Id}, 实际={c1.BudgetId}");
+
+    // (2) 9月 + 办公 + 其他项目 -> 匹配 pCategoryMonth (Month+Category > General Project)
+    var c2 = budgetService.Check(employee, new BudgetCheckRequest(normDept, "办公", 1000m, bYearC, 9, "proj-other"));
+    if (c2.BudgetId != pCategoryMonth.Id)
+        throw new InvalidOperationException($"预算优先级匹配失败(2)：期望匹配 {pCategoryMonth.Id}, 实际={c2.BudgetId}");
+
+    // (3) 9月 + 交通 + 无项目 -> 匹配 pGeneralMonth (Month+General Category)
+    var c3 = budgetService.Check(employee, new BudgetCheckRequest(normDept, "交通", 1000m, bYearC, 9));
+    if (c3.BudgetId != pGeneralMonth.Id)
+        throw new InvalidOperationException($"预算优先级匹配失败(3)：期望匹配 {pGeneralMonth.Id}, 实际={c3.BudgetId}");
+
+    // (4) 8月 + 办公 + 无项目 -> 匹配 pCategoryYear (Year+Category)
+    var c4 = budgetService.Check(employee, new BudgetCheckRequest("研发部", "办公", 1000m, bYearC, 8));
+    if (c4.BudgetId != pCategoryYear.Id)
+        throw new InvalidOperationException($"预算优先级匹配失败(4)：期望匹配 {pCategoryYear.Id}, 实际={c4.BudgetId}");
+
+    // (5) 8月 + 培训 + 无项目 -> 匹配 pGeneralYear (Year+General Category)
+    var c5 = budgetService.Check(employee, new BudgetCheckRequest(normDept, "培训", 1000m, bYearC, 8));
+    if (c5.BudgetId != pGeneralYear.Id)
+        throw new InvalidOperationException($"预算优先级匹配失败(5)：期望匹配 {pGeneralYear.Id}, 实际={c5.BudgetId}");
+
+    // (6) 未配置预算池策略：返回 AvailableAmount = 0m, HasConfiguredBudget = false，不伪造 9999999m
+    var cUnconfig = budgetService.Check(employee, new BudgetCheckRequest(normDept, "培训", 1000m, 2029, 8));
+    if (cUnconfig.BudgetId != null || cUnconfig.HasConfiguredBudget || cUnconfig.AvailableAmount != 0m)
+        throw new InvalidOperationException($"未配置预算池返回结果不符合预期：HasConfiguredBudget={cUnconfig.HasConfiguredBudget}, Available={cUnconfig.AvailableAmount}");
+
+    // 8.2 预算状态机 (Draft -> Active -> Frozen -> Active -> Closed) 与权限拦截
+    var draftPool = budgetService.Create(financeManager, new CreateBudgetRequest(normDept, "招待", null, bYearC, 9, 8000m, AutoPublish: false)).Value!;
+    if (draftPool.Status != BudgetStatus.Draft)
+        throw new InvalidOperationException($"AutoPublish=false 时期初状态应为 Draft，实际={draftPool.Status}");
+
+    // Draft 状态不可被业务预占
+    var draftTryId = Guid.NewGuid();
+    var draftReserve = budgetService.Reserve("demo", normDept, "招待", 500m, "Expense", draftTryId, "BX-DRAFT-TRY", employee.Id, blockWhenExceeded: true, targetYear: bYearC, targetMonth: 9);
+    // 未激活池不匹配，回退到 pGeneralMonth
+    if (draftReserve.Value == draftPool.Id)
+        throw new InvalidOperationException("Draft 状态预算池被业务单据错误预占。");
+    budgetService.Release("demo", draftReserve.Value, "Expense", draftTryId, "BX-DRAFT-TRY", 500m, employee.Id);
+
+    // 非财务人员不能发布
+    var pubUnauthorized = budgetService.Publish(employee, draftPool.Id);
+    if (pubUnauthorized.Code != "AUTH_002")
+        throw new InvalidOperationException($"非财务人员发布预算池未被拦截：{pubUnauthorized.Code}");
+
+    // 财务人员发布
+    var pubRes = budgetService.Publish(financeManager, draftPool.Id);
+    if (!pubRes.IsSuccess || pubRes.Value!.Status != BudgetStatus.Active)
+        throw new InvalidOperationException($"预算发布失败：{pubRes.Error}");
+
+    // 冻结
+    var freezeRes = budgetService.Freeze(financeManager, draftPool.Id);
+    if (!freezeRes.IsSuccess || freezeRes.Value!.Status != BudgetStatus.Frozen)
+        throw new InvalidOperationException($"预算冻结失败：{freezeRes.Error}");
+
+    // 冻结状态不可被新单据预占（不会命中 draftPool）
+    var freezeTryId = Guid.NewGuid();
+    var freezeReserve = budgetService.Reserve("demo", normDept, "招待", 500m, "Expense", freezeTryId, "BX-FROZEN-TRY", employee.Id, blockWhenExceeded: true, targetYear: bYearC, targetMonth: 9);
+    if (freezeReserve.Value == draftPool.Id)
+        throw new InvalidOperationException("Frozen 状态预算池被业务单据错误预占。");
+    budgetService.Release("demo", freezeReserve.Value, "Expense", freezeTryId, "BX-FROZEN-TRY", 500m, employee.Id);
+
+    // 解冻
+    var unfreezeRes = budgetService.Unfreeze(financeManager, draftPool.Id);
+    if (!unfreezeRes.IsSuccess || unfreezeRes.Value!.Status != BudgetStatus.Active)
+        throw new InvalidOperationException($"预算解冻失败：{unfreezeRes.Error}");
+
+    // 封账关闭
+    var closeRes = budgetService.Close(financeManager, draftPool.Id);
+    if (!closeRes.IsSuccess || closeRes.Value!.Status != BudgetStatus.Closed)
+        throw new InvalidOperationException($"预算关闭失败：{closeRes.Error}");
+
+    // 关闭后不可再发布
+    var republish = budgetService.Publish(financeManager, draftPool.Id);
+    if (republish.IsSuccess)
+        throw new InvalidOperationException("已关闭的预算池不应允许重新发布。");
+
+    // 8.3 多预算池预占明细与多池释放
+    var today = DateOnly.FromDateTime(DateTime.Today);
+    var multiClaimDraft = expenseService.CreateDraft(employee, new CreateExpenseClaim(
+        null, "张晨", "6222026000001234", "招商银行", "多科目预算预占测试",
+        [
+            new ExpenseItem(today, "办公", 1200m, "办公用品", "FP-MULTI-1", ["proof1.pdf"]),
+            new ExpenseItem(today, "交通", 2500m, "交通机票", "FP-MULTI-2", ["proof2.pdf"])
+        ],
+        Invoices: []));
+    if (!multiClaimDraft.IsSuccess) throw new InvalidOperationException($"多科目报销草稿创建失败：{multiClaimDraft.Error}");
+    var multiClaimId = multiClaimDraft.Value!.Id;
+
+    var multiSub = expenseService.Submit(employee, multiClaimId);
+    if (!multiSub.IsSuccess) throw new InvalidOperationException($"多科目报销提交失败：{multiSub.Error}");
+
+    await using (var verifyDb = new OaDbContext(options))
+    {
+        var bOffice = verifyDb.Budgets.AsNoTracking().Single(b => b.Id == pCategoryMonth.Id);
+        var bTraffic = verifyDb.Budgets.AsNoTracking().Single(b => b.Id == pGeneralMonth.Id);
+        if (bOffice.CommittedAmount < 1200m)
+            throw new InvalidOperationException($"多科目预占办公池未正确预占：{bOffice.CommittedAmount}");
+        if (bTraffic.CommittedAmount < 2500m)
+            throw new InvalidOperationException($"多科目预占交通池未正确预占：{bTraffic.CommittedAmount}");
+
+        var txs = verifyDb.BudgetTransactions.AsNoTracking().Where(t => t.BusinessId == multiClaimId).ToList();
+        if (txs.Count(t => t.TransactionType == "RESERVED") != 2)
+            throw new InvalidOperationException($"多科目预占流水条数不符合预期：实际={txs.Count}");
+    }
+
+    // 撤回多科目报销，验证多池释放
+    var multiWithdraw = expenseService.Withdraw(employee, multiClaimId);
+    if (!multiWithdraw.IsSuccess) throw new InvalidOperationException($"多科目报销撤回失败：{multiWithdraw.Error}");
+
+    await using (var verifyDb = new OaDbContext(options))
+    {
+        var bOfficeAfter = verifyDb.Budgets.AsNoTracking().Single(b => b.Id == pCategoryMonth.Id);
+        var bTrafficAfter = verifyDb.Budgets.AsNoTracking().Single(b => b.Id == pGeneralMonth.Id);
+        if (bOfficeAfter.CommittedAmount != 0m || bTrafficAfter.CommittedAmount != 0m)
+            throw new InvalidOperationException($"多池释放失败：办公占用={bOfficeAfter.CommittedAmount}, 交通占用={bTrafficAfter.CommittedAmount}");
+    }
+
+    // 8.4 预算中心分页列表与稳定倒序
+    var pagedBudgets = budgetService.ListPaged(financeManager, new BudgetQuery(Year: bYearC, Page: 1, PageSize: 2));
+    if (!pagedBudgets.IsSuccess || pagedBudgets.Value!.PageSize != 2 || pagedBudgets.Value.Items.Count != 2 || pagedBudgets.Value.Total < 5)
+        throw new InvalidOperationException($"预算中心分页结果不符合预期：Total={pagedBudgets.Value?.Total}, Count={pagedBudgets.Value?.Items.Count}");
+    var items = pagedBudgets.Value.Items;
+    if (items[0].UpdatedAt < items[1].UpdatedAt)
+        throw new InvalidOperationException("预算中心分页未按 UpdatedAt 倒序排列。");
 }
 
 Console.WriteLine("PostgreSQL persistence integration passed.");

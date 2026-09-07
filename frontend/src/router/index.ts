@@ -15,6 +15,8 @@ export const router = createRouter({
     { path: '/leave/:id', component: () => import('../views/DetailPage.vue'), props: route => ({ module: 'leave', id: route.params.id }) },
     { path: '/expense', component: () => import('../views/ExpensePage.vue') },
     { path: '/expense/:id', component: () => import('../views/DetailPage.vue'), props: route => ({ module: 'expense', id: route.params.id }) },
+    { path: '/budgets', component: () => import('../views/BudgetPage.vue'), meta: { permission: 'EXPENSE_ALL_VIEW' } },
+    { path: '/budgets/:id', component: () => import('../views/BudgetDetailPage.vue'), props: true, meta: { permission: 'EXPENSE_ALL_VIEW' } },
     { path: '/travel', component: () => import('../views/TravelPage.vue') },
     { path: '/travel/:id', component: () => import('../views/TravelDetailPage.vue'), props: true },
     { path: '/purchase', component: () => import('../views/PurchasePage.vue') },
