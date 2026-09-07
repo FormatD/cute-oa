@@ -556,15 +556,24 @@ app.MapPost("/api/v1/files", async (IFormFile? file, HttpRequest request, DemoAu
         : request.Query["attachmentType"].ToString();
     return await WriteAsync(request, actor, idempotency, () => service.UploadAsync(actor, file, string.IsNullOrWhiteSpace(attachmentType) ? null : attachmentType, cancellationToken), true);
 }).DisableAntiforgery();
-app.MapGet("/api/v1/files/{id:guid}", (Guid id, string resourceType, Guid resourceId, HttpRequest request, DemoAuthService auth, LeaveService leave, ExpenseService expense, TravelService travel, PurchaseService purchase, SealService seal, AttendanceService attendance, EmploymentContractService contracts, KnowledgeDocumentService documents, FileService files) =>
+app.MapGet("/api/v1/files/{id:guid}", (Guid id, string resourceType, Guid resourceId, HttpRequest request, DemoAuthService auth, LeaveService leave, ExpenseService expense, TravelService travel, PurchaseService purchase, SealService seal, AttendanceService attendance, EmploymentContractService contracts, KnowledgeDocumentService documents, PaymentService payment, FileService files) =>
 {
     var actor = Actor(request, auth);
     var permitted = resourceType.ToLowerInvariant() switch
     {
         "leave" => leave.Get(actor, resourceId).Value?.Attachments.Contains(id.ToString()) == true,
-        "expense" => expense.Get(actor, resourceId).Value is { } claim && (claim.Items.Any(item => item.Attachments?.Contains(id.ToString()) == true) || claim.Payment?.ProofFile == id.ToString()),
+        "expense" => expense.Get(actor, resourceId).Value is { } claim && (
+            claim.Items.Any(item => item.Attachments?.Contains(id.ToString()) == true) ||
+            claim.Payment?.ProofFile == id.ToString() ||
+            claim.Invoices.Any(inv => inv.AttachmentId == id) ||
+            payment.CanAccessPaymentAttachment(actor, "Expense", resourceId, id)),
         "travel" => travel.Get(actor, resourceId).Value?.Attachments.Contains(id.ToString()) == true,
-        "purchase" => purchase.Get(actor, resourceId).Value is { } requisition && (requisition.Attachments.Contains(id.ToString()) || requisition.Order?.Attachments.Contains(id.ToString()) == true || requisition.Receipt?.Attachments.Contains(id.ToString()) == true),
+        "purchase" => purchase.Get(actor, resourceId).Value is { } requisition && (
+            requisition.Attachments.Contains(id.ToString()) ||
+            requisition.Order?.Attachments.Contains(id.ToString()) == true ||
+            requisition.Receipt?.Attachments.Contains(id.ToString()) == true ||
+            payment.CanAccessPaymentAttachment(actor, "Purchase", resourceId, id)),
+        "payment" => payment.CanAccessPaymentAttachment(actor, resourceId, id),
         "seal" => seal.Get(actor, resourceId).Value is { } requestDoc && (requestDoc.Attachments.Contains(id.ToString()) || requestDoc.Execution?.Attachments.Contains(id.ToString()) == true || requestDoc.Return?.Attachments.Contains(id.ToString()) == true),
         "attendance" => attendance.Get(actor, resourceId).Value?.Appeals.Any(appeal => appeal.Attachments.Contains(id.ToString())) == true,
         "contract" => contracts.Get(actor, resourceId).Value?.Attachments.Contains(id.ToString()) == true,
@@ -645,7 +654,35 @@ app.MapPost("/api/v1/expenses/{id:guid}/payments", (Guid id, CreatePaymentTransa
 app.MapPost("/api/v1/expense-claims/{id:guid}/payments", (Guid id, CreatePaymentTransactionRequest body, HttpRequest request, DemoAuthService auth, PaymentService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.RegisterExpensePayment(actor, id, body), created: true, atomic: true, fingerprintPayload: new { id, body }); });
 app.MapPost("/api/v1/expenses/invoices/validate", (ValidateInvoiceRequest body, HttpRequest request, DemoAuthService auth, ExpenseService service) => { var result = service.ValidateInvoice(Actor(request, auth), body); return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: StatusCodes.Status400BadRequest); });
 app.MapPost("/api/v1/expense-claims/invoices/validate", (ValidateInvoiceRequest body, HttpRequest request, DemoAuthService auth, ExpenseService service) => { var result = service.ValidateInvoice(Actor(request, auth), body); return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: StatusCodes.Status400BadRequest); });
-app.MapGet("/api/v1/finance/invoices", (string? keyword, InvoiceType? type, DateOnly? startDate, DateOnly? endDate, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, ExpenseService service) => Results.Ok(Paging.Create(service.GetFinanceInvoices(Actor(request, auth), keyword, type, startDate, endDate), page, pageSize)));
+app.MapGet("/api/v1/finance/invoices", (string? keyword, InvoiceType? type, DateOnly? startDate, DateOnly? endDate, string? departmentId, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, ExpenseService service) =>
+{
+    var result = service.GetFinanceInvoicesPaged(Actor(request, auth), keyword, type, startDate, endDate, departmentId, page, pageSize);
+    return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: result.Code == "AUTH_002" ? StatusCodes.Status403Forbidden : StatusCodes.Status400BadRequest);
+});
+app.MapGet("/api/v1/finance/payments", (string? keyword, string? businessType, DateOnly? startDate, DateOnly? endDate, string? departmentId, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, PaymentService service) =>
+{
+    var result = service.GetFinancePaymentsPaged(Actor(request, auth), keyword, businessType, startDate, endDate, departmentId, page, pageSize);
+    return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: result.Code == "AUTH_002" ? StatusCodes.Status403Forbidden : StatusCodes.Status400BadRequest);
+});
+app.MapGet("/api/v1/finance/reconciliations", (string? keyword, DateTimeOffset? startDate, DateTimeOffset? endDate, string? departmentId, string? status, int? page, int? pageSize, HttpRequest request, DemoAuthService auth, PurchaseService service) =>
+{
+    var result = service.GetReconciliationsPaged(Actor(request, auth), keyword, startDate, endDate, departmentId, status, page, pageSize);
+    return result.IsSuccess ? Results.Ok(result.Value) : Results.Json(new { code = result.Code, message = result.Error }, statusCode: result.Code == "AUTH_002" ? StatusCodes.Status403Forbidden : StatusCodes.Status400BadRequest);
+});
+app.MapGet("/api/v1/finance/export/budgets", (int? year, string? departmentId, HttpRequest request, DemoAuthService auth, BudgetService service) =>
+{
+    var actor = Actor(request, auth);
+    try
+    {
+        var csv = service.ExportBudgetsCsv(actor, year, departmentId);
+        var bytes = System.Text.Encoding.UTF8.GetBytes(csv);
+        return Results.File(bytes, "text/csv; charset=utf-8", $"budget_export_{DateTime.Now:yyyyMMddHHmmss}.csv");
+    }
+    catch (UnauthorizedAccessException)
+    {
+        return Results.Json(new { code = "AUTH_002", message = "无预算数据导出权限。" }, statusCode: StatusCodes.Status403Forbidden);
+    }
+});
 app.MapGet("/api/v1/finance/export/expenses", (string? applicantId, string? departmentId, DateOnly? startDate, DateOnly? endDate, string? paymentStatus, HttpRequest request, DemoAuthService auth, PaymentService service) =>
 {
     var actor = Actor(request, auth);

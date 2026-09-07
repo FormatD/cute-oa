@@ -260,6 +260,8 @@ public sealed class ExpenseService
                 .ToList();
 
             Guid? primaryPoolId = null;
+            var isAnyOverBudget = false;
+            decimal totalOverAmount = 0m;
             foreach (var grp in itemGroups)
             {
                 var reserveResult = budgetService.Reserve(
@@ -282,12 +284,36 @@ public sealed class ExpenseService
                     budgetService.Release(TenantId, null, "Expense", item.Id, item.Number, item.TotalAmount, actor.Id, "预占失败回滚");
                     return ServiceResult<ExpenseClaim>.Failure(reserveResult.Error!, reserveResult.Code!);
                 }
-                if (reserveResult.Value.HasValue)
+                if (reserveResult.Value?.BudgetId.HasValue == true)
                 {
-                    primaryPoolId ??= reserveResult.Value.Value;
+                    primaryPoolId ??= reserveResult.Value.BudgetId.Value;
+                }
+                if (reserveResult.Value?.IsOverBudget == true)
+                {
+                    isAnyOverBudget = true;
+                    totalOverAmount += reserveResult.Value.OverBudgetAmount;
                 }
             }
             item.BudgetPoolId = primaryPoolId;
+            item.IsOverBudget = isAnyOverBudget;
+            item.OverBudgetAmount = totalOverAmount;
+            if (isAnyOverBudget)
+            {
+                item.OverBudgetPolicySnapshot = JsonSerializer.Serialize(new OverBudgetSnapshot(
+                    IsOverBudget: true,
+                    RequestedAmount: item.TotalAmount,
+                    AvailableAmount: Math.Max(0m, item.TotalAmount - totalOverAmount),
+                    OverBudgetAmount: totalOverAmount,
+                    Department: item.DepartmentName,
+                    Category: itemGroups.FirstOrDefault()?.Category,
+                    PolicyCode: configRecord?.Code ?? "DEFAULT",
+                    ResolvedAt: DateTimeOffset.UtcNow
+                ));
+            }
+            else
+            {
+                item.OverBudgetPolicySnapshot = null;
+            }
         }
 
         var route = processRouter.Resolve("Expense", actor, item.TotalAmount);
@@ -310,6 +336,25 @@ public sealed class ExpenseService
         foreach (var (resolvedApprover, sequence) in route.Value.Approvers.Select((value, index) => (value, index + 1)))
         {
             item.Tasks.Add(new ExpenseTask { ExpenseClaimId = item.Id, FlowInstanceId = instance.Id, AssigneeId = resolvedApprover.Assignee.Id, AssigneeName = resolvedApprover.Assignee.Name, OriginalAssigneeId = resolvedApprover.DelegationId is null ? null : resolvedApprover.OriginalApprover.Id, OriginalAssigneeName = resolvedApprover.DelegationId is null ? null : resolvedApprover.OriginalApprover.Name, DelegationId = resolvedApprover.DelegationId, Sequence = sequence });
+        }
+
+        // 超预算特批加签节点：若超预算且审批链路未包含财务经理，加签财务经理特批
+        if (item.IsOverBudget)
+        {
+            var financeManager = data.ActiveEmployees.FirstOrDefault(e => data.HasRole(e, "财务经理") || e.Role == "财务经理") ?? data.FindEmployee("u-lin");
+            if (financeManager is not null && !route.Value.Approvers.Any(a => a.Assignee.Id == financeManager.Id))
+            {
+                var extraSeq = item.Tasks.Count + 1;
+                item.Tasks.Add(new ExpenseTask
+                {
+                    ExpenseClaimId = item.Id,
+                    FlowInstanceId = instance.Id,
+                    AssigneeId = financeManager.Id,
+                    AssigneeName = financeManager.Name,
+                    Sequence = extraSeq,
+                    Comment = "超预算特批节点"
+                });
+            }
         }
         try
         {
@@ -615,15 +660,21 @@ public sealed class ExpenseService
         return ServiceResult<ValidateInvoiceResult>.Success(new ValidateInvoiceResult(true, null, null, null, null));
     }
 
-    public IReadOnlyList<ExpenseInvoiceListItem> GetFinanceInvoices(
+    public ServiceResult<PagedResponse<ExpenseInvoiceListItem>> GetFinanceInvoicesPaged(
         Employee actor,
         string? keyword = null,
         InvoiceType? type = null,
         DateOnly? startDate = null,
-        DateOnly? endDate = null)
+        DateOnly? endDate = null,
+        string? departmentId = null,
+        int? page = null,
+        int? pageSize = null)
     {
         if (!data.HasPermission(actor, OaPermissions.ExpensePay) && !data.HasPermission(actor, OaPermissions.ExpenseAllView))
-            return [];
+            return ServiceResult<PagedResponse<ExpenseInvoiceListItem>>.Failure("无发票台账查看权限。", "AUTH_002");
+
+        var curPage = Math.Max(1, page ?? 1);
+        var size = Math.Clamp(pageSize ?? 20, 1, 100);
 
         if (db is not null)
         {
@@ -646,11 +697,29 @@ public sealed class ExpenseService
                 invQuery = invQuery.Where(i => i.InvoiceNumber.Contains(kw) || i.InvoiceCode.Contains(kw));
             }
 
-            var invList = invQuery.OrderByDescending(i => i.CreatedAt).Take(200).ToList();
+            if (!string.IsNullOrWhiteSpace(departmentId))
+            {
+                var matchingClaimIds = db.ExpenseClaims.AsNoTracking()
+                    .Where(c => c.TenantId == TenantId && c.DepartmentName == departmentId)
+                    .Select(c => c.Id);
+                invQuery = invQuery.Where(i => matchingClaimIds.Contains(i.ExpenseClaimId));
+            }
+
+            var total = invQuery.Count();
+            var totalPages = (int)Math.Ceiling((double)total / size);
+
+            var invList = invQuery
+                .OrderByDescending(i => i.BillingDate)
+                .ThenByDescending(i => i.CreatedAt)
+                .ThenByDescending(i => i.Id)
+                .Skip((curPage - 1) * size)
+                .Take(size)
+                .ToList();
+
             var claimIds = invList.Select(i => i.ExpenseClaimId).Distinct().ToList();
             var claims = db.ExpenseClaims.AsNoTracking().Where(c => claimIds.Contains(c.Id)).ToDictionary(c => c.Id);
 
-            return invList.Select(i =>
+            var items = invList.Select(i =>
             {
                 var claim = claims.GetValueOrDefault(i.ExpenseClaimId);
                 return new ExpenseInvoiceListItem(
@@ -672,26 +741,29 @@ public sealed class ExpenseService
                     i.CreatedAt
                 );
             }).ToList();
+
+            return ServiceResult<PagedResponse<ExpenseInvoiceListItem>>.Success(new PagedResponse<ExpenseInvoiceListItem>(
+                Items: items,
+                Total: total,
+                Page: curPage,
+                PageSize: size,
+                TotalPages: totalPages
+            ));
         }
 
-        return _claims.SelectMany(c => c.Invoices.Select(i => new ExpenseInvoiceListItem(
-            i.Id,
-            c.Id,
-            c.Number,
-            c.ApplicantName,
-            i.InvoiceType,
-            i.InvoiceCode,
-            i.InvoiceNumber,
-            i.BillingDate,
-            i.AmountWithoutTax,
-            i.TaxRate,
-            i.TaxAmount,
-            i.TotalAmount,
-            i.VerificationCode,
-            i.AttachmentId,
-            i.Status,
-            i.CreatedAt
-        ))).ToList();
+        var inMemTotal = _claims.SelectMany(c => c.Invoices).Count();
+        return ServiceResult<PagedResponse<ExpenseInvoiceListItem>>.Success(new PagedResponse<ExpenseInvoiceListItem>(Items: [], Total: inMemTotal, Page: curPage, PageSize: size, TotalPages: 1));
+    }
+
+    public IReadOnlyList<ExpenseInvoiceListItem> GetFinanceInvoices(
+        Employee actor,
+        string? keyword = null,
+        InvoiceType? type = null,
+        DateOnly? startDate = null,
+        DateOnly? endDate = null)
+    {
+        var res = GetFinanceInvoicesPaged(actor, keyword, type, startDate, endDate, pageSize: 200);
+        return res.IsSuccess ? res.Value!.Items : [];
     }
 
     public IReadOnlyList<ExpenseInvoiceListItem> GetInvoices(Employee actor, Guid expenseClaimId)
@@ -805,6 +877,20 @@ public sealed class ExpenseService
                 }).ToList(),
                 CopyRecipientIds = copyRecipients.LoadRecipientIds("Expense", x.Id)
             };
+            if (!string.IsNullOrEmpty(x.ConfigSnapshotJson) && x.ConfigSnapshotJson.Contains("\"isOverBudget\":true", StringComparison.OrdinalIgnoreCase))
+            {
+                claim.IsOverBudget = true;
+                try
+                {
+                    using var doc = JsonDocument.Parse(x.ConfigSnapshotJson);
+                    if (doc.RootElement.TryGetProperty("overBudgetSnapshot", out var obs))
+                    {
+                        claim.OverBudgetAmount = obs.TryGetProperty("overBudgetAmount", out var oba) ? oba.GetDecimal() : 0m;
+                        claim.OverBudgetPolicySnapshot = obs.GetRawText();
+                    }
+                }
+                catch { }
+            }
             claim.Tasks.AddRange(tasks[x.Id].OrderBy(t => t.Sequence).Select(t => new ExpenseTask { Id = t.Id, ExpenseClaimId = x.Id, FlowInstanceId = t.FlowInstanceId, AssigneeId = t.AssigneeId, AssigneeName = t.AssigneeName, OriginalAssigneeId = t.OriginalAssigneeId, OriginalAssigneeName = t.OriginalAssigneeName, DelegationId = t.DelegationId, Sequence = t.Sequence, Status = (FlowTaskStatus)t.Status, Comment = t.Comment, ProcessedAt = t.ProcessedAt }));
             claim.FlowInstances.AddRange(flowInstances.Load("Expense", x.Id));
             if (payments.TryGetValue(x.Id, out var payment)) claim.Payment = new PaymentRecord(payment.PaymentDate, payment.PaymentMethod, payment.TransactionNumber, payment.PaidAmount, payment.ProofFile, payment.OperatorId);
@@ -820,7 +906,27 @@ public sealed class ExpenseService
         if (record is null) { record = new ExpenseRecord { Id = claim.Id, TenantId = TenantId }; db.ExpenseClaims.Add(record); }
         record.Number = claim.Number; record.ApplicantId = claim.ApplicantId; record.ApplicantName = claim.ApplicantName; record.DepartmentName = claim.DepartmentName; record.TravelRequestId = claim.TravelRequestId; record.Project = claim.Project; record.PayeeAccountName = claim.PayeeAccountName; record.PayeeAccount = claim.PayeeAccount; record.BankName = claim.BankName; record.Description = claim.Description; record.TotalAmount = claim.TotalAmount; record.Status = (int)claim.Status;
         record.BudgetPoolId = claim.BudgetPoolId; record.PaymentStatus = claim.PaymentStatus; record.PaidTotalAmount = claim.PaidTotalAmount; record.InvoiceCount = claim.Invoices.Count;
-        record.Version = claim.Version; record.ProcessDefinitionId = claim.ProcessDefinitionId; record.ProcessDefinitionCode = claim.ProcessDefinitionCode; record.ProcessDefinitionVersion = claim.ProcessDefinitionVersion; record.CurrentFlowInstanceId = claim.CurrentFlowInstanceId; record.ConfigVersionId = claim.ConfigVersionId; record.ConfigVersionNumber = claim.ConfigVersionNumber; record.ConfigSnapshotJson = claim.ConfigSnapshotJson; record.ConfigResolvedAt = claim.ConfigResolvedAt; record.UpdatedAt = DateTimeOffset.UtcNow;
+        record.Version = claim.Version; record.ProcessDefinitionId = claim.ProcessDefinitionId; record.ProcessDefinitionCode = claim.ProcessDefinitionCode; record.ProcessDefinitionVersion = claim.ProcessDefinitionVersion; record.CurrentFlowInstanceId = claim.CurrentFlowInstanceId; record.ConfigVersionId = claim.ConfigVersionId; record.ConfigVersionNumber = claim.ConfigVersionNumber;
+        if (claim.IsOverBudget && !string.IsNullOrEmpty(claim.OverBudgetPolicySnapshot))
+        {
+            try
+            {
+                var baseJson = string.IsNullOrEmpty(claim.ConfigSnapshotJson) ? "{}" : claim.ConfigSnapshotJson;
+                var dict = JsonSerializer.Deserialize<Dictionary<string, object>>(baseJson) ?? new Dictionary<string, object>();
+                dict["isOverBudget"] = true;
+                dict["overBudgetSnapshot"] = JsonSerializer.Deserialize<object>(claim.OverBudgetPolicySnapshot)!;
+                record.ConfigSnapshotJson = JsonSerializer.Serialize(dict);
+            }
+            catch
+            {
+                record.ConfigSnapshotJson = claim.ConfigSnapshotJson;
+            }
+        }
+        else
+        {
+            record.ConfigSnapshotJson = claim.ConfigSnapshotJson;
+        }
+        record.ConfigResolvedAt = claim.ConfigResolvedAt; record.UpdatedAt = DateTimeOffset.UtcNow;
         db.ExpenseItems.Where(x => x.ExpenseClaimId == claim.Id).ExecuteDelete();
         db.ExpenseTasks.Where(x => x.ExpenseClaimId == claim.Id).ExecuteDelete();
         db.Payments.Where(x => x.ExpenseClaimId == claim.Id).ExecuteDelete();

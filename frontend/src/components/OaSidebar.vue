@@ -59,6 +59,15 @@ function go(route: string) {
 
 function hasPermission(permission?: string) {
   if (!permission) return true
+  if (permission === 'EXPENSE_PAY_OR_VIEW') {
+    return props.currentUser?.permissions?.includes('EXPENSE_PAY') === true ||
+           props.currentUser?.permissions?.includes('EXPENSE_ALL_VIEW') === true ||
+           props.currentUser?.permissions?.includes('PURCHASE_MANAGE') === true ||
+           props.currentUser?.role === '财务专员' ||
+           props.currentUser?.role === '财务经理' ||
+           props.currentUser?.role === '采购经理' ||
+           props.currentUser?.role === '总经理'
+  }
   return props.currentUser?.permissions?.includes(permission) === true
 }
 
@@ -79,6 +88,7 @@ const navSections: NavSection[] = [
       { id: 'leave', navKey: 'leave', route: 'leave', icon: '◫', name: '请假管理', keywords: ['qj', 'qingjia', 'leave'] },
       { id: 'expense', navKey: 'expense', route: 'expense', icon: '¥', name: '费用报销', keywords: ['bx', 'baoxiao', 'expense'] },
       { id: 'budgets', navKey: 'budgets', route: 'budgets', icon: '💰', name: '预算中心', permission: 'EXPENSE_ALL_VIEW', keywords: ['ys', 'yusuan', 'budget'] },
+      { id: 'finance-ledgers', navKey: 'finance-ledgers', route: 'finance/ledgers', icon: '🧾', name: '财务台账', permission: 'EXPENSE_PAY_OR_VIEW', keywords: ['tz', 'taizhang', 'fapiao', 'fukuan', 'duizhang', 'ledger'] },
       { id: 'travel', navKey: 'travel', route: 'travel', icon: '⌖', name: '出差管理', keywords: ['cc', 'chuchai', 'travel'] },
       { id: 'purchase', navKey: 'purchase', route: 'purchase', icon: '▦', name: '采购管理', keywords: ['cg', 'caigou', 'purchase'] },
       { id: 'seal', navKey: 'seal', route: 'seal', icon: '印', name: '用章管理', keywords: ['yz', 'yongzhang', 'yinzhang', 'seal'] },

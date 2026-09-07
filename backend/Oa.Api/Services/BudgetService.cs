@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Oa.Api.Domain;
 using Oa.Api.Persistence;
@@ -794,7 +796,7 @@ public sealed class BudgetService
             HasConfiguredBudget: true);
     }
 
-    public ServiceResult<Guid?> Reserve(
+    public ServiceResult<BudgetReserveResult> Reserve(
         string tenantId,
         string departmentId,
         string? expenseCategory,
@@ -809,7 +811,7 @@ public sealed class BudgetService
         string? projectId = null,
         string? actionKeySuffix = null)
     {
-        if (amount <= 0) return ServiceResult<Guid?>.Success(null);
+        if (amount <= 0) return ServiceResult<BudgetReserveResult>.Success(new BudgetReserveResult(null));
 
         var year = targetYear ?? DateTime.Today.Year;
         var month = targetMonth ?? DateTime.Today.Month;
@@ -823,19 +825,22 @@ public sealed class BudgetService
             {
                 var existingTx = db.BudgetTransactions.AsNoTracking().FirstOrDefault(t => t.TenantId == tenantId && t.ActionKey == actionKey);
                 if (existingTx is not null)
-                    return ServiceResult<Guid?>.Success(existingTx.BudgetId);
+                    return ServiceResult<BudgetReserveResult>.Success(new BudgetReserveResult(existingTx.BudgetId));
 
                 var record = FindMatchingBudgetRecord(tenantId, departmentId, expenseCategory, year, month, projectId);
-                if (record is null) return ServiceResult<Guid?>.Success(null); // 无预算池直接放行
+                if (record is null) return ServiceResult<BudgetReserveResult>.Success(new BudgetReserveResult(null)); // 无预算池直接放行
 
                 // Exclusive row lock on matching budget pool
                 db.Database.ExecuteSqlInterpolated($"SELECT \"Id\" FROM budget WHERE \"TenantId\" = {tenantId} AND \"Id\" = {record.Id} FOR UPDATE");
                 db.Entry(record).Reload();
 
                 var available = record.AllocatedAmount - record.CommittedAmount - record.ActualAmount;
-                if (amount > available && blockWhenExceeded)
+                var isOverBudget = amount > available;
+                var overAmount = isOverBudget ? (amount - available) : 0m;
+
+                if (isOverBudget && blockWhenExceeded)
                 {
-                    return ServiceResult<Guid?>.Failure(
+                    return ServiceResult<BudgetReserveResult>.Failure(
                         $"部门预算不足：可用额度 {available:N2} 元，申请金额 {amount:N2} 元，超出 {(amount - available):N2} 元。",
                         "BUDGET_EXCEEDED");
                 }
@@ -855,7 +860,9 @@ public sealed class BudgetService
                     TransactionType = "RESERVED",
                     Amount = amount,
                     BalanceAfter = newBalance,
-                    Description = $"{businessType} 申请【{businessNumber}】预占额度",
+                    Description = isOverBudget
+                        ? $"{businessType} 申请【{businessNumber}】超额预占 (超出 {overAmount:N2} 元)"
+                        : $"{businessType} 申请【{businessNumber}】预占额度",
                     OperatorId = operatorId,
                     ActionKey = actionKey,
                     CreatedAt = DateTimeOffset.UtcNow
@@ -864,29 +871,31 @@ public sealed class BudgetService
                 db.SaveChanges();
                 dbTx?.Commit();
 
-                return ServiceResult<Guid?>.Success(record.Id);
+                return ServiceResult<BudgetReserveResult>.Success(new BudgetReserveResult(record.Id, isOverBudget, overAmount));
             }
             catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException pgEx && pgEx.SqlState == "23505")
             {
                 dbTx?.Rollback();
                 var existingTx = db.BudgetTransactions.AsNoTracking().FirstOrDefault(t => t.TenantId == tenantId && t.ActionKey == actionKey);
-                if (existingTx is not null) return ServiceResult<Guid?>.Success(existingTx.BudgetId);
-                return ServiceResult<Guid?>.Failure("并发预算预占冲突，请重试。", "CONCURRENCY_001");
+                if (existingTx is not null) return ServiceResult<BudgetReserveResult>.Success(new BudgetReserveResult(existingTx.BudgetId));
+                return ServiceResult<BudgetReserveResult>.Failure("并发预算预占冲突，请重试。", "CONCURRENCY_001");
             }
         }
 
         lock (_memoryTransactions)
         {
             var memExisting = _memoryTransactions.FirstOrDefault(t => t.TenantId == tenantId && t.ActionKey == actionKey);
-            if (memExisting is not null) return ServiceResult<Guid?>.Success(memExisting.BudgetId);
+            if (memExisting is not null) return ServiceResult<BudgetReserveResult>.Success(new BudgetReserveResult(memExisting.BudgetId));
 
             var mem = FindMatchingBudget(tenantId, departmentId, expenseCategory, year, month, projectId);
-            if (mem is null) return ServiceResult<Guid?>.Success(null);
+            if (mem is null) return ServiceResult<BudgetReserveResult>.Success(new BudgetReserveResult(null));
 
             var memAvailable = mem.AllocatedAmount - mem.CommittedAmount - mem.ActualAmount;
-            if (amount > memAvailable && blockWhenExceeded)
+            var memIsOver = amount > memAvailable;
+            var memOverAmount = memIsOver ? (amount - memAvailable) : 0m;
+            if (memIsOver && blockWhenExceeded)
             {
-                return ServiceResult<Guid?>.Failure($"部门预算不足：可用额度 {memAvailable:N2} 元。", "BUDGET_EXCEEDED");
+                return ServiceResult<BudgetReserveResult>.Failure($"部门预算不足：可用额度 {memAvailable:N2} 元。", "BUDGET_EXCEEDED");
             }
 
             mem.CommittedAmount += amount;
@@ -906,7 +915,7 @@ public sealed class BudgetService
                 OperatorId = operatorId,
                 ActionKey = actionKey
             });
-            return ServiceResult<Guid?>.Success(mem.Id);
+            return ServiceResult<BudgetReserveResult>.Success(new BudgetReserveResult(mem.Id, memIsOver, memOverAmount));
         }
     }
 
@@ -1534,4 +1543,70 @@ public sealed class BudgetService
         CreatedAt = r.CreatedAt,
         UpdatedAt = r.UpdatedAt
     };
+
+    public string ExportBudgetsCsv(Employee actor, int? year = null, string? departmentId = null, int? month = null, string? expenseCategory = null)
+    {
+        if (!CanViewAllBudgets(actor))
+            throw new UnauthorizedAccessException("无预算执行数据导出权限。");
+
+        if (db is null) return string.Empty;
+
+        var q = db.Budgets.AsNoTracking().Where(b => b.TenantId == TenantId);
+        if (!string.IsNullOrWhiteSpace(departmentId)) q = q.Where(b => b.DepartmentId == departmentId);
+        if (year.HasValue && year.Value > 0) q = q.Where(b => b.Year == year.Value);
+        if (month.HasValue && month.Value > 0) q = q.Where(b => b.Month == month.Value);
+        if (!string.IsNullOrWhiteSpace(expenseCategory)) q = q.Where(b => b.ExpenseCategory == expenseCategory);
+
+        var list = q.OrderByDescending(b => b.Year).ThenByDescending(b => b.Month).ThenBy(b => b.DepartmentId).Take(5000).ToList();
+
+        var sb = new StringBuilder();
+        sb.Append('\uFEFF');
+        sb.AppendLine("部门,费用科目,所属年度,所属月份,项目,编制预算,已预占额,已消耗额,可用余额,执行率(%),状态");
+
+        var rowCount = 0;
+        foreach (var b in list)
+        {
+            var avail = b.AllocatedAmount - b.CommittedAmount - b.ActualAmount;
+            var execRate = b.AllocatedAmount > 0 ? (b.ActualAmount / b.AllocatedAmount * 100m) : 0m;
+            sb.AppendLine(string.Join(",",
+                EscapeCsv(b.DepartmentId),
+                EscapeCsv(b.ExpenseCategory ?? "全部科目"),
+                b.Year.ToString(),
+                b.Month == 0 ? "全年" : $"{b.Month}月",
+                EscapeCsv(b.ProjectId ?? "全局"),
+                b.AllocatedAmount.ToString("F2", CultureInfo.InvariantCulture),
+                b.CommittedAmount.ToString("F2", CultureInfo.InvariantCulture),
+                b.ActualAmount.ToString("F2", CultureInfo.InvariantCulture),
+                avail.ToString("F2", CultureInfo.InvariantCulture),
+                execRate.ToString("F1", CultureInfo.InvariantCulture),
+                EscapeCsv(b.Status)));
+            rowCount++;
+        }
+
+        db.AuditLogs.Add(new AuditRecord
+        {
+            TenantId = TenantId,
+            ActorId = actor.Id,
+            Action = "FINANCE_EXPORT",
+            ResourceType = "Budget",
+            ResourceId = "ALL",
+            Summary = $"导出预算执行对账明细，筛选条件: [dept={departmentId}, year={year}, month={month}]，共计 {rowCount} 行"
+        });
+        db.SaveChanges();
+
+        return sb.ToString();
+    }
+
+    public static string EscapeCsv(string? field)
+    {
+        if (string.IsNullOrEmpty(field)) return "\"\"";
+        var val = field;
+        if (val.StartsWith('=') || val.StartsWith('+') || val.StartsWith('-') || val.StartsWith('@') || val.StartsWith('\t') || val.StartsWith('\r'))
+        {
+            val = "'" + val;
+        }
+        if (val.Contains(',') || val.Contains('"') || val.Contains('\n') || val.Contains('\r'))
+            return $"\"{val.Replace("\"", "\"\"")}\"";
+        return $"\"{val}\"";
+    }
 }

@@ -207,6 +207,7 @@ public sealed class ProcurementPolicyConfig
     public string DefaultPurchaserUserId { get; set; } = string.Empty;
     public bool RequiresAcceptance { get; set; } = true;
     public string AcceptanceRoleOrAssignee { get; set; } = string.Empty;
+    public bool BlockWhenExceeded { get; set; }
 }
 
 public sealed class SealRegistryItemConfig

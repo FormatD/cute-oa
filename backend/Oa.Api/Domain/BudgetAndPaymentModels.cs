@@ -284,6 +284,39 @@ public sealed record PaymentTransactionListItem(
     string OperatorName,
     DateTimeOffset CreatedAt);
 
+public sealed record BudgetReserveResult(
+    Guid? BudgetId,
+    bool IsOverBudget = false,
+    decimal OverBudgetAmount = 0m)
+{
+    public static implicit operator Guid?(BudgetReserveResult? res) => res?.BudgetId;
+}
+
+public sealed record OverBudgetSnapshot(
+    bool IsOverBudget,
+    decimal RequestedAmount,
+    decimal AvailableAmount,
+    decimal OverBudgetAmount,
+    string? Department,
+    string? Category,
+    string PolicyCode,
+    DateTimeOffset ResolvedAt);
+
+public sealed record PurchaseReconciliationItem(
+    Guid Id,
+    string Number,
+    string ApplicantName,
+    string DepartmentName,
+    decimal EstimatedTotal,
+    decimal OrderAmount,
+    string? OrderNumber,
+    string? Supplier,
+    decimal AcceptedAmount,
+    decimal PaidAmount,
+    decimal RemainingAmount,
+    string Status,
+    DateTimeOffset CreatedAt);
+
 // ---------------- Purchase Reconciliation Models ----------------
 public sealed record PurchaseReconciliation(
     Guid PurchaseRequestId,

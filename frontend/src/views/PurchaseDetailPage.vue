@@ -217,8 +217,15 @@ onMounted(load)
     <template v-else-if="purchase.purchaseDetail">
       <div class="detail-status">
         <strong>{{ purchase.purchaseDetail.number }} · {{ purchase.purchaseDetail.title }}</strong>
+        <span v-if="purchase.purchaseDetail.isOverBudget" class="invoice-badge released" style="background:#fee2e2;color:#991b1b;margin-right:8px;">超预算</span>
         <em>{{ businessStatusLabel(purchase.purchaseDetail.status) }}</em>
       </div>
+      <section v-if="purchase.purchaseDetail.isOverBudget" class="embedded-card" style="border-left: 4px solid #ef4444; background: #fef2f2; margin-bottom: 1rem;">
+        <h3 style="color: #991b1b; margin-top: 0;">⚠️ 超预算特批记录</h3>
+        <p style="color: #7f1d1d; margin: 4px 0 0;">
+          本采购申请预估金额超出当期部门/科目可用预算额度（超额 ¥{{ (purchase.purchaseDetail.overBudgetAmount ?? 0).toFixed(2) }}）。系统已自动加签财务经理特批节点。
+        </p>
+      </section>
       <dl class="detail-grid">
         <div><dt>申请人</dt><dd>{{ purchase.purchaseDetail.applicantName }}</dd></div>
         <div><dt>所属部门</dt><dd>{{ purchase.purchaseDetail.departmentName }}</dd></div>

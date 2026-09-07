@@ -11,7 +11,7 @@ import type {
   PagedResponse
 } from '../types'
 
-export const createBudgetApi = ({ request }: HttpClient) => ({
+export const createBudgetApi = ({ request, download }: HttpClient) => ({
   getBudgets: (params?: BudgetQuery) => {
     const searchParams = new URLSearchParams()
     if (params?.departmentId) searchParams.set('departmentId', params.departmentId)
@@ -63,5 +63,12 @@ export const createBudgetApi = ({ request }: HttpClient) => ({
   checkBudget: (payload: BudgetCheckRequest) => request<BudgetCheckResult>('/budgets/check', {
     method: 'POST',
     body: JSON.stringify(payload)
-  })
+  }),
+  exportBudgetsCsv: (params?: { year?: number; departmentId?: string }) => {
+    const searchParams = new URLSearchParams()
+    if (params?.year) searchParams.set('year', String(params.year))
+    if (params?.departmentId) searchParams.set('departmentId', params.departmentId)
+    const qs = searchParams.toString()
+    return download(`/finance/export/budgets${qs ? `?${qs}` : ''}`, 'budget_export.csv')
+  }
 })

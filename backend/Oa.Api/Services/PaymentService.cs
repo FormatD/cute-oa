@@ -462,6 +462,140 @@ public sealed class PaymentService
         return ServiceResult<IReadOnlyList<PaymentTransactionListItem>>.Success(memList);
     }
 
+    public ServiceResult<PagedResponse<PaymentTransactionListItem>> GetFinancePaymentsPaged(
+        Employee actor,
+        string? keyword = null,
+        string? businessType = null,
+        DateOnly? startDate = null,
+        DateOnly? endDate = null,
+        string? departmentId = null,
+        int? page = null,
+        int? pageSize = null)
+    {
+        var canViewRawAccount = data.HasPermission(actor, OaPermissions.ExpensePay) || data.HasPermission(actor, OaPermissions.ExpenseAllView);
+        var canViewFinanceLedger = canViewRawAccount || data.HasPermission(actor, OaPermissions.PurchaseManage);
+        if (!canViewFinanceLedger)
+            return ServiceResult<PagedResponse<PaymentTransactionListItem>>.Failure("无付款台账查看权限。", "AUTH_002");
+
+        var curPage = Math.Max(1, page ?? 1);
+        var size = Math.Clamp(pageSize ?? 20, 1, 100);
+
+        if (db is not null)
+        {
+            var query = db.PaymentTransactions.AsNoTracking().Where(t => t.TenantId == TenantId);
+
+            if (!string.IsNullOrWhiteSpace(businessType))
+            {
+                var normBt = businessType.Trim();
+                query = query.Where(t => t.BusinessType == normBt);
+            }
+
+            if (startDate.HasValue)
+                query = query.Where(t => t.PaymentDate >= startDate.Value);
+            if (endDate.HasValue)
+                query = query.Where(t => t.PaymentDate <= endDate.Value);
+
+            if (!string.IsNullOrWhiteSpace(keyword))
+            {
+                var kw = keyword.Trim();
+                query = query.Where(t => t.TransactionNumber.Contains(kw) ||
+                                         t.BusinessNumber.Contains(kw) ||
+                                         t.PayeeName.Contains(kw) ||
+                                         t.PayeeAccount.Contains(kw));
+            }
+
+            if (!string.IsNullOrWhiteSpace(departmentId))
+            {
+                var expenseIds = db.ExpenseClaims.AsNoTracking().Where(c => c.TenantId == TenantId && c.DepartmentName == departmentId).Select(c => c.Id);
+                var purchaseIds = db.PurchaseRequests.AsNoTracking().Where(p => p.TenantId == TenantId && p.DepartmentName == departmentId).Select(p => p.Id);
+                query = query.Where(t => (t.BusinessType == "Expense" && expenseIds.Contains(t.BusinessId)) ||
+                                         (t.BusinessType == "Purchase" && purchaseIds.Contains(t.BusinessId)));
+            }
+
+            var total = query.Count();
+            var totalPages = (int)Math.Ceiling((double)total / size);
+
+            var list = query
+                .OrderByDescending(t => t.PaymentDate)
+                .ThenByDescending(t => t.CreatedAt)
+                .ThenByDescending(t => t.Id)
+                .Skip((curPage - 1) * size)
+                .Take(size)
+                .ToList();
+
+            var items = list.Select(t => new PaymentTransactionListItem(
+                t.Id,
+                t.BusinessType,
+                t.BusinessId,
+                t.BusinessNumber,
+                t.Sequence,
+                t.BatchTitle,
+                t.PaymentDate,
+                t.PaymentMethod,
+                canViewRawAccount ? t.PayerAccount : MaskAccount(t.PayerAccount),
+                t.PayeeName,
+                canViewRawAccount ? t.PayeeAccount : MaskAccount(t.PayeeAccount),
+                t.PayeeBank,
+                canViewRawAccount ? t.TransactionNumber : MaskTransactionNumber(t.TransactionNumber),
+                t.PaidAmount,
+                t.FeeAmount,
+                t.ProofAttachmentId?.ToString(),
+                t.Remarks,
+                t.Status,
+                t.OperatorId,
+                t.OperatorName,
+                t.CreatedAt
+            )).ToList();
+
+            return ServiceResult<PagedResponse<PaymentTransactionListItem>>.Success(new PagedResponse<PaymentTransactionListItem>(
+                Items: items,
+                Total: total,
+                Page: curPage,
+                PageSize: size,
+                TotalPages: totalPages
+            ));
+        }
+
+        var memMatching = _memoryTransactions.Where(t =>
+            (string.IsNullOrWhiteSpace(businessType) || t.BusinessType == businessType.Trim()) &&
+            (!startDate.HasValue || t.PaymentDate >= startDate.Value) &&
+            (!endDate.HasValue || t.PaymentDate <= endDate.Value)
+        ).ToList();
+
+        var memTotal = memMatching.Count;
+        var memItems = memMatching.Skip((curPage - 1) * size).Take(size).Select(t => new PaymentTransactionListItem(
+            t.Id,
+            t.BusinessType,
+            t.BusinessId,
+            t.BusinessNumber,
+            t.Sequence,
+            t.BatchTitle,
+            t.PaymentDate,
+            t.PaymentMethod,
+            canViewRawAccount ? t.PayerAccount : MaskAccount(t.PayerAccount),
+            t.PayeeName,
+            canViewRawAccount ? t.PayeeAccount : MaskAccount(t.PayeeAccount),
+            t.PayeeBank,
+            canViewRawAccount ? t.TransactionNumber : MaskTransactionNumber(t.TransactionNumber),
+            t.PaidAmount,
+            t.FeeAmount,
+            null,
+            t.Remarks,
+            t.Status.ToString(),
+            t.OperatorId,
+            t.OperatorName,
+            DateTimeOffset.UtcNow
+        )).ToList();
+
+        return ServiceResult<PagedResponse<PaymentTransactionListItem>>.Success(new PagedResponse<PaymentTransactionListItem>(
+            Items: memItems,
+            Total: memTotal,
+            Page: curPage,
+            PageSize: size,
+            TotalPages: (int)Math.Ceiling((double)memTotal / size)
+        ));
+    }
+
     public string ExportExpensesCsv(Employee actor, string? applicantId, string? departmentId, DateOnly? startDate, DateOnly? endDate, string? paymentStatus)
     {
         if (!data.HasPermission(actor, OaPermissions.ExpensePay))
@@ -473,8 +607,18 @@ public sealed class PaymentService
         if (!string.IsNullOrWhiteSpace(applicantId)) claimsQuery = claimsQuery.Where(c => c.ApplicantId == applicantId);
         if (!string.IsNullOrWhiteSpace(departmentId)) claimsQuery = claimsQuery.Where(c => c.DepartmentName == departmentId);
         if (!string.IsNullOrWhiteSpace(paymentStatus)) claimsQuery = claimsQuery.Where(c => c.PaymentStatus == paymentStatus);
+        if (startDate.HasValue)
+        {
+            var startDt = startDate.Value.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+            claimsQuery = claimsQuery.Where(c => c.CreatedAt >= startDt);
+        }
+        if (endDate.HasValue)
+        {
+            var endDt = endDate.Value.ToDateTime(TimeOnly.MaxValue, DateTimeKind.Utc);
+            claimsQuery = claimsQuery.Where(c => c.CreatedAt <= endDt);
+        }
 
-        var claims = claimsQuery.OrderByDescending(c => c.CreatedAt).ToList();
+        var claims = claimsQuery.OrderByDescending(c => c.CreatedAt).Take(5000).ToList();
         var claimIds = claims.Select(c => c.Id).ToList();
 
         var invoices = db.ExpenseInvoices.AsNoTracking()
@@ -548,7 +692,7 @@ public sealed class PaymentService
             Action = "FINANCE_EXPORT",
             ResourceType = "ExpenseClaim",
             ResourceId = "ALL",
-            Summary = $"导出报销发票与付款对账表，共计 {rowCount} 行"
+            Summary = $"导出报销发票与付款对账表，筛选条件: [dept={departmentId}, start={startDate}, end={endDate}, status={paymentStatus}]，共计 {rowCount} 行"
         });
         db.SaveChanges();
 
@@ -566,8 +710,18 @@ public sealed class PaymentService
         if (!string.IsNullOrWhiteSpace(applicantId)) purchaseQuery = purchaseQuery.Where(p => p.ApplicantId == applicantId);
         if (!string.IsNullOrWhiteSpace(departmentId)) purchaseQuery = purchaseQuery.Where(p => p.DepartmentName == departmentId);
         if (!string.IsNullOrWhiteSpace(paymentStatus)) purchaseQuery = purchaseQuery.Where(p => p.PaymentStatus == paymentStatus);
+        if (startDate.HasValue)
+        {
+            var startDt = startDate.Value.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+            purchaseQuery = purchaseQuery.Where(p => p.CreatedAt >= startDt);
+        }
+        if (endDate.HasValue)
+        {
+            var endDt = endDate.Value.ToDateTime(TimeOnly.MaxValue, DateTimeKind.Utc);
+            purchaseQuery = purchaseQuery.Where(p => p.CreatedAt <= endDt);
+        }
 
-        var purchases = purchaseQuery.OrderByDescending(p => p.CreatedAt).ToList();
+        var purchases = purchaseQuery.OrderByDescending(p => p.CreatedAt).Take(5000).ToList();
         var purchaseIds = purchases.Select(p => p.Id).ToList();
 
         var orders = db.PurchaseOrders.AsNoTracking().Where(o => o.TenantId == TenantId && purchaseIds.Contains(o.PurchaseRequestId)).ToDictionary(o => o.PurchaseRequestId);
@@ -638,11 +792,52 @@ public sealed class PaymentService
             Action = "FINANCE_EXPORT",
             ResourceType = "PurchaseRequest",
             ResourceId = "ALL",
-            Summary = $"导出采购四单对账汇总表，共计 {rowCount} 行"
+            Summary = $"导出采购四单对账汇总表，筛选条件: [dept={departmentId}, start={startDate}, end={endDate}, status={paymentStatus}]，共计 {rowCount} 行"
         });
         db.SaveChanges();
 
         return sb.ToString();
+    }
+
+    public bool CanAccessPaymentAttachment(Employee actor, Guid paymentId, Guid attachmentId)
+    {
+        if (db is null) return false;
+        var pt = db.PaymentTransactions.AsNoTracking().SingleOrDefault(t => t.TenantId == TenantId && t.Id == paymentId);
+        if (pt is null || pt.ProofAttachmentId != attachmentId) return false;
+
+        var canViewRawAccount = data.HasPermission(actor, OaPermissions.ExpensePay) || data.HasPermission(actor, OaPermissions.ExpenseAllView);
+        if (canViewRawAccount) return true;
+
+        if (pt.BusinessType == "Expense")
+        {
+            var claim = db.ExpenseClaims.AsNoTracking().SingleOrDefault(x => x.TenantId == TenantId && x.Id == pt.BusinessId);
+            if (claim is null) return false;
+            return claim.ApplicantId == actor.Id ||
+                   db.ExpenseTasks.Any(t => t.TenantId == TenantId && t.ExpenseClaimId == pt.BusinessId && t.AssigneeId == actor.Id) ||
+                   db.FlowCopyRecipients.Any(c => c.TenantId == TenantId && c.BusinessType == "Expense" && c.BusinessId == pt.BusinessId && c.RecipientId == actor.Id && c.AvailableAt != null) ||
+                   data.CanView(actor, data.GetEmployee(claim.ApplicantId), "Expense");
+        }
+        if (pt.BusinessType == "Purchase")
+        {
+            var purchase = db.PurchaseRequests.AsNoTracking().SingleOrDefault(x => x.TenantId == TenantId && x.Id == pt.BusinessId);
+            if (purchase is null) return false;
+            return purchase.ApplicantId == actor.Id ||
+                   purchase.PurchaserUserId == actor.Id ||
+                   data.HasPermission(actor, OaPermissions.PurchaseManage) ||
+                   db.PurchaseTasks.Any(t => t.TenantId == TenantId && t.PurchaseRequestId == pt.BusinessId && t.AssigneeId == actor.Id) ||
+                   db.FlowCopyRecipients.Any(c => c.TenantId == TenantId && c.BusinessType == "Purchase" && c.BusinessId == pt.BusinessId && c.RecipientId == actor.Id && c.AvailableAt != null) ||
+                   data.CanView(actor, data.GetEmployee(purchase.ApplicantId), "Purchase");
+        }
+        return false;
+    }
+
+    public bool CanAccessPaymentAttachment(Employee actor, string businessType, Guid businessId, Guid attachmentId)
+    {
+        if (db is null) return false;
+        var pt = db.PaymentTransactions.AsNoTracking()
+            .FirstOrDefault(t => t.TenantId == TenantId && t.BusinessType == businessType && t.BusinessId == businessId && t.ProofAttachmentId == attachmentId);
+        if (pt is null) return false;
+        return CanAccessPaymentAttachment(actor, pt.Id, attachmentId);
     }
 
     private static string NormalizePaymentMethod(string method)
@@ -667,12 +862,17 @@ public sealed class PaymentService
         return $"{clean[..3]}****{clean[^3..]}";
     }
 
-    private static string EscapeCsv(string? field)
+    public static string EscapeCsv(string? field)
     {
         if (string.IsNullOrEmpty(field)) return "\"\"";
-        if (field.Contains(',') || field.Contains('"') || field.Contains('\n') || field.Contains('\r'))
-            return $"\"{field.Replace("\"", "\"\"")}\"";
-        return $"\"{field}\"";
+        var val = field;
+        if (val.StartsWith('=') || val.StartsWith('+') || val.StartsWith('-') || val.StartsWith('@') || val.StartsWith('\t') || val.StartsWith('\r'))
+        {
+            val = "'" + val;
+        }
+        if (val.Contains(',') || val.Contains('"') || val.Contains('\n') || val.Contains('\r'))
+            return $"\"{val.Replace("\"", "\"\"")}\"";
+        return $"\"{val}\"";
     }
 
     private static PaymentTransaction MapToDomain(PaymentTransactionRecord r) => new()

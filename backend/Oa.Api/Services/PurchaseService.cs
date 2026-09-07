@@ -108,7 +108,8 @@ public sealed class PurchaseService
         var items = source.OrderByDescending(item => item.CreatedAt).ThenByDescending(item => item.Id)
             .Skip((page - 1) * pageSize).Take(pageSize)
             .Select(item => new PurchaseRequestListItem(item.Id, item.Number, item.ApplicantId, item.ApplicantName, item.DepartmentName,
-                item.Title, item.RequiredDate, item.ItemCount, item.EstimatedTotal, (PurchaseStatus)item.Status, item.PaymentStatus, item.PaidTotalAmount, item.Version, item.IsDemo, item.CreatedAt, item.UpdatedAt))
+                item.Title, item.RequiredDate, item.ItemCount, item.EstimatedTotal, (PurchaseStatus)item.Status, item.PaymentStatus, item.PaidTotalAmount, item.Version, item.IsDemo, item.CreatedAt, item.UpdatedAt,
+                item.ConfigSnapshotJson != null && item.ConfigSnapshotJson.Contains("\"isOverBudget\":true")))
             .ToList();
         return new PagedResponse<PurchaseRequestListItem>(items, total, page, pageSize, totalPages);
     }
@@ -189,6 +190,68 @@ public sealed class PurchaseService
             record.ConfigResolvedAt = DateTimeOffset.UtcNow;
         }
 
+        // 预算预占
+        var reserveResult = budgetService.Reserve(
+            TenantId,
+            record.DepartmentName,
+            record.Category,
+            record.EstimatedTotal,
+            BusinessType,
+            record.Id,
+            record.Number,
+            actor.Id,
+            blockWhenExceeded: policy.BlockWhenExceeded,
+            targetYear: DateTime.Today.Year,
+            targetMonth: DateTime.Today.Month,
+            projectId: null,
+            actionKeySuffix: record.Category ?? "general");
+        if (!reserveResult.IsSuccess)
+            return ServiceResult<PurchaseRequest>.Failure(reserveResult.Error!, reserveResult.Code!);
+        record.BudgetPoolId = reserveResult.Value?.BudgetId;
+
+        var isOverBudget = reserveResult.Value?.IsOverBudget == true;
+        var overBudgetAmount = isOverBudget ? reserveResult.Value!.OverBudgetAmount : 0m;
+
+        if (isOverBudget)
+        {
+            var overSnapshot = new OverBudgetSnapshot(
+                IsOverBudget: true,
+                RequestedAmount: record.EstimatedTotal,
+                AvailableAmount: Math.Max(0m, record.EstimatedTotal - overBudgetAmount),
+                OverBudgetAmount: overBudgetAmount,
+                Department: record.DepartmentName,
+                Category: record.Category,
+                PolicyCode: configRecord?.Code ?? "DEFAULT",
+                ResolvedAt: DateTimeOffset.UtcNow
+            );
+            var baseJson = string.IsNullOrEmpty(record.ConfigSnapshotJson) ? "{}" : record.ConfigSnapshotJson;
+            try
+            {
+                var dict = JsonSerializer.Deserialize<Dictionary<string, object>>(baseJson) ?? new Dictionary<string, object>();
+                dict["isOverBudget"] = true;
+                dict["overBudgetSnapshot"] = overSnapshot;
+                record.ConfigSnapshotJson = JsonSerializer.Serialize(dict);
+            }
+            catch
+            {
+                record.ConfigSnapshotJson = JsonSerializer.Serialize(new { isOverBudget = true, overBudgetSnapshot = overSnapshot });
+            }
+        }
+        else
+        {
+            if (!string.IsNullOrEmpty(record.ConfigSnapshotJson) && record.ConfigSnapshotJson.Contains("\"isOverBudget\":true"))
+            {
+                try
+                {
+                    var dict = JsonSerializer.Deserialize<Dictionary<string, object>>(record.ConfigSnapshotJson) ?? new Dictionary<string, object>();
+                    dict.Remove("isOverBudget");
+                    dict.Remove("overBudgetSnapshot");
+                    record.ConfigSnapshotJson = JsonSerializer.Serialize(dict);
+                }
+                catch { }
+            }
+        }
+
         var attempt = db.FlowInstances.Where(item => item.TenantId == TenantId && item.BusinessType == BusinessType && item.BusinessId == record.Id)
             .Select(item => (int?)item.Attempt).Max() ?? 0;
         var instance = new FlowInstanceRecord
@@ -207,9 +270,37 @@ public sealed class PurchaseService
                 OriginalAssigneeName = approver.DelegationId is null ? null : approver.OriginalApprover.Name,
                 DelegationId = approver.DelegationId, Sequence = index + 1, Status = (int)FlowTaskStatus.Pending
             }).ToList();
+
+        Employee? financeManager = null;
+        if (isOverBudget)
+        {
+            financeManager = data.ActiveEmployees.FirstOrDefault(e => data.HasRole(e, "财务经理") || e.Role == "财务经理") ?? data.FindEmployee("u-lin");
+            if (financeManager is not null && !route.Value.Approvers.Any(a => a.Assignee.Id == financeManager.Id))
+            {
+                var extraSeq = approvalTasks.Count + 1;
+                approvalTasks.Add(new PurchaseTaskRecord
+                {
+                    TenantId = TenantId,
+                    PurchaseRequestId = record.Id,
+                    FlowInstanceId = instance.Id,
+                    AssigneeId = financeManager.Id,
+                    AssigneeName = financeManager.Name,
+                    Sequence = extraSeq,
+                    Status = (int)FlowTaskStatus.Pending,
+                    Comment = "超预算特批节点"
+                });
+            }
+        }
+
         db.PurchaseTasks.AddRange(approvalTasks);
         FlowInstanceService.RegisterTasks(db, instance.Id, instance.StartedAt, BusinessType,
-            approvalTasks.Select((task, index) => new ResolvedFlowTask(task.Id, task.Sequence, route.Value.Approvers[index])).ToList());
+            approvalTasks.Select((task, index) =>
+            {
+                if (index < route.Value.Approvers.Count)
+                    return new ResolvedFlowTask(task.Id, task.Sequence, route.Value.Approvers[index]);
+                var emp = data.FindEmployee(task.AssigneeId) ?? financeManager!;
+                return new ResolvedFlowTask(task.Id, task.Sequence, new ResolvedApprover(emp, emp, null));
+            }).ToList());
         record.Status = (int)PurchaseStatus.Approving;
         record.ProcessDefinitionId = route.Value.DefinitionId;
         record.ProcessDefinitionCode = route.Value.Code;
@@ -218,28 +309,9 @@ public sealed class PurchaseService
         record.Version++;
         record.UpdatedAt = DateTimeOffset.UtcNow;
 
-        // 预算预占
-        var reserveResult = budgetService.Reserve(
-            TenantId,
-            record.DepartmentName,
-            record.Category,
-            record.EstimatedTotal,
-            BusinessType,
-            record.Id,
-            record.Number,
-            actor.Id,
-            blockWhenExceeded: false,
-            targetYear: DateTime.Today.Year,
-            targetMonth: DateTime.Today.Month,
-            projectId: null,
-            actionKeySuffix: record.Category ?? "general");
-        if (!reserveResult.IsSuccess)
-            return ServiceResult<PurchaseRequest>.Failure(reserveResult.Error!, reserveResult.Code!);
-        record.BudgetPoolId = reserveResult.Value;
-
-        Audit(actor, "PURCHASE_SUBMITTED", record, $"提交采购审批，预估金额 {record.EstimatedTotal:F2} 元");
-        var first = route.Value.Approvers.First().Assignee;
-        notifications.Enqueue(first.Id, "TODO_CREATED", "新增采购审批待办", $"{actor.Name} 提交了 {record.Number}", "PurchaseRequest", record.Id);
+        Audit(actor, "PURCHASE_SUBMITTED", record, $"提交采购审批，预估金额 {record.EstimatedTotal:F2} 元{(isOverBudget ? $"（超预算 {overBudgetAmount:F2} 元）" : "")}");
+        var first = approvalTasks.First();
+        notifications.Enqueue(first.AssigneeId, "TODO_CREATED", "新增采购审批待办", $"{actor.Name} 提交了 {record.Number}", "PurchaseRequest", record.Id);
         return SaveAndReload(record, "采购申请已被其他操作更新，请刷新后重试。");
     }
 
@@ -623,6 +695,24 @@ public sealed class PurchaseService
     {
         var order = db.PurchaseOrders.AsNoTracking().SingleOrDefault(item => item.PurchaseRequestId == record.Id);
         var receipt = db.PurchaseReceipts.AsNoTracking().SingleOrDefault(item => item.PurchaseRequestId == record.Id);
+        var isOverBudget = false;
+        var overBudgetAmount = 0m;
+        string? overBudgetPolicySnapshot = null;
+        if (!string.IsNullOrEmpty(record.ConfigSnapshotJson) && record.ConfigSnapshotJson.Contains("\"isOverBudget\":true", StringComparison.OrdinalIgnoreCase))
+        {
+            isOverBudget = true;
+            try
+            {
+                using var doc = JsonDocument.Parse(record.ConfigSnapshotJson);
+                if (doc.RootElement.TryGetProperty("overBudgetSnapshot", out var obs))
+                {
+                    overBudgetAmount = obs.TryGetProperty("overBudgetAmount", out var oba) ? oba.GetDecimal() : 0m;
+                    overBudgetPolicySnapshot = obs.GetRawText();
+                }
+            }
+            catch { }
+        }
+
         return new PurchaseRequest
         {
             Id = record.Id, Number = record.Number, ApplicantId = record.ApplicantId, ApplicantName = record.ApplicantName, DepartmentName = record.DepartmentName,
@@ -637,6 +727,9 @@ public sealed class PurchaseService
             RequiresAcceptance = record.RequiresAcceptance,
             AcceptanceRoleOrAssignee = record.AcceptanceRoleOrAssignee,
             BudgetPoolId = record.BudgetPoolId,
+            IsOverBudget = isOverBudget,
+            OverBudgetAmount = overBudgetAmount,
+            OverBudgetPolicySnapshot = overBudgetPolicySnapshot,
             ProcessDefinitionId = record.ProcessDefinitionId, ProcessDefinitionCode = record.ProcessDefinitionCode, ProcessDefinitionVersion = record.ProcessDefinitionVersion,
             CurrentFlowInstanceId = record.CurrentFlowInstanceId,
             ConfigVersionId = record.ConfigVersionId, ConfigVersionNumber = record.ConfigVersionNumber, ConfigSnapshotJson = record.ConfigSnapshotJson, ConfigResolvedAt = record.ConfigResolvedAt,
@@ -684,6 +777,101 @@ public sealed class PurchaseService
             Payments: payments);
 
         return ServiceResult<PurchaseReconciliation>.Success(dto);
+    }
+
+    public ServiceResult<PagedResponse<PurchaseReconciliationItem>> GetReconciliationsPaged(
+        Employee actor,
+        string? keyword = null,
+        DateTimeOffset? startDate = null,
+        DateTimeOffset? endDate = null,
+        string? departmentId = null,
+        string? status = null,
+        int? page = null,
+        int? pageSize = null)
+    {
+        var canViewFinance = data.HasPermission(actor, OaPermissions.ExpensePay) ||
+                             data.HasPermission(actor, OaPermissions.ExpenseAllView) ||
+                             data.HasPermission(actor, OaPermissions.PurchaseManage);
+        if (!canViewFinance)
+            return ServiceResult<PagedResponse<PurchaseReconciliationItem>>.Failure("无采购对账台账查看权限。", "AUTH_002");
+
+        var curPage = Math.Max(1, page ?? 1);
+        var size = Math.Clamp(pageSize ?? 20, 1, 100);
+
+        var query = db.PurchaseRequests.AsNoTracking().Where(item => item.TenantId == TenantId);
+
+        if (!string.IsNullOrWhiteSpace(keyword))
+        {
+            var pattern = $"%{EscapeLike(keyword.Trim())}%";
+            query = query.Where(item => EF.Functions.ILike(item.Number, pattern, "\\") ||
+                                        EF.Functions.ILike(item.Title, pattern, "\\") ||
+                                        EF.Functions.ILike(item.ApplicantName, pattern, "\\") ||
+                                        (item.SuggestedSupplier != null && EF.Functions.ILike(item.SuggestedSupplier, pattern, "\\")));
+        }
+
+        if (startDate.HasValue)
+            query = query.Where(item => item.CreatedAt >= startDate.Value);
+        if (endDate.HasValue)
+            query = query.Where(item => item.CreatedAt <= endDate.Value);
+        if (!string.IsNullOrWhiteSpace(departmentId))
+            query = query.Where(item => item.DepartmentName == departmentId);
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            if (Enum.TryParse<PurchaseStatus>(status, true, out var parsedStatus))
+                query = query.Where(item => item.Status == (int)parsedStatus);
+        }
+
+        var total = query.Count();
+        var totalPages = Math.Max(1, (int)Math.Ceiling((double)total / size));
+
+        var requests = query
+            .OrderByDescending(item => item.CreatedAt)
+            .ThenByDescending(item => item.Id)
+            .Skip((curPage - 1) * size)
+            .Take(size)
+            .ToList();
+
+        var requestIds = requests.Select(r => r.Id).ToList();
+        var orders = db.PurchaseOrders.AsNoTracking()
+            .Where(o => o.TenantId == TenantId && requestIds.Contains(o.PurchaseRequestId))
+            .ToDictionary(o => o.PurchaseRequestId);
+        var receipts = db.PurchaseReceipts.AsNoTracking()
+            .Where(r => r.TenantId == TenantId && requestIds.Contains(r.PurchaseRequestId))
+            .ToDictionary(r => r.PurchaseRequestId);
+
+        var items = requests.Select(r =>
+        {
+            var order = orders.GetValueOrDefault(r.Id);
+            var receipt = receipts.GetValueOrDefault(r.Id);
+            var contractAmount = order?.ActualAmount ?? 0m;
+            var isAccepted = !r.RequiresAcceptance || (receipt is not null && receipt.Result == "ALL_ACCEPTED") || r.Status == (int)PurchaseStatus.Received;
+            var acceptedAmount = isAccepted ? contractAmount : 0m;
+            var remainingAmount = Math.Max(0m, contractAmount - r.PaidTotalAmount);
+
+            return new PurchaseReconciliationItem(
+                Id: r.Id,
+                Number: r.Number,
+                ApplicantName: r.ApplicantName,
+                DepartmentName: r.DepartmentName,
+                EstimatedTotal: r.EstimatedTotal,
+                OrderAmount: contractAmount,
+                OrderNumber: order?.OrderNumber,
+                Supplier: order?.Supplier ?? r.SuggestedSupplier,
+                AcceptedAmount: acceptedAmount,
+                PaidAmount: r.PaidTotalAmount,
+                RemainingAmount: remainingAmount,
+                Status: ((PurchaseStatus)r.Status).ToString(),
+                CreatedAt: r.CreatedAt
+            );
+        }).ToList();
+
+        return ServiceResult<PagedResponse<PurchaseReconciliationItem>>.Success(new PagedResponse<PurchaseReconciliationItem>(
+            Items: items,
+            Total: total,
+            Page: curPage,
+            PageSize: size,
+            TotalPages: totalPages
+        ));
     }
 
     private ServiceResult<PurchaseRequest> SaveAndReload(PurchaseRequestRecord record, string concurrencyMessage, string? uniqueCode = null)

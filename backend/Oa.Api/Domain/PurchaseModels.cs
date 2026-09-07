@@ -82,6 +82,9 @@ public sealed class PurchaseRequest
     public IReadOnlyList<PurchaseItem> Items { get; init; } = [];
     public decimal EstimatedTotal { get; init; }
     public Guid? BudgetPoolId { get; init; }
+    public bool IsOverBudget { get; init; }
+    public decimal OverBudgetAmount { get; init; }
+    public string? OverBudgetPolicySnapshot { get; init; }
     public IReadOnlyList<string> Attachments { get; init; } = [];
     public IReadOnlyList<string> CopyRecipientIds { get; init; } = [];
     public PurchaseStatus Status { get; init; }
@@ -129,7 +132,8 @@ public sealed record PurchaseRequestListItem(
     int Version,
     bool IsDemo,
     DateTimeOffset CreatedAt,
-    DateTimeOffset UpdatedAt);
+    DateTimeOffset UpdatedAt,
+    bool IsOverBudget = false);
 
 public sealed record PurchaseTask(
     Guid Id,

@@ -4477,6 +4477,97 @@ await using (var f4Db = new OaDbContext(options))
     var items = pagedBudgets.Value.Items;
     if (items[0].UpdatedAt < items[1].UpdatedAt)
         throw new InvalidOperationException("预算中心分页未按 UpdatedAt 倒序排列。");
+
+    // =========================================================================
+    // 9. WP-D 验收测试：超预算特批、财务台账与安全导出、回单必填
+    // =========================================================================
+    Console.WriteLine("Running Section 9: WP-D 超预算特批与财务台账对账测试...");
+
+    // 9.1 超预算策略阻断与特批加签快照
+    var mktDept = "marketing";
+    var overBudgetPoolRes = budgetService.Create(financeManager, new CreateBudgetRequest(
+        DepartmentId: mktDept,
+        Year: bYearC,
+        Month: 11,
+        ExpenseCategory: "招待",
+        ProjectId: null,
+        AllocatedAmount: 1000m,
+        AutoPublish: true));
+    if (!overBudgetPoolRes.IsSuccess) throw new InvalidOperationException($"创建测试预算池失败：{overBudgetPoolRes.Error}");
+    var mktPoolId = overBudgetPoolRes.Value!.Id;
+
+    var mktEmployee = f4Data.ActiveEmployees.FirstOrDefault(e => e.DepartmentId == mktDept) ?? employee;
+
+    // 9.1.A 模拟策略配置为严格阻断 blockWhenExceeded = true
+    var blockedBizId = Guid.NewGuid();
+    var blockedReserve = budgetService.Reserve("demo", mktDept, "招待", 2500m, "Expense", blockedBizId, "BX-BLOCKED", mktEmployee.Id, blockWhenExceeded: true, targetYear: bYearC, targetMonth: 11);
+    if (blockedReserve.IsSuccess || blockedReserve.Code != "BUDGET_EXCEEDED")
+        throw new InvalidOperationException($"超预算严格阻断失败：期望BUDGET_EXCEEDED，实际结果={blockedReserve.Code}");
+
+    // 9.1.B 模拟允许超预算提交 blockWhenExceeded = false
+    var overPassBizId = Guid.NewGuid();
+    var overReserve = budgetService.Reserve("demo", mktDept, "招待", 2500m, "Expense", overPassBizId, "BX-OVER-PASS", mktEmployee.Id, blockWhenExceeded: false, targetYear: bYearC, targetMonth: 11);
+    if (!overReserve.IsSuccess) throw new InvalidOperationException($"超预算特批预占失败：{overReserve.Error}");
+    if (!overReserve.Value!.IsOverBudget || overReserve.Value.OverBudgetAmount != 1500m)
+        throw new InvalidOperationException($"超预算预占结果未正确标记超额：IsOverBudget={overReserve.Value?.IsOverBudget}, OverAmount={overReserve.Value?.OverBudgetAmount}");
+
+    // 清理释放
+    budgetService.Release("demo", mktPoolId, "Expense", overPassBizId, "BX-OVER-PASS", 2500m, mktEmployee.Id, "测试清理");
+
+    // 9.2 财务台账查询与服务端分页
+    // 9.2.A 发票台账分页与排序
+    var invPaged = expenseService.GetFinanceInvoicesPaged(financeOfficer, page: 1, pageSize: 5);
+    if (!invPaged.IsSuccess || invPaged.Value!.PageSize != 5)
+        throw new InvalidOperationException($"发票台账分页失败：{invPaged.Error}");
+    var invItems = invPaged.Value.Items;
+    for (int i = 0; i < invItems.Count - 1; i++)
+    {
+        if (invItems[i].BillingDate < invItems[i + 1].BillingDate)
+            throw new InvalidOperationException("发票台账未按 BillingDate 倒序排列。");
+    }
+
+    // 普通员工无权限查询发票台账
+    var unauthInv = expenseService.GetFinanceInvoicesPaged(employee, page: 1, pageSize: 5);
+    if (unauthInv.IsSuccess && unauthInv.Value!.Items.Count > 0)
+        throw new InvalidOperationException("普通员工不应能查询全公司发票台账。");
+
+    // 9.2.B 付款台账分页与脱敏
+    var payPaged = paymentService.GetFinancePaymentsPaged(financeOfficer, page: 1, pageSize: 5);
+    if (!payPaged.IsSuccess || payPaged.Value!.PageSize != 5)
+        throw new InvalidOperationException($"付款台账分页失败：{payPaged.Error}");
+    if (payPaged.Value.Items.Count > 0 && payPaged.Value.Items[0].PayerAccount.Contains('*'))
+        throw new InvalidOperationException("财务专员在付款台账中应能看到未脱敏出资账号。");
+
+    // 普通员工无权限查看全公司付款台账
+    var unauthPay = paymentService.GetFinancePaymentsPaged(employee, page: 1, pageSize: 5);
+    if (unauthPay.IsSuccess && unauthPay.Value!.Items.Count > 0)
+        throw new InvalidOperationException("普通员工不应能查询全公司付款台账。");
+
+    // 9.2.C 采购对账台账分页
+    var reconPaged = purchaseService.GetReconciliationsPaged(financeManager, page: 1, pageSize: 5);
+    if (!reconPaged.IsSuccess || reconPaged.Value!.PageSize != 5)
+        throw new InvalidOperationException($"采购对账台账分页失败：{reconPaged.Error}");
+
+    // 9.3 财务导出安全测试：CSV 公式注入防护、日期范围筛选与审计
+    var maliciousClaimDraft = expenseService.CreateDraft(employee, new CreateExpenseClaim(
+        null, "=1+1", "6222026000008888", "招商银行", "=cmd|' /C calc'!A0",
+        [new ExpenseItem(DateOnly.FromDateTime(DateTime.Today), "办公", 100m, "@SUM(1,2)", "FP-INJECT", ["proof.pdf"])],
+        Invoices: []));
+    if (!maliciousClaimDraft.IsSuccess) throw new InvalidOperationException($"创建注入测试草稿失败：{maliciousClaimDraft.Error}");
+    var malClaimId = maliciousClaimDraft.Value!.Id;
+
+    var csvResult = paymentService.ExportExpensesCsv(financeOfficer, null, null, null, null, null);
+    if (csvResult.Contains("\"=cmd") || csvResult.Contains("\",=1+1") || csvResult.Contains("\"@SUM") || csvResult.Contains("\",-2+5"))
+        throw new InvalidOperationException("CSV 导出存在未转义的公式注入风险！");
+
+    await using (var verifyDb = new OaDbContext(options))
+    {
+        var audit = verifyDb.AuditLogs.AsNoTracking().FirstOrDefault(a => a.Action == "FINANCE_EXPORT" && a.ActorId == financeOfficer.Id);
+        if (audit == null)
+            throw new InvalidOperationException("财务导出未写入 FINANCE_EXPORT 审计日志。");
+    }
+
+    Console.WriteLine("Section 9: WP-D 超预算特批与财务台账对账测试通过。");
 }
 
 Console.WriteLine("PostgreSQL persistence integration passed.");

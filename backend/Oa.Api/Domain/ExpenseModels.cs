@@ -23,6 +23,9 @@ public sealed class ExpenseClaim
     public decimal TotalAmount { get; init; }
     public string? Project { get; set; }
     public Guid? BudgetPoolId { get; set; }
+    public bool IsOverBudget { get; set; }
+    public decimal OverBudgetAmount { get; set; }
+    public string? OverBudgetPolicySnapshot { get; set; }
     public string PaymentStatus { get; set; } = "UNPAID";
     public decimal PaidTotalAmount { get; set; }
     public int InvoiceCount { get; set; }
