@@ -131,6 +131,7 @@ public sealed class BudgetTransaction
     public decimal BalanceAfter { get; init; }
     public string? Description { get; init; }
     public string OperatorId { get; init; } = string.Empty;
+    public string? ActionKey { get; init; }
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
 }
 

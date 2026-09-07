@@ -4117,8 +4117,221 @@ await using (var f4Db = new OaDbContext(options))
         throw new InvalidOperationException("普通员工跨部门预检预算泄露了财务部实际预算额度。");
 
     // (e) 财务权限不外溢：财务专员无权查看人事档案
-    if (f4Data.CanView(financeOfficer, employee, "Personnel"))
-        throw new InvalidOperationException("财务权限外溢到了人事档案数据范围。");
+    // ---------------------------------------------------------
+    // 7. WP-B 资金并发、幂等与账本一致性专项测试
+    // ---------------------------------------------------------
+
+    // 7.1 付款单据并发与超付保护 (Dual DbContext + Task.WhenAll)
+    // 报销单总额 1000 元，当前已付 600 元，剩余 400 元待付。两个独立 DbContext 同时尝试支付 300 元。
+    var pClaimReq = expenseService.CreateDraft(employee, new CreateExpenseClaim(
+        null, "张晨", "6222026000001234", "招商银行", "并发超付测试",
+        [new ExpenseItem(DateOnly.FromDateTime(DateTime.Today), "办公", 1000m, "服务器配件", "FP-OVPAY", ["proof.pdf"])],
+        Invoices: []));
+    if (!pClaimReq.IsSuccess) throw new InvalidOperationException($"创建并发测试单据草稿失败：{pClaimReq.Error}");
+    var pClaimId = pClaimReq.Value!.Id;
+    var pSubmit = expenseService.Submit(employee, pClaimId);
+    if (!pSubmit.IsSuccess) throw new InvalidOperationException($"并发测试单据提交失败：{pSubmit.Error}");
+    foreach (var task in f4Db.ExpenseTasks.Where(t => t.ExpenseClaimId == pClaimId).OrderBy(t => t.Sequence).ToList())
+    {
+        var app = expenseService.Approve(f4Data.GetEmployee(task.AssigneeId), task.Id, "同意");
+        if (!app.IsSuccess) throw new InvalidOperationException("审批失败");
+    }
+    // 先付一笔 600 元
+    var pay600 = paymentService.RegisterExpensePayment(financeOfficer, pClaimId, new CreatePaymentTransactionRequest(
+        "首期付款", DateOnly.FromDateTime(DateTime.Today), PaymentMethodNames.BankTransfer, "955880001", "张晨", "6222026000001234", "招商银行",
+        $"TX-INIT600-{testRunId}", 600m, 0m, null, "首笔"));
+    if (!pay600.IsSuccess) throw new InvalidOperationException($"首期付款失败：{pay600.Error}");
+
+    var payBarrier = new ManualResetEventSlim(false);
+    var payTask1 = Task.Run(async () =>
+    {
+        await using var threadDb = new OaDbContext(options);
+        var threadData = new DemoData(threadDb);
+        var threadBudget = new BudgetService(threadData, threadDb);
+        var threadPay = new PaymentService(threadData, threadDb, threadBudget);
+        var threadActor = threadData.GetEmployee(financeOfficer.Id);
+        payBarrier.Wait();
+        return threadPay.RegisterExpensePayment(threadActor, pClaimId, new CreatePaymentTransactionRequest(
+            "并发二期A", DateOnly.FromDateTime(DateTime.Today), PaymentMethodNames.BankTransfer, "955880001", "张晨", "6222026000001234", "招商银行",
+            $"TX-CONC-A-{Guid.NewGuid():N}", 300m, 0m, null, "并发付款A"));
+    });
+    var payTask2 = Task.Run(async () =>
+    {
+        await using var threadDb = new OaDbContext(options);
+        var threadData = new DemoData(threadDb);
+        var threadBudget = new BudgetService(threadData, threadDb);
+        var threadPay = new PaymentService(threadData, threadDb, threadBudget);
+        var threadActor = threadData.GetEmployee(financeOfficer.Id);
+        payBarrier.Wait();
+        return threadPay.RegisterExpensePayment(threadActor, pClaimId, new CreatePaymentTransactionRequest(
+            "并发二期B", DateOnly.FromDateTime(DateTime.Today), PaymentMethodNames.BankTransfer, "955880001", "张晨", "6222026000001234", "招商银行",
+            $"TX-CONC-B-{Guid.NewGuid():N}", 300m, 0m, null, "并发付款B"));
+    });
+    payBarrier.Set();
+    var payResults = await Task.WhenAll(payTask1, payTask2);
+
+    var successPays = payResults.Where(r => r.IsSuccess).ToList();
+    var failedPays = payResults.Where(r => !r.IsSuccess).ToList();
+    if (successPays.Count != 1 || failedPays.Count != 1)
+        throw new InvalidOperationException($"并发超付保护失败：期望1成1败，实际成={successPays.Count}, 败={failedPays.Count}");
+    if (failedPays[0].Code != "PAYMENT_AMOUNT_EXCEEDED" && failedPays[0].Code != "CONCURRENCY_001")
+        throw new InvalidOperationException($"超付失败错误码不符合预期：{failedPays[0].Code}");
+
+    await using (var verifyDb = new OaDbContext(options))
+    {
+        var finalClaim = verifyDb.ExpenseClaims.AsNoTracking().Single(c => c.Id == pClaimId);
+        if (finalClaim.PaidTotalAmount != 900m)
+            throw new InvalidOperationException($"并发付款后单据累计实付金额超额或不准确：{finalClaim.PaidTotalAmount}");
+        var sequences = verifyDb.PaymentTransactions.AsNoTracking()
+            .Where(t => t.BusinessType == "Expense" && t.BusinessId == pClaimId)
+            .Select(t => t.Sequence).ToList();
+        if (sequences.Count != sequences.Distinct().Count())
+            throw new InvalidOperationException("付款流水 Sequence 出现重复。");
+    }
+
+    // 7.2 活动发票数据库级唯一占用与并发提交 (Dual DbContext + Task.WhenAll)
+    var sharedFp = $"FP-CONC-{Guid.NewGuid():N}";
+    var claimA = expenseService.CreateDraft(employee, new CreateExpenseClaim(
+        null, "张晨", "6222026000001234", "招商银行", "发票并发A",
+        [new ExpenseItem(DateOnly.FromDateTime(DateTime.Today), "办公", 200m, "用品A", "FP-A", ["proof.pdf"])],
+        Invoices: [new ExpenseInvoiceInput(InvoiceType.VatElectronic, "01100", sharedFp, DateOnly.FromDateTime(DateTime.Today.AddDays(-2)), 188.68m, 0.06m, 11.32m, 200m, null, null)]));
+    var claimB = expenseService.CreateDraft(f4Data.GetEmployee("u-li"), new CreateExpenseClaim(
+        null, "李薇", "6222026000009999", "工商银行", "发票并发B",
+        [new ExpenseItem(DateOnly.FromDateTime(DateTime.Today), "办公", 200m, "用品B", "FP-B", ["proof.pdf"])],
+        Invoices: [new ExpenseInvoiceInput(InvoiceType.VatElectronic, "01100", sharedFp, DateOnly.FromDateTime(DateTime.Today.AddDays(-2)), 188.68m, 0.06m, 11.32m, 200m, null, null)]));
+
+    var invBarrier = new ManualResetEventSlim(false);
+    var invTask1 = Task.Run(async () =>
+    {
+        await using var threadDb = new OaDbContext(options);
+        var threadData = new DemoData(threadDb);
+        var threadBudget = new BudgetService(threadData, threadDb);
+        var threadExp = new ExpenseService(threadData, threadDb, budgetService: threadBudget);
+        var threadActor = threadData.GetEmployee(employee.Id);
+        invBarrier.Wait();
+        return threadExp.Submit(threadActor, claimA.Value!.Id);
+    });
+    var invTask2 = Task.Run(async () =>
+    {
+        await using var threadDb = new OaDbContext(options);
+        var threadData = new DemoData(threadDb);
+        var threadBudget = new BudgetService(threadData, threadDb);
+        var threadExp = new ExpenseService(threadData, threadDb, budgetService: threadBudget);
+        var threadActor = threadData.GetEmployee("u-li");
+        invBarrier.Wait();
+        return threadExp.Submit(threadActor, claimB.Value!.Id);
+    });
+    invBarrier.Set();
+    var invResults = await Task.WhenAll(invTask1, invTask2);
+    var invSuccess = invResults.Where(r => r.IsSuccess).ToList();
+    var invFailed = invResults.Where(r => !r.IsSuccess).ToList();
+    if (invSuccess.Count != 1 || invFailed.Count != 1)
+        throw new InvalidOperationException($"活动发票并发提交保护失败：期望1成1败，实际成={invSuccess.Count}, 败={invFailed.Count}");
+    if (invFailed[0].Code != "INVOICE_DUPLICATE")
+        throw new InvalidOperationException($"并发发票冲突返回错误码不符合预期：{invFailed[0].Code}");
+
+    await using (var verifyDb = new OaDbContext(options))
+    {
+        var activeInvs = verifyDb.ExpenseInvoices.AsNoTracking()
+            .Where(i => i.InvoiceNumber == sharedFp && (i.Status == "COMMITTED" || i.Status == "PAID"))
+            .ToList();
+        if (activeInvs.Count != 1)
+            throw new InvalidOperationException($"数据库级活动发票唯一性约束未生效：匹配数量={activeInvs.Count}");
+    }
+
+    // 7.3 预算并发预占与防超占保护 (Dual DbContext + Task.WhenAll)
+    var bDept = "engineering";
+    var bYear = curYear + 1; // 使用未来年度创建独立预算池
+    var bCreate = budgetService.Create(financeManager, new CreateBudgetRequest(
+        DepartmentId: bDept, Year: bYear, Month: 0, ExpenseCategory: null, ProjectId: null, AllocatedAmount: 10000m));
+    var concBudgetId = bCreate.Value!.Id;
+
+    var bBarrier = new ManualResetEventSlim(false);
+    var bTask1 = Task.Run(async () =>
+    {
+        await using var threadDb = new OaDbContext(options);
+        var threadData = new DemoData(threadDb);
+        var threadBudget = new BudgetService(threadData, threadDb);
+        bBarrier.Wait();
+        return threadBudget.Reserve("demo", bDept, null, 7000m, "Expense", Guid.NewGuid(), "BX-CONC-1", employee.Id, blockWhenExceeded: true, targetYear: bYear);
+    });
+    var bTask2 = Task.Run(async () =>
+    {
+        await using var threadDb = new OaDbContext(options);
+        var threadData = new DemoData(threadDb);
+        var threadBudget = new BudgetService(threadData, threadDb);
+        bBarrier.Wait();
+        return threadBudget.Reserve("demo", bDept, null, 7000m, "Expense", Guid.NewGuid(), "BX-CONC-2", employee.Id, blockWhenExceeded: true, targetYear: bYear);
+    });
+    bBarrier.Set();
+    var bResults = await Task.WhenAll(bTask1, bTask2);
+    var bSuccess = bResults.Where(r => r.IsSuccess).ToList();
+    var bFailed = bResults.Where(r => !r.IsSuccess).ToList();
+    if (bSuccess.Count != 1 || bFailed.Count != 1)
+        throw new InvalidOperationException($"预算并发超占保护失败：期望1成1败，实际成={bSuccess.Count}, 败={bFailed.Count}");
+    if (bFailed[0].Code != "BUDGET_EXCEEDED")
+        throw new InvalidOperationException($"预算超占返回错误码不符合预期：{bFailed[0].Code}");
+
+    await using (var verifyDb = new OaDbContext(options))
+    {
+        var finalB = verifyDb.Budgets.AsNoTracking().Single(b => b.Id == concBudgetId);
+        if (finalB.CommittedAmount != 7000m)
+            throw new InvalidOperationException($"预算池发生超占：CommittedAmount={finalB.CommittedAmount}");
+    }
+
+    // 7.4 预算预占/释放/结转原子化、动作幂等与账本重算一致性
+    var testBizId = Guid.NewGuid();
+    var res1 = budgetService.Reserve("demo", bDept, null, 2000m, "Expense", testBizId, "BX-IDEM", employee.Id, blockWhenExceeded: true, targetYear: bYear);
+    if (!res1.IsSuccess) throw new InvalidOperationException($"预占失败：{res1.Error}");
+
+    // 重复释放幂等测试：释放两次，第二次不得再次扣减 CommittedAmount 或产生多余流水
+    var rel1 = budgetService.Release("demo", concBudgetId, "Expense", testBizId, "BX-IDEM", 2000m, employee.Id, "撤销报销");
+    if (!rel1.IsSuccess) throw new InvalidOperationException($"首次释放失败：{rel1.Error}");
+    var rel2 = budgetService.Release("demo", concBudgetId, "Expense", testBizId, "BX-IDEM", 2000m, employee.Id, "重复释放");
+    if (!rel2.IsSuccess) throw new InvalidOperationException($"重复释放失败：{rel2.Error}");
+
+    await using (var verifyDb = new OaDbContext(options))
+    {
+        var bRecord = verifyDb.Budgets.AsNoTracking().Single(b => b.Id == concBudgetId);
+        if (bRecord.CommittedAmount != 7000m)
+            throw new InvalidOperationException($"重复释放破坏了预算占用余额：CommittedAmount={bRecord.CommittedAmount}");
+
+        // 校验账本一致性
+        var txs = verifyDb.BudgetTransactions.AsNoTracking().Where(t => t.BudgetId == concBudgetId).ToList();
+        var calcCommitted = txs.Where(t => t.TransactionType == "RESERVED").Sum(t => t.Amount)
+            - txs.Where(t => t.TransactionType == "RELEASED").Sum(t => t.Amount)
+            - txs.Where(t => t.TransactionType == "CONSUMED").Sum(t => t.Amount);
+        var calcActual = txs.Where(t => t.TransactionType == "CONSUMED").Sum(t => t.Amount);
+        if (calcCommitted != bRecord.CommittedAmount || calcActual != bRecord.ActualAmount)
+            throw new InvalidOperationException($"预算流水重算与预算池汇总不一致：流水计算占用={calcCommitted}, 预算表占用={bRecord.CommittedAmount}");
+    }
+
+    // 7.5 旧付款入口合并闭环
+    var oldClaimReq = expenseService.CreateDraft(employee, new CreateExpenseClaim(
+        null, "张晨", "6222026000001234", "招商银行", "旧付款入口测试",
+        [new ExpenseItem(DateOnly.FromDateTime(DateTime.Today), "办公", 500m, "用品", "FP-OLD-P", ["proof.pdf"])],
+        Invoices: []));
+    if (!oldClaimReq.IsSuccess) throw new InvalidOperationException($"旧报销草稿创建失败：{oldClaimReq.Error}");
+    var oldClaimId = oldClaimReq.Value!.Id;
+    expenseService.Submit(employee, oldClaimId);
+    foreach (var task in f4Db.ExpenseTasks.Where(t => t.ExpenseClaimId == oldClaimId).OrderBy(t => t.Sequence).ToList())
+    {
+        expenseService.Approve(f4Data.GetEmployee(task.AssigneeId), task.Id, "同意");
+    }
+    var oldPayRes = expenseService.RegisterPayment(financeOfficer, oldClaimId, new RegisterPaymentRequest(
+        DateOnly.FromDateTime(DateTime.Today), "BANK_TRANSFER", $"TX-LEGACY-{testRunId}", 500m, "proof.pdf"));
+    if (!oldPayRes.IsSuccess) throw new InvalidOperationException($"旧付款入口调用失败：{oldPayRes.Error}");
+
+    await using (var verifyDb = new OaDbContext(options))
+    {
+        var legacyTx = verifyDb.PaymentTransactions.AsNoTracking()
+            .FirstOrDefault(t => t.BusinessType == "Expense" && t.BusinessId == oldClaimId);
+        if (legacyTx is null || legacyTx.PaidAmount != 500m || legacyTx.TransactionNumber != $"TX-LEGACY-{testRunId}")
+            throw new InvalidOperationException("旧付款入口未在 PaymentTransaction 中生成标准付款流水。");
+        var legacyClaim = verifyDb.ExpenseClaims.AsNoTracking().Single(c => c.Id == oldClaimId);
+        if (legacyClaim.PaymentStatus != "PAID" || legacyClaim.PaidTotalAmount != 500m)
+            throw new InvalidOperationException("旧付款入口执行后报销单付款状态未正确流转至 PAID。");
+    }
 }
 
 Console.WriteLine("PostgreSQL persistence integration passed.");

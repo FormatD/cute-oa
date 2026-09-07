@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Oa.Api.Domain;
 using Oa.Api.Persistence;
 
@@ -20,6 +21,7 @@ public sealed class ExpenseService
     private readonly TravelService? travelRequests;
     private readonly BudgetService? budgetService;
     private readonly ILogger<ExpenseService>? logger;
+    private readonly PaymentService paymentService;
     private readonly List<ExpenseClaim> _claims;
 
     private ServiceResult<(ExpensePolicyConfig Policy, BusinessConfigurationRecord? Record)> ResolveExpensePolicy()
@@ -87,7 +89,18 @@ public sealed class ExpenseService
         return ServiceResult<bool>.Success(true);
     }
 
-    public ExpenseService(DemoData data, OaDbContext? db = null, NotificationService? notifications = null, FileService? files = null, IProcessRouter? processRouter = null, FlowInstanceService? flowInstances = null, FlowCopyService? copyRecipients = null, TravelService? travelRequests = null, BudgetService? budgetService = null, ILogger<ExpenseService>? logger = null)
+    public ExpenseService(
+        DemoData data,
+        OaDbContext? db = null,
+        NotificationService? notifications = null,
+        FileService? files = null,
+        IProcessRouter? processRouter = null,
+        FlowInstanceService? flowInstances = null,
+        FlowCopyService? copyRecipients = null,
+        TravelService? travelRequests = null,
+        BudgetService? budgetService = null,
+        ILogger<ExpenseService>? logger = null,
+        PaymentService? paymentService = null)
     {
         this.data = data;
         this.db = db;
@@ -99,6 +112,7 @@ public sealed class ExpenseService
         this.travelRequests = travelRequests;
         this.budgetService = budgetService ?? new BudgetService(data, db);
         this.logger = logger;
+        this.paymentService = paymentService ?? new PaymentService(data, db, this.budgetService, this.notifications, this.files);
         _claims = db is null ? [] : LoadClaims(db, this.flowInstances, this.copyRecipients);
     }
 
@@ -162,7 +176,7 @@ public sealed class ExpenseService
                 TotalAmount = inv.TotalAmount,
                 VerificationCode = inv.VerificationCode,
                 AttachmentId = inv.AttachmentId,
-                Status = InvoiceStatus.Committed
+                Status = InvoiceStatus.Released
             }).ToList(),
             InvoiceCount = request.Invoices?.Count ?? 0,
             ConfigVersionId = configRecord?.Id, ConfigVersionNumber = configRecord?.Version, ConfigSnapshotJson = configRecord?.ContentJson, ConfigResolvedAt = configRecord is not null ? DateTimeOffset.UtcNow : null
@@ -249,6 +263,7 @@ public sealed class ExpenseService
         var route = processRouter.Resolve("Expense", actor, item.TotalAmount);
         if (!route.IsSuccess) return ServiceResult<ExpenseClaim>.Failure(route.Error!, route.Code!);
         item.Status = ExpenseStatus.Approving;
+        foreach (var inv in item.Invoices) inv.Status = InvoiceStatus.Committed;
         item.Tasks.Clear();
         item.ProcessDefinitionId = route.Value!.DefinitionId;
         item.ProcessDefinitionCode = route.Value.Code;
@@ -266,7 +281,31 @@ public sealed class ExpenseService
         {
             item.Tasks.Add(new ExpenseTask { ExpenseClaimId = item.Id, FlowInstanceId = instance.Id, AssigneeId = resolvedApprover.Assignee.Id, AssigneeName = resolvedApprover.Assignee.Name, OriginalAssigneeId = resolvedApprover.DelegationId is null ? null : resolvedApprover.OriginalApprover.Id, OriginalAssigneeName = resolvedApprover.DelegationId is null ? null : resolvedApprover.OriginalApprover.Name, DelegationId = resolvedApprover.DelegationId, Sequence = sequence });
         }
-        Persist(item);
+        try
+        {
+            Persist(item);
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException pg && pg.SqlState == PostgresErrorCodes.UniqueViolation)
+        {
+            item.Status = ExpenseStatus.Draft;
+            foreach (var inv in item.Invoices) inv.Status = InvoiceStatus.Released;
+            item.Tasks.Clear();
+            item.CurrentFlowInstanceId = null;
+            if (budgetService is not null && item.BudgetPoolId.HasValue)
+            {
+                budgetService.Release(TenantId, item.BudgetPoolId, "Expense", item.Id, item.Number, item.TotalAmount, actor.Id, "并发发票冲突回滚释放预算");
+                item.BudgetPoolId = null;
+            }
+            if (pg.ConstraintName != null && pg.ConstraintName.Contains("UX_expense_invoice_active_fingerprint"))
+            {
+                return ServiceResult<ExpenseClaim>.Failure(
+                    "INVOICE_DUPLICATE: 该发票已被其他已提交或已付款的报销单占用，禁止重复报销。",
+                    "INVOICE_DUPLICATE");
+            }
+            return ServiceResult<ExpenseClaim>.Failure(
+                $"并发数据冲突: {pg.MessageText}",
+                "CONCURRENCY_001");
+        }
         flowInstances.RegisterTasks(instance, "Expense", item.Tasks.Select(task => new ResolvedFlowTask(task.Id, task.Sequence, route.Value.Approvers[task.Sequence - 1])).ToList());
         Audit(actor, "EXPENSE_SUBMITTED", item, "提交报销审批");
         if (item.Tasks.OrderBy(task => task.Sequence).FirstOrDefault() is { } firstTask)
@@ -308,7 +347,7 @@ public sealed class ExpenseService
             TotalAmount = inv.TotalAmount,
             VerificationCode = inv.VerificationCode,
             AttachmentId = inv.AttachmentId,
-            Status = InvoiceStatus.Committed
+            Status = InvoiceStatus.Released
         }).ToList();
 
         var updated = new ExpenseClaim
@@ -453,16 +492,50 @@ public sealed class ExpenseService
         if (request.PaidAmount != item.TotalAmount)
             return ServiceResult<ExpenseClaim>.Failure("付款金额必须与报销总金额一致。", "EXP_005");
 
+        var payReq = new CreatePaymentTransactionRequest(
+            BatchTitle: "一次性付清",
+            PaymentDate: request.PaymentDate,
+            PaymentMethod: request.PaymentMethod,
+            PayerAccount: string.IsNullOrWhiteSpace(item.PayeeAccount) ? "COMPANY-MAIN" : item.PayeeAccount,
+            PayeeName: item.PayeeAccountName,
+            PayeeAccount: item.PayeeAccount,
+            PayeeBank: item.BankName ?? "未知银行",
+            TransactionNumber: request.TransactionNumber,
+            PaidAmount: request.PaidAmount,
+            FeeAmount: 0m,
+            ProofAttachmentId: request.ProofFile,
+            Remarks: "Legacy API 付款"
+        );
+
+        var payResult = paymentService.RegisterExpensePayment(actor, id, payReq);
+        if (!payResult.IsSuccess)
+            return ServiceResult<ExpenseClaim>.Failure(payResult.Error!, payResult.Code!);
+
         item.Payment = new PaymentRecord(request.PaymentDate, request.PaymentMethod.Trim(), request.TransactionNumber.Trim(), request.PaidAmount, request.ProofFile, actor.Id);
-        item.PaidTotalAmount = request.PaidAmount;
+        item.PaidTotalAmount = payResult.Value!.PaidAmount;
         item.PaymentStatus = "PAID";
         item.Status = ExpenseStatus.Completed;
-        budgetService?.Consume(TenantId, item.BudgetPoolId, "Expense", item.Id, item.Number, request.PaidAmount, actor.Id);
         foreach (var inv in item.Invoices) inv.Status = InvoiceStatus.Paid;
 
-        Persist(item);
-        Audit(actor, "EXPENSE_PAYMENT_REGISTERED", item, $"登记付款流水号 {request.TransactionNumber.Trim()}，实付 {request.PaidAmount:N2} 元");
-        notifications?.Create(item.ApplicantId, "EXPENSE_PAID", "报销已付款", $"{item.Number} 已完成付款登记", "ExpenseClaim", item.Id);
+        if (db is not null)
+        {
+            var existingRecord = db.Payments.FirstOrDefault(x => x.ExpenseClaimId == id);
+            if (existingRecord is null)
+            {
+                db.Payments.Add(new PaymentRecordEntity
+                {
+                    ExpenseClaimId = id,
+                    PaymentDate = request.PaymentDate,
+                    PaymentMethod = request.PaymentMethod,
+                    TransactionNumber = request.TransactionNumber,
+                    PaidAmount = request.PaidAmount,
+                    ProofFile = request.ProofFile,
+                    OperatorId = actor.Id
+                });
+                db.SaveChanges();
+            }
+        }
+
         return ServiceResult<ExpenseClaim>.Success(item);
     }
 

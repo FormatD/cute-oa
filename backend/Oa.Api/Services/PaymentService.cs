@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using Oa.Api.Domain;
 using Oa.Api.Persistence;
 
@@ -46,86 +47,108 @@ public sealed class PaymentService
 
         if (db is not null)
         {
-            var claim = db.ExpenseClaims.SingleOrDefault(x => x.TenantId == TenantId && x.Id == expenseId);
-            if (claim is null)
-                return ServiceResult<PaymentTransaction>.Failure("报销单不存在。", "DATA_001");
-
-            if (claim.Status != (int)ExpenseStatus.Approved && claim.Status != (int)ExpenseStatus.Completed)
-                return ServiceResult<PaymentTransaction>.Failure("仅审批通过的报销单可登记付款。", "STATE_001");
-
-            var remaining = claim.TotalAmount - claim.PaidTotalAmount;
-            if (request.PaidAmount > remaining)
-                return ServiceResult<PaymentTransaction>.Failure($"本次付款金额 ({request.PaidAmount:N2} 元) 超过当前剩余待付金额 ({remaining:N2} 元)。", "PAYMENT_AMOUNT_EXCEEDED");
-
-            var duplicateTx = db.PaymentTransactions.Any(t => t.TenantId == TenantId && t.TransactionNumber == request.TransactionNumber.Trim());
-            if (duplicateTx)
-                return ServiceResult<PaymentTransaction>.Failure($"银行流水号【{request.TransactionNumber.Trim()}】已被使用，禁止重复录入。", "PAYMENT_TX_DUPLICATE");
-
-            Guid? proofGuid = null;
-            if (!string.IsNullOrWhiteSpace(request.ProofAttachmentId) && Guid.TryParse(request.ProofAttachmentId, out var parsedProof))
-                proofGuid = parsedProof;
-
-            var existingCount = db.PaymentTransactions.Count(t => t.TenantId == TenantId && t.BusinessType == "Expense" && t.BusinessId == expenseId);
-            var sequence = existingCount + 1;
-
-            var txRecord = new PaymentTransactionRecord
+            using var tx = db.Database.BeginTransaction();
+            try
             {
-                TenantId = TenantId,
-                BusinessType = "Expense",
-                BusinessId = expenseId,
-                BusinessNumber = claim.Number,
-                Sequence = sequence,
-                BatchTitle = string.IsNullOrWhiteSpace(request.BatchTitle) ? $"第 {sequence} 笔款项" : request.BatchTitle.Trim(),
-                PaymentDate = request.PaymentDate,
-                PaymentMethod = NormalizePaymentMethod(request.PaymentMethod),
-                PayerAccount = request.PayerAccount.Trim(),
-                PayeeName = request.PayeeName.Trim(),
-                PayeeAccount = request.PayeeAccount.Trim(),
-                PayeeBank = request.PayeeBank.Trim(),
-                TransactionNumber = request.TransactionNumber.Trim(),
-                PaidAmount = request.PaidAmount,
-                FeeAmount = request.FeeAmount,
-                ProofAttachmentId = proofGuid,
-                Remarks = request.Remarks?.Trim(),
-                Status = "SUCCESS",
-                OperatorId = actor.Id,
-                OperatorName = actor.Name,
-                CreatedAt = DateTimeOffset.UtcNow
-            };
-            db.PaymentTransactions.Add(txRecord);
+                db.Database.ExecuteSqlInterpolated($"SELECT \"Id\" FROM expense_claim WHERE \"TenantId\" = {TenantId} AND \"Id\" = {expenseId} FOR UPDATE");
 
-            claim.PaidTotalAmount += request.PaidAmount;
-            if (claim.PaidTotalAmount >= claim.TotalAmount)
-            {
-                claim.PaymentStatus = "PAID";
-                claim.Status = (int)ExpenseStatus.Completed;
+                var claim = db.ExpenseClaims.SingleOrDefault(x => x.TenantId == TenantId && x.Id == expenseId);
+                if (claim is null)
+                    return ServiceResult<PaymentTransaction>.Failure("报销单不存在。", "DATA_001");
 
-                // 关联发票状态更新为 PAID
-                var invoices = db.ExpenseInvoices.Where(i => i.TenantId == TenantId && i.ExpenseClaimId == expenseId && i.Status == "COMMITTED").ToList();
-                foreach (var inv in invoices) inv.Status = "PAID";
+                if (claim.Status != (int)ExpenseStatus.Approved && claim.Status != (int)ExpenseStatus.Completed)
+                    return ServiceResult<PaymentTransaction>.Failure("仅审批通过的报销单可登记付款。", "STATE_001");
+
+                var remaining = claim.TotalAmount - claim.PaidTotalAmount;
+                if (request.PaidAmount > remaining)
+                    return ServiceResult<PaymentTransaction>.Failure($"本次付款金额 ({request.PaidAmount:N2} 元) 超过当前剩余待付金额 ({remaining:N2} 元)。", "PAYMENT_AMOUNT_EXCEEDED");
+
+                var duplicateTx = db.PaymentTransactions.Any(t => t.TenantId == TenantId && t.TransactionNumber == request.TransactionNumber.Trim());
+                if (duplicateTx)
+                    return ServiceResult<PaymentTransaction>.Failure($"银行流水号【{request.TransactionNumber.Trim()}】已被使用，禁止重复录入。", "PAYMENT_TX_DUPLICATE");
+
+                Guid? proofGuid = null;
+                if (!string.IsNullOrWhiteSpace(request.ProofAttachmentId) && Guid.TryParse(request.ProofAttachmentId, out var parsedProof))
+                    proofGuid = parsedProof;
+
+                var maxSeq = db.PaymentTransactions.Where(t => t.TenantId == TenantId && t.BusinessType == "Expense" && t.BusinessId == expenseId)
+                    .Select(t => (int?)t.Sequence).Max() ?? 0;
+                var sequence = maxSeq + 1;
+
+                var txRecord = new PaymentTransactionRecord
+                {
+                    TenantId = TenantId,
+                    BusinessType = "Expense",
+                    BusinessId = expenseId,
+                    BusinessNumber = claim.Number,
+                    Sequence = sequence,
+                    BatchTitle = string.IsNullOrWhiteSpace(request.BatchTitle) ? $"第 {sequence} 笔款项" : request.BatchTitle.Trim(),
+                    PaymentDate = request.PaymentDate,
+                    PaymentMethod = NormalizePaymentMethod(request.PaymentMethod),
+                    PayerAccount = string.IsNullOrWhiteSpace(request.PayerAccount) ? "COMPANY-MAIN" : request.PayerAccount.Trim(),
+                    PayeeName = request.PayeeName.Trim(),
+                    PayeeAccount = request.PayeeAccount.Trim(),
+                    PayeeBank = request.PayeeBank.Trim(),
+                    TransactionNumber = request.TransactionNumber.Trim(),
+                    PaidAmount = request.PaidAmount,
+                    FeeAmount = request.FeeAmount,
+                    ProofAttachmentId = proofGuid,
+                    Remarks = request.Remarks?.Trim(),
+                    Status = "SUCCESS",
+                    OperatorId = actor.Id,
+                    OperatorName = actor.Name,
+                    CreatedAt = DateTimeOffset.UtcNow
+                };
+                db.PaymentTransactions.Add(txRecord);
+
+                claim.PaidTotalAmount += request.PaidAmount;
+                if (claim.PaidTotalAmount >= claim.TotalAmount)
+                {
+                    claim.PaymentStatus = "PAID";
+                    claim.Status = (int)ExpenseStatus.Completed;
+
+                    // 关联发票状态更新为 PAID
+                    var invoices = db.ExpenseInvoices.Where(i => i.TenantId == TenantId && i.ExpenseClaimId == expenseId && i.Status == "COMMITTED").ToList();
+                    foreach (var inv in invoices) inv.Status = "PAID";
+                }
+                else
+                {
+                    claim.PaymentStatus = "PARTIALLY_PAID";
+                }
+                claim.UpdatedAt = DateTimeOffset.UtcNow;
+
+                budgetService.Consume(TenantId, claim.BudgetPoolId, "Expense", claim.Id, claim.Number, request.PaidAmount, actor.Id, $"报销付款登记 第 {sequence} 笔", $"seq-{sequence}");
+
+                db.AuditLogs.Add(new AuditRecord
+                {
+                    TenantId = TenantId,
+                    ActorId = actor.Id,
+                    Action = "EXPENSE_PAYMENT_REGISTERED",
+                    ResourceType = "ExpenseClaim",
+                    ResourceId = claim.Id.ToString(),
+                    Summary = $"登记报销付款 第 {sequence} 笔，实付 {request.PaidAmount:N2} 元，流水号：{request.TransactionNumber.Trim()}"
+                });
+                db.SaveChanges();
+                tx.Commit();
+
+                notifications?.Create(claim.ApplicantId, "EXPENSE_PAID", "报销付款通知", $"{claim.Number} 已完成第 {sequence} 笔付款登记（实付 {request.PaidAmount:N2} 元）", "ExpenseClaim", claim.Id);
+
+                return ServiceResult<PaymentTransaction>.Success(MapToDomain(txRecord));
             }
-            else
+            catch (DbUpdateException ex) when (ex.InnerException is PostgresException pg && pg.SqlState == PostgresErrorCodes.UniqueViolation)
             {
-                claim.PaymentStatus = "PARTIALLY_PAID";
+                tx.Rollback();
+                if (pg.ConstraintName != null && pg.ConstraintName.Contains("UX_payment_transaction_sequence"))
+                {
+                    return ServiceResult<PaymentTransaction>.Failure("检测到并发付款冲突，请重试。", "CONCURRENCY_001");
+                }
+                return ServiceResult<PaymentTransaction>.Failure($"流水号重复或并发冲突: {pg.MessageText}", "PAYMENT_TX_DUPLICATE");
             }
-            claim.UpdatedAt = DateTimeOffset.UtcNow;
-
-            budgetService.Consume(TenantId, claim.BudgetPoolId, "Expense", claim.Id, claim.Number, request.PaidAmount, actor.Id, $"报销付款登记 第 {sequence} 笔");
-
-            db.AuditLogs.Add(new AuditRecord
+            catch (Exception)
             {
-                TenantId = TenantId,
-                ActorId = actor.Id,
-                Action = "EXPENSE_PAYMENT_REGISTERED",
-                ResourceType = "ExpenseClaim",
-                ResourceId = claim.Id.ToString(),
-                Summary = $"登记报销付款 第 {sequence} 笔，实付 {request.PaidAmount:N2} 元，流水号：{request.TransactionNumber.Trim()}"
-            });
-            db.SaveChanges();
-
-            notifications?.Create(claim.ApplicantId, "EXPENSE_PAID", "报销付款通知", $"{claim.Number} 已完成第 {sequence} 笔付款登记（实付 {request.PaidAmount:N2} 元）", "ExpenseClaim", claim.Id);
-
-            return ServiceResult<PaymentTransaction>.Success(MapToDomain(txRecord));
+                tx.Rollback();
+                throw;
+            }
         }
 
         // In-memory mode for tests
@@ -172,113 +195,137 @@ public sealed class PaymentService
 
         if (db is not null)
         {
-            var purchase = db.PurchaseRequests.SingleOrDefault(x => x.TenantId == TenantId && x.Id == purchaseId);
-            if (purchase is null)
-                return ServiceResult<PaymentTransaction>.Failure("采购申请不存在。", "DATA_001");
-
-            var status = (PurchaseStatus)purchase.Status;
-            if (status != PurchaseStatus.Ordered && status != PurchaseStatus.Received)
-                return ServiceResult<PaymentTransaction>.Failure("仅已下单或已验收的采购单可登记付款。", "STATE_001");
-
-            var order = db.PurchaseOrders.SingleOrDefault(o => o.TenantId == TenantId && o.PurchaseRequestId == purchaseId);
-            if (order is null)
-                return ServiceResult<PaymentTransaction>.Failure("尚未登记采购订单，无法付款。", "STATE_001");
-
-            var contractAmount = order.ActualAmount;
-            var isAccepted = !purchase.RequiresAcceptance || db.PurchaseReceipts.Any(r => r.TenantId == TenantId && r.PurchaseRequestId == purchaseId && r.Result == "ALL_ACCEPTED") || status == PurchaseStatus.Received;
-
-            var limitRate = purchase.PrepaymentLimitRate > 0 ? purchase.PrepaymentLimitRate : 0.50m;
-            if (!isAccepted)
+            using var tx = db.Database.BeginTransaction();
+            try
             {
-                var maxPrepayment = decimal.Round(contractAmount * limitRate, 2);
-                if (purchase.PaidTotalAmount + request.PaidAmount > maxPrepayment)
+                db.Database.ExecuteSqlInterpolated($"SELECT \"Id\" FROM purchase_request WHERE \"TenantId\" = {TenantId} AND \"Id\" = {purchaseId} FOR UPDATE");
+
+                var purchase = db.PurchaseRequests.SingleOrDefault(x => x.TenantId == TenantId && x.Id == purchaseId);
+                if (purchase is null)
+                    return ServiceResult<PaymentTransaction>.Failure("采购申请不存在。", "DATA_001");
+
+                var status = (PurchaseStatus)purchase.Status;
+                if (status != PurchaseStatus.Ordered && status != PurchaseStatus.Received)
+                    return ServiceResult<PaymentTransaction>.Failure("仅已下单或已验收的采购单可登记付款。", "STATE_001");
+
+                var order = db.PurchaseOrders.SingleOrDefault(o => o.TenantId == TenantId && o.PurchaseRequestId == purchaseId);
+                if (order is null)
+                    return ServiceResult<PaymentTransaction>.Failure("尚未登记采购订单，无法付款。", "STATE_001");
+
+                var contractAmount = order.ActualAmount;
+                var isAccepted = !purchase.RequiresAcceptance || db.PurchaseReceipts.Any(r => r.TenantId == TenantId && r.PurchaseRequestId == purchaseId && r.Result == "ALL_ACCEPTED") || status == PurchaseStatus.Received;
+
+                var limitRate = purchase.PrepaymentLimitRate > 0 ? purchase.PrepaymentLimitRate : 0.50m;
+                if (!isAccepted)
                 {
-                    return ServiceResult<PaymentTransaction>.Failure(
-                        $"未完成到货验收前，累计预付款比例不得超过 {limitRate:P0}（最高允许付款 {maxPrepayment:N2} 元，当前已付 {purchase.PaidTotalAmount:N2} 元，本次尝试支付 {request.PaidAmount:N2} 元）。",
-                        "PURCHASE_PREPAYMENT_EXCEEDED");
+                    var maxPrepayment = decimal.Round(contractAmount * limitRate, 2);
+                    if (purchase.PaidTotalAmount + request.PaidAmount > maxPrepayment)
+                    {
+                        return ServiceResult<PaymentTransaction>.Failure(
+                            $"未完成到货验收前，累计预付款比例不得超过 {limitRate:P0}（最高允许付款 {maxPrepayment:N2} 元，当前已付 {purchase.PaidTotalAmount:N2} 元，本次尝试支付 {request.PaidAmount:N2} 元）。",
+                            "PURCHASE_PREPAYMENT_EXCEEDED");
+                    }
                 }
+
+                if (purchase.PaidTotalAmount + request.PaidAmount > contractAmount)
+                {
+                    var diff = (purchase.PaidTotalAmount + request.PaidAmount) - contractAmount;
+                    return ServiceResult<PaymentTransaction>.Failure(
+                        $"累计付款金额不能超过采购合同金额 ({contractAmount:N2} 元)，本次付款将超出 {diff:N2} 元。",
+                        "PAYMENT_AMOUNT_EXCEEDED");
+                }
+
+                var duplicateTx = db.PaymentTransactions.Any(t => t.TenantId == TenantId && t.TransactionNumber == request.TransactionNumber.Trim());
+                if (duplicateTx)
+                    return ServiceResult<PaymentTransaction>.Failure($"银行流水号【{request.TransactionNumber.Trim()}】已被使用，禁止重复录入。", "PAYMENT_TX_DUPLICATE");
+
+                Guid? proofGuid = null;
+                if (!string.IsNullOrWhiteSpace(request.ProofAttachmentId) && Guid.TryParse(request.ProofAttachmentId, out var parsedProof))
+                    proofGuid = parsedProof;
+
+                var maxSeq = db.PaymentTransactions.Where(t => t.TenantId == TenantId && t.BusinessType == "Purchase" && t.BusinessId == purchaseId)
+                    .Select(t => (int?)t.Sequence).Max() ?? 0;
+                var sequence = maxSeq + 1;
+
+                var txRecord = new PaymentTransactionRecord
+                {
+                    TenantId = TenantId,
+                    BusinessType = "Purchase",
+                    BusinessId = purchaseId,
+                    BusinessNumber = purchase.Number,
+                    Sequence = sequence,
+                    BatchTitle = string.IsNullOrWhiteSpace(request.BatchTitle) ? (!isAccepted ? $"首期预付款 ({limitRate:P0})" : $"第 {sequence} 笔款项") : request.BatchTitle.Trim(),
+                    PaymentDate = request.PaymentDate,
+                    PaymentMethod = NormalizePaymentMethod(request.PaymentMethod),
+                    PayerAccount = string.IsNullOrWhiteSpace(request.PayerAccount) ? "COMPANY-MAIN" : request.PayerAccount.Trim(),
+                    PayeeName = request.PayeeName.Trim(),
+                    PayeeAccount = request.PayeeAccount.Trim(),
+                    PayeeBank = request.PayeeBank.Trim(),
+                    TransactionNumber = request.TransactionNumber.Trim(),
+                    PaidAmount = request.PaidAmount,
+                    FeeAmount = request.FeeAmount,
+                    ProofAttachmentId = proofGuid,
+                    Remarks = request.Remarks?.Trim(),
+                    Status = "SUCCESS",
+                    OperatorId = actor.Id,
+                    OperatorName = actor.Name,
+                    CreatedAt = DateTimeOffset.UtcNow
+                };
+                db.PaymentTransactions.Add(txRecord);
+
+                purchase.PaidTotalAmount += request.PaidAmount;
+                if (purchase.PaidTotalAmount >= contractAmount)
+                    purchase.PaymentStatus = "PAID";
+                else
+                    purchase.PaymentStatus = "PARTIALLY_PAID";
+
+                purchase.Version++;
+                purchase.UpdatedAt = DateTimeOffset.UtcNow;
+
+                budgetService.Consume(TenantId, purchase.BudgetPoolId, "Purchase", purchase.Id, purchase.Number, request.PaidAmount, actor.Id, $"采购付款登记 第 {sequence} 笔", $"seq-{sequence}");
+
+                db.AuditLogs.Add(new AuditRecord
+                {
+                    TenantId = TenantId,
+                    ActorId = actor.Id,
+                    Action = "PURCHASE_PAYMENT_REGISTERED",
+                    ResourceType = "PurchaseRequest",
+                    ResourceId = purchase.Id.ToString(),
+                    Summary = $"登记采购付款 第 {sequence} 笔，实付 {request.PaidAmount:N2} 元，流水号：{request.TransactionNumber.Trim()}"
+                });
+                db.SaveChanges();
+                tx.Commit();
+
+                notifications?.Create(purchase.ApplicantId, "PURCHASE_PAID", "采购付款通知", $"{purchase.Number} 已完成第 {sequence} 笔付款登记（实付 {request.PaidAmount:N2} 元）", "PurchaseRequest", purchase.Id);
+
+                return ServiceResult<PaymentTransaction>.Success(MapToDomain(txRecord));
             }
-
-            if (purchase.PaidTotalAmount + request.PaidAmount > contractAmount)
+            catch (DbUpdateException ex) when (ex.InnerException is PostgresException pg && pg.SqlState == PostgresErrorCodes.UniqueViolation)
             {
-                var diff = (purchase.PaidTotalAmount + request.PaidAmount) - contractAmount;
-                return ServiceResult<PaymentTransaction>.Failure(
-                    $"累计付款金额不能超过采购合同金额 ({contractAmount:N2} 元)，本次付款将超出 {diff:N2} 元。",
-                    "PAYMENT_AMOUNT_EXCEEDED");
+                tx.Rollback();
+                if (pg.ConstraintName != null && pg.ConstraintName.Contains("UX_payment_transaction_sequence"))
+                {
+                    return ServiceResult<PaymentTransaction>.Failure("检测到并发付款冲突，请重试。", "CONCURRENCY_001");
+                }
+                return ServiceResult<PaymentTransaction>.Failure($"流水号重复或并发冲突: {pg.MessageText}", "PAYMENT_TX_DUPLICATE");
             }
-
-            var duplicateTx = db.PaymentTransactions.Any(t => t.TenantId == TenantId && t.TransactionNumber == request.TransactionNumber.Trim());
-            if (duplicateTx)
-                return ServiceResult<PaymentTransaction>.Failure($"银行流水号【{request.TransactionNumber.Trim()}】已被使用，禁止重复录入。", "PAYMENT_TX_DUPLICATE");
-
-            Guid? proofGuid = null;
-            if (!string.IsNullOrWhiteSpace(request.ProofAttachmentId) && Guid.TryParse(request.ProofAttachmentId, out var parsedProof))
-                proofGuid = parsedProof;
-
-            var existingCount = db.PaymentTransactions.Count(t => t.TenantId == TenantId && t.BusinessType == "Purchase" && t.BusinessId == purchaseId);
-            var sequence = existingCount + 1;
-
-            var txRecord = new PaymentTransactionRecord
+            catch (Exception)
             {
-                TenantId = TenantId,
-                BusinessType = "Purchase",
-                BusinessId = purchaseId,
-                BusinessNumber = purchase.Number,
-                Sequence = sequence,
-                BatchTitle = string.IsNullOrWhiteSpace(request.BatchTitle) ? (!isAccepted ? $"首期预付款 ({limitRate:P0})" : $"第 {sequence} 笔款项") : request.BatchTitle.Trim(),
-                PaymentDate = request.PaymentDate,
-                PaymentMethod = NormalizePaymentMethod(request.PaymentMethod),
-                PayerAccount = request.PayerAccount.Trim(),
-                PayeeName = request.PayeeName.Trim(),
-                PayeeAccount = request.PayeeAccount.Trim(),
-                PayeeBank = request.PayeeBank.Trim(),
-                TransactionNumber = request.TransactionNumber.Trim(),
-                PaidAmount = request.PaidAmount,
-                FeeAmount = request.FeeAmount,
-                ProofAttachmentId = proofGuid,
-                Remarks = request.Remarks?.Trim(),
-                Status = "SUCCESS",
-                OperatorId = actor.Id,
-                OperatorName = actor.Name,
-                CreatedAt = DateTimeOffset.UtcNow
-            };
-            db.PaymentTransactions.Add(txRecord);
-
-            purchase.PaidTotalAmount += request.PaidAmount;
-            if (purchase.PaidTotalAmount >= contractAmount)
-                purchase.PaymentStatus = "PAID";
-            else
-                purchase.PaymentStatus = "PARTIALLY_PAID";
-
-            purchase.Version++;
-            purchase.UpdatedAt = DateTimeOffset.UtcNow;
-
-            budgetService.Consume(TenantId, purchase.BudgetPoolId, "Purchase", purchase.Id, purchase.Number, request.PaidAmount, actor.Id, $"采购付款登记 第 {sequence} 笔");
-
-            db.AuditLogs.Add(new AuditRecord
-            {
-                TenantId = TenantId,
-                ActorId = actor.Id,
-                Action = "PURCHASE_PAYMENT_REGISTERED",
-                ResourceType = "PurchaseRequest",
-                ResourceId = purchase.Id.ToString(),
-                Summary = $"登记采购付款 第 {sequence} 笔，实付 {request.PaidAmount:N2} 元，流水号：{request.TransactionNumber.Trim()}"
-            });
-            db.SaveChanges();
-
-            notifications?.Create(purchase.ApplicantId, "PURCHASE_PAID", "采购付款通知", $"{purchase.Number} 已完成第 {sequence} 笔付款登记（实付 {request.PaidAmount:N2} 元）", "PurchaseRequest", purchase.Id);
-
-            return ServiceResult<PaymentTransaction>.Success(MapToDomain(txRecord));
+                tx.Rollback();
+                throw;
+            }
         }
 
+        var memExisting = _memoryTransactions.Where(t => t.BusinessType == "Purchase" && t.BusinessId == purchaseId).ToList();
+        var memSeq = memExisting.Count + 1;
         var memTx = new PaymentTransaction
         {
             TenantId = TenantId,
             BusinessType = "Purchase",
             BusinessId = purchaseId,
             BusinessNumber = $"PR-{purchaseId.ToString()[..6]}",
-            Sequence = 1,
-            BatchTitle = request.BatchTitle,
+            Sequence = memSeq,
+            BatchTitle = string.IsNullOrWhiteSpace(request.BatchTitle) ? $"第 {memSeq} 笔款项" : request.BatchTitle.Trim(),
             PaymentDate = request.PaymentDate,
             PaymentMethod = NormalizePaymentMethod(request.PaymentMethod),
             PayerAccount = request.PayerAccount,
@@ -294,7 +341,7 @@ public sealed class PaymentService
             OperatorName = actor.Name
         };
         _memoryTransactions.Add(memTx);
-        budgetService.Consume(TenantId, null, "Purchase", purchaseId, memTx.BusinessNumber, request.PaidAmount, actor.Id);
+        budgetService.Consume(TenantId, null, "Purchase", purchaseId, memTx.BusinessNumber, request.PaidAmount, actor.Id, actionKeySuffix: $"seq-{memSeq}");
         return ServiceResult<PaymentTransaction>.Success(memTx);
     }
 

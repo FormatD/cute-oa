@@ -418,77 +418,108 @@ public sealed class BudgetService
         Guid businessId,
         string businessNumber,
         string operatorId,
-        bool blockWhenExceeded = false)
+        bool blockWhenExceeded = false,
+        int? targetYear = null,
+        int? targetMonth = null)
     {
         if (amount <= 0) return ServiceResult<Guid?>.Success(null);
 
-        var targetYear = DateTime.Today.Year;
-        var targetMonth = DateTime.Today.Month;
+        var year = targetYear ?? DateTime.Today.Year;
+        var month = targetMonth ?? DateTime.Today.Month;
+        var actionKey = $"Reserve:{businessType}:{businessId}";
 
         if (db is not null)
         {
-            var record = FindMatchingBudgetRecord(tenantId, departmentId, expenseCategory, targetYear, targetMonth);
-            if (record is null) return ServiceResult<Guid?>.Success(null); // 无预算池直接放行
-
-            var available = record.AllocatedAmount - record.CommittedAmount - record.ActualAmount;
-            if (amount > available && blockWhenExceeded)
+            using var dbTx = db.Database.CurrentTransaction is null ? db.Database.BeginTransaction() : null;
+            try
             {
-                return ServiceResult<Guid?>.Failure(
-                    $"部门预算不足：可用额度 {available:N2} 元，申请金额 {amount:N2} 元，超出 {(amount - available):N2} 元。",
-                    "BUDGET_EXCEEDED");
+                var existingTx = db.BudgetTransactions.AsNoTracking().FirstOrDefault(t => t.TenantId == tenantId && t.ActionKey == actionKey);
+                if (existingTx is not null)
+                    return ServiceResult<Guid?>.Success(existingTx.BudgetId);
+
+                var record = FindMatchingBudgetRecord(tenantId, departmentId, expenseCategory, year, month);
+                if (record is null) return ServiceResult<Guid?>.Success(null); // 无预算池直接放行
+
+                // Exclusive row lock on matching budget pool
+                db.Database.ExecuteSqlInterpolated($"SELECT \"Id\" FROM budget WHERE \"TenantId\" = {tenantId} AND \"Id\" = {record.Id} FOR UPDATE");
+                db.Entry(record).Reload();
+
+                var available = record.AllocatedAmount - record.CommittedAmount - record.ActualAmount;
+                if (amount > available && blockWhenExceeded)
+                {
+                    return ServiceResult<Guid?>.Failure(
+                        $"部门预算不足：可用额度 {available:N2} 元，申请金额 {amount:N2} 元，超出 {(amount - available):N2} 元。",
+                        "BUDGET_EXCEEDED");
+                }
+
+                record.CommittedAmount += amount;
+                record.ConcurrencyVersion++;
+                record.UpdatedAt = DateTimeOffset.UtcNow;
+
+                var newBalance = record.AllocatedAmount - record.CommittedAmount - record.ActualAmount;
+                var tx = new BudgetTransactionRecord
+                {
+                    TenantId = tenantId,
+                    BudgetId = record.Id,
+                    BusinessType = businessType,
+                    BusinessId = businessId,
+                    BusinessNumber = businessNumber,
+                    TransactionType = "RESERVED",
+                    Amount = amount,
+                    BalanceAfter = newBalance,
+                    Description = $"{businessType} 申请【{businessNumber}】预占额度",
+                    OperatorId = operatorId,
+                    ActionKey = actionKey,
+                    CreatedAt = DateTimeOffset.UtcNow
+                };
+                db.BudgetTransactions.Add(tx);
+                db.SaveChanges();
+                dbTx?.Commit();
+
+                return ServiceResult<Guid?>.Success(record.Id);
+            }
+            catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException pgEx && pgEx.SqlState == "23505")
+            {
+                dbTx?.Rollback();
+                var existingTx = db.BudgetTransactions.AsNoTracking().FirstOrDefault(t => t.TenantId == tenantId && t.ActionKey == actionKey);
+                if (existingTx is not null) return ServiceResult<Guid?>.Success(existingTx.BudgetId);
+                return ServiceResult<Guid?>.Failure("并发预算预占冲突，请重试。", "CONCURRENCY_001");
+            }
+        }
+
+        lock (_memoryTransactions)
+        {
+            var memExisting = _memoryTransactions.FirstOrDefault(t => t.TenantId == tenantId && t.ActionKey == actionKey);
+            if (memExisting is not null) return ServiceResult<Guid?>.Success(memExisting.BudgetId);
+
+            var mem = FindMatchingBudget(tenantId, departmentId, expenseCategory, year, month);
+            if (mem is null) return ServiceResult<Guid?>.Success(null);
+
+            var memAvailable = mem.AllocatedAmount - mem.CommittedAmount - mem.ActualAmount;
+            if (amount > memAvailable && blockWhenExceeded)
+            {
+                return ServiceResult<Guid?>.Failure($"部门预算不足：可用额度 {memAvailable:N2} 元。", "BUDGET_EXCEEDED");
             }
 
-            record.CommittedAmount += amount;
-            record.ConcurrencyVersion++;
-            record.UpdatedAt = DateTimeOffset.UtcNow;
-
-            var newBalance = record.AllocatedAmount - record.CommittedAmount - record.ActualAmount;
-            var tx = new BudgetTransactionRecord
+            mem.CommittedAmount += amount;
+            mem.ConcurrencyVersion++;
+            mem.UpdatedAt = DateTimeOffset.UtcNow;
+            _memoryTransactions.Add(new BudgetTransaction
             {
                 TenantId = tenantId,
-                BudgetId = record.Id,
+                BudgetId = mem.Id,
                 BusinessType = businessType,
                 BusinessId = businessId,
                 BusinessNumber = businessNumber,
-                TransactionType = "RESERVED",
+                TransactionType = BudgetTransactionType.Reserved,
                 Amount = amount,
-                BalanceAfter = newBalance,
+                BalanceAfter = mem.AvailableAmount,
                 Description = $"{businessType} 申请【{businessNumber}】预占额度",
                 OperatorId = operatorId,
-                CreatedAt = DateTimeOffset.UtcNow
-            };
-            db.BudgetTransactions.Add(tx);
-            db.SaveChanges();
-
-            return ServiceResult<Guid?>.Success(record.Id);
+                ActionKey = actionKey
+            });
+            return ServiceResult<Guid?>.Success(mem.Id);
         }
-
-        var mem = FindMatchingBudget(tenantId, departmentId, expenseCategory, targetYear, targetMonth);
-        if (mem is null) return ServiceResult<Guid?>.Success(null);
-
-        var memAvailable = mem.AllocatedAmount - mem.CommittedAmount - mem.ActualAmount;
-        if (amount > memAvailable && blockWhenExceeded)
-        {
-            return ServiceResult<Guid?>.Failure($"部门预算不足：可用额度 {memAvailable:N2} 元。", "BUDGET_EXCEEDED");
-        }
-
-        mem.CommittedAmount += amount;
-        mem.ConcurrencyVersion++;
-        mem.UpdatedAt = DateTimeOffset.UtcNow;
-        _memoryTransactions.Add(new BudgetTransaction
-        {
-            TenantId = tenantId,
-            BudgetId = mem.Id,
-            BusinessType = businessType,
-            BusinessId = businessId,
-            BusinessNumber = businessNumber,
-            TransactionType = BudgetTransactionType.Reserved,
-            Amount = amount,
-            BalanceAfter = mem.AvailableAmount,
-            Description = $"{businessType} 申请【{businessNumber}】预占额度",
-            OperatorId = operatorId
-        });
-        return ServiceResult<Guid?>.Success(mem.Id);
     }
 
     public ServiceResult<bool> Release(
@@ -502,80 +533,115 @@ public sealed class BudgetService
         string? reason = null)
     {
         if (amount <= 0) return ServiceResult<bool>.Success(true);
+        var actionKey = $"Release:{businessType}:{businessId}";
 
         if (db is not null)
         {
-            BudgetRecord? record = null;
-            if (budgetId.HasValue)
+            using var dbTx = db.Database.CurrentTransaction is null ? db.Database.BeginTransaction() : null;
+            try
             {
-                record = db.Budgets.SingleOrDefault(b => b.TenantId == tenantId && b.Id == budgetId.Value);
-            }
-            if (record is null)
-            {
-                var prevTx = db.BudgetTransactions.AsNoTracking()
-                    .Where(t => t.TenantId == tenantId && t.BusinessType == businessType && t.BusinessId == businessId && t.TransactionType == "RESERVED")
-                    .OrderByDescending(t => t.CreatedAt)
-                    .FirstOrDefault();
-                if (prevTx is not null)
+                var existingRel = db.BudgetTransactions.AsNoTracking().FirstOrDefault(t => t.TenantId == tenantId && t.ActionKey == actionKey);
+                if (existingRel is not null)
+                    return ServiceResult<bool>.Success(true);
+
+                var prevTxs = db.BudgetTransactions.AsNoTracking()
+                    .Where(t => t.TenantId == tenantId && t.BusinessType == businessType && t.BusinessId == businessId)
+                    .ToList();
+                var prevReserve = prevTxs.Where(t => t.TransactionType == "RESERVED").OrderByDescending(t => t.CreatedAt).FirstOrDefault();
+                if (prevReserve is null)
+                    return ServiceResult<bool>.Success(true);
+
+                var targetBudgetId = budgetId ?? prevReserve.BudgetId;
+                db.Database.ExecuteSqlInterpolated($"SELECT \"Id\" FROM budget WHERE \"TenantId\" = {tenantId} AND \"Id\" = {targetBudgetId} FOR UPDATE");
+
+                var record = db.Budgets.SingleOrDefault(b => b.TenantId == tenantId && b.Id == targetBudgetId);
+                if (record is null) return ServiceResult<bool>.Success(true);
+                db.Entry(record).Reload();
+
+                var reservedTotal = prevTxs.Where(t => t.TransactionType == "RESERVED").Sum(t => t.Amount);
+                var releasedTotal = prevTxs.Where(t => t.TransactionType == "RELEASED").Sum(t => t.Amount);
+                var consumedTotal = prevTxs.Where(t => t.TransactionType == "CONSUMED").Sum(t => t.Amount);
+                var netCommitted = Math.Max(0m, reservedTotal - releasedTotal - consumedTotal);
+                var actualRelease = Math.Min(amount, netCommitted);
+
+                if (actualRelease <= 0)
+                    return ServiceResult<bool>.Success(true);
+
+                record.CommittedAmount = Math.Max(0m, record.CommittedAmount - actualRelease);
+                record.ConcurrencyVersion++;
+                record.UpdatedAt = DateTimeOffset.UtcNow;
+
+                var newBalance = record.AllocatedAmount - record.CommittedAmount - record.ActualAmount;
+                var tx = new BudgetTransactionRecord
                 {
-                    record = db.Budgets.SingleOrDefault(b => b.TenantId == tenantId && b.Id == prevTx.BudgetId);
-                }
+                    TenantId = tenantId,
+                    BudgetId = record.Id,
+                    BusinessType = businessType,
+                    BusinessId = businessId,
+                    BusinessNumber = businessNumber,
+                    TransactionType = "RELEASED",
+                    Amount = actualRelease,
+                    BalanceAfter = newBalance,
+                    Description = reason ?? $"{businessType} 单据【{businessNumber}】释放退还预占额度",
+                    OperatorId = operatorId,
+                    ActionKey = actionKey,
+                    CreatedAt = DateTimeOffset.UtcNow
+                };
+                db.BudgetTransactions.Add(tx);
+                db.SaveChanges();
+                dbTx?.Commit();
+
+                return ServiceResult<bool>.Success(true);
             }
+            catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException pgEx && pgEx.SqlState == "23505")
+            {
+                dbTx?.Rollback();
+                return ServiceResult<bool>.Success(true);
+            }
+        }
 
-            if (record is null) return ServiceResult<bool>.Success(true);
+        lock (_memoryTransactions)
+        {
+            var existingMem = _memoryTransactions.FirstOrDefault(t => t.TenantId == tenantId && t.ActionKey == actionKey);
+            if (existingMem is not null) return ServiceResult<bool>.Success(true);
 
-            record.CommittedAmount = Math.Max(0m, record.CommittedAmount - amount);
-            record.ConcurrencyVersion++;
-            record.UpdatedAt = DateTimeOffset.UtcNow;
+            var prevTxs = _memoryTransactions
+                .Where(t => t.TenantId == tenantId && t.BusinessType == businessType && t.BusinessId == businessId)
+                .ToList();
+            var prevReserve = prevTxs.Where(t => t.TransactionType == BudgetTransactionType.Reserved).OrderByDescending(t => t.CreatedAt).FirstOrDefault();
+            if (prevReserve is null) return ServiceResult<bool>.Success(true);
 
-            var newBalance = record.AllocatedAmount - record.CommittedAmount - record.ActualAmount;
-            var tx = new BudgetTransactionRecord
+            var mem = budgetId.HasValue ? _memoryBudgets.SingleOrDefault(b => b.Id == budgetId.Value) : _memoryBudgets.SingleOrDefault(b => b.Id == prevReserve.BudgetId);
+            if (mem is null) return ServiceResult<bool>.Success(true);
+
+            var reservedTotal = prevTxs.Where(t => t.TransactionType == BudgetTransactionType.Reserved).Sum(t => t.Amount);
+            var releasedTotal = prevTxs.Where(t => t.TransactionType == BudgetTransactionType.Released).Sum(t => t.Amount);
+            var consumedTotal = prevTxs.Where(t => t.TransactionType == BudgetTransactionType.Consumed).Sum(t => t.Amount);
+            var netCommitted = Math.Max(0m, reservedTotal - releasedTotal - consumedTotal);
+            var actualRelease = Math.Min(amount, netCommitted);
+
+            if (actualRelease <= 0)
+                return ServiceResult<bool>.Success(true);
+
+            mem.CommittedAmount = Math.Max(0m, mem.CommittedAmount - actualRelease);
+            mem.ConcurrencyVersion++;
+            mem.UpdatedAt = DateTimeOffset.UtcNow;
+            _memoryTransactions.Add(new BudgetTransaction
             {
                 TenantId = tenantId,
-                BudgetId = record.Id,
+                BudgetId = mem.Id,
                 BusinessType = businessType,
                 BusinessId = businessId,
                 BusinessNumber = businessNumber,
-                TransactionType = "RELEASED",
-                Amount = amount,
-                BalanceAfter = newBalance,
+                TransactionType = BudgetTransactionType.Released,
+                Amount = actualRelease,
+                BalanceAfter = mem.AvailableAmount,
                 Description = reason ?? $"{businessType} 单据【{businessNumber}】释放退还预占额度",
                 OperatorId = operatorId,
-                CreatedAt = DateTimeOffset.UtcNow
-            };
-            db.BudgetTransactions.Add(tx);
-            db.SaveChanges();
+                ActionKey = actionKey
+            });
             return ServiceResult<bool>.Success(true);
         }
-
-        var mem = budgetId.HasValue ? _memoryBudgets.SingleOrDefault(b => b.Id == budgetId.Value) : null;
-        if (mem is null)
-        {
-            var prevTx = _memoryTransactions
-                .Where(t => t.TenantId == tenantId && t.BusinessType == businessType && t.BusinessId == businessId && t.TransactionType == BudgetTransactionType.Reserved)
-                .OrderByDescending(t => t.CreatedAt)
-                .FirstOrDefault();
-            if (prevTx is not null) mem = _memoryBudgets.SingleOrDefault(b => b.Id == prevTx.BudgetId);
-        }
-        if (mem is null) return ServiceResult<bool>.Success(true);
-
-        mem.CommittedAmount = Math.Max(0m, mem.CommittedAmount - amount);
-        mem.ConcurrencyVersion++;
-        mem.UpdatedAt = DateTimeOffset.UtcNow;
-        _memoryTransactions.Add(new BudgetTransaction
-        {
-            TenantId = tenantId,
-            BudgetId = mem.Id,
-            BusinessType = businessType,
-            BusinessId = businessId,
-            BusinessNumber = businessNumber,
-            TransactionType = BudgetTransactionType.Released,
-            Amount = amount,
-            BalanceAfter = mem.AvailableAmount,
-            Description = reason ?? $"{businessType} 单据【{businessNumber}】释放退还预占额度",
-            OperatorId = operatorId
-        });
-        return ServiceResult<bool>.Success(true);
     }
 
     public ServiceResult<bool> Consume(
@@ -586,85 +652,112 @@ public sealed class BudgetService
         string businessNumber,
         decimal amount,
         string operatorId,
-        string? description = null)
+        string? description = null,
+        string? actionKeySuffix = null)
     {
         if (amount <= 0) return ServiceResult<bool>.Success(true);
+        var actionKey = $"Consume:{businessType}:{businessId}:{(string.IsNullOrWhiteSpace(actionKeySuffix) ? (description ?? amount.ToString("F2")) : actionKeySuffix)}";
 
         if (db is not null)
         {
-            BudgetRecord? record = null;
-            if (budgetId.HasValue)
+            using var dbTx = db.Database.CurrentTransaction is null ? db.Database.BeginTransaction() : null;
+            try
             {
-                record = db.Budgets.SingleOrDefault(b => b.TenantId == tenantId && b.Id == budgetId.Value);
+                var existingConsume = db.BudgetTransactions.AsNoTracking().FirstOrDefault(t => t.TenantId == tenantId && t.ActionKey == actionKey);
+                if (existingConsume is not null)
+                    return ServiceResult<bool>.Success(true);
+
+                BudgetRecord? record = null;
+                if (budgetId.HasValue)
+                {
+                    record = db.Budgets.SingleOrDefault(b => b.TenantId == tenantId && b.Id == budgetId.Value);
+                }
+                if (record is null)
+                {
+                    var prevTx = db.BudgetTransactions.AsNoTracking()
+                        .Where(t => t.TenantId == tenantId && t.BusinessType == businessType && t.BusinessId == businessId && t.TransactionType == "RESERVED")
+                        .OrderByDescending(t => t.CreatedAt)
+                        .FirstOrDefault();
+                    if (prevTx is not null)
+                    {
+                        record = db.Budgets.SingleOrDefault(b => b.TenantId == tenantId && b.Id == prevTx.BudgetId);
+                    }
+                }
+
+                if (record is null) return ServiceResult<bool>.Success(true);
+
+                db.Database.ExecuteSqlInterpolated($"SELECT \"Id\" FROM budget WHERE \"TenantId\" = {tenantId} AND \"Id\" = {record.Id} FOR UPDATE");
+                db.Entry(record).Reload();
+
+                record.CommittedAmount = Math.Max(0m, record.CommittedAmount - amount);
+                record.ActualAmount += amount;
+                record.ConcurrencyVersion++;
+                record.UpdatedAt = DateTimeOffset.UtcNow;
+
+                var newBalance = record.AllocatedAmount - record.CommittedAmount - record.ActualAmount;
+                var tx = new BudgetTransactionRecord
+                {
+                    TenantId = tenantId,
+                    BudgetId = record.Id,
+                    BusinessType = businessType,
+                    BusinessId = businessId,
+                    BusinessNumber = businessNumber,
+                    TransactionType = "CONSUMED",
+                    Amount = amount,
+                    BalanceAfter = newBalance,
+                    Description = description ?? $"{businessType} 单据【{businessNumber}】付款结转实支",
+                    OperatorId = operatorId,
+                    ActionKey = actionKey,
+                    CreatedAt = DateTimeOffset.UtcNow
+                };
+                db.BudgetTransactions.Add(tx);
+                db.SaveChanges();
+                dbTx?.Commit();
+                return ServiceResult<bool>.Success(true);
             }
-            if (record is null)
+            catch (DbUpdateException ex) when (ex.InnerException is Npgsql.PostgresException pgEx && pgEx.SqlState == "23505")
             {
-                var prevTx = db.BudgetTransactions.AsNoTracking()
-                    .Where(t => t.TenantId == tenantId && t.BusinessType == businessType && t.BusinessId == businessId && t.TransactionType == "RESERVED")
+                dbTx?.Rollback();
+                return ServiceResult<bool>.Success(true);
+            }
+        }
+
+        lock (_memoryTransactions)
+        {
+            var existingMem = _memoryTransactions.FirstOrDefault(t => t.TenantId == tenantId && t.ActionKey == actionKey);
+            if (existingMem is not null) return ServiceResult<bool>.Success(true);
+
+            var mem = budgetId.HasValue ? _memoryBudgets.SingleOrDefault(b => b.Id == budgetId.Value) : null;
+            if (mem is null)
+            {
+                var prevTx = _memoryTransactions
+                    .Where(t => t.TenantId == tenantId && t.BusinessType == businessType && t.BusinessId == businessId && t.TransactionType == BudgetTransactionType.Reserved)
                     .OrderByDescending(t => t.CreatedAt)
                     .FirstOrDefault();
-                if (prevTx is not null)
-                {
-                    record = db.Budgets.SingleOrDefault(b => b.TenantId == tenantId && b.Id == prevTx.BudgetId);
-                }
+                if (prevTx is not null) mem = _memoryBudgets.SingleOrDefault(b => b.Id == prevTx.BudgetId);
             }
+            if (mem is null) return ServiceResult<bool>.Success(true);
 
-            if (record is null) return ServiceResult<bool>.Success(true);
-
-            record.CommittedAmount = Math.Max(0m, record.CommittedAmount - amount);
-            record.ActualAmount += amount;
-            record.ConcurrencyVersion++;
-            record.UpdatedAt = DateTimeOffset.UtcNow;
-
-            var newBalance = record.AllocatedAmount - record.CommittedAmount - record.ActualAmount;
-            var tx = new BudgetTransactionRecord
+            mem.CommittedAmount = Math.Max(0m, mem.CommittedAmount - amount);
+            mem.ActualAmount += amount;
+            mem.ConcurrencyVersion++;
+            mem.UpdatedAt = DateTimeOffset.UtcNow;
+            _memoryTransactions.Add(new BudgetTransaction
             {
                 TenantId = tenantId,
-                BudgetId = record.Id,
+                BudgetId = mem.Id,
                 BusinessType = businessType,
                 BusinessId = businessId,
                 BusinessNumber = businessNumber,
-                TransactionType = "CONSUMED",
+                TransactionType = BudgetTransactionType.Consumed,
                 Amount = amount,
-                BalanceAfter = newBalance,
+                BalanceAfter = mem.AvailableAmount,
                 Description = description ?? $"{businessType} 单据【{businessNumber}】付款结转实支",
                 OperatorId = operatorId,
-                CreatedAt = DateTimeOffset.UtcNow
-            };
-            db.BudgetTransactions.Add(tx);
-            db.SaveChanges();
+                ActionKey = actionKey
+            });
             return ServiceResult<bool>.Success(true);
         }
-
-        var mem = budgetId.HasValue ? _memoryBudgets.SingleOrDefault(b => b.Id == budgetId.Value) : null;
-        if (mem is null)
-        {
-            var prevTx = _memoryTransactions
-                .Where(t => t.TenantId == tenantId && t.BusinessType == businessType && t.BusinessId == businessId && t.TransactionType == BudgetTransactionType.Reserved)
-                .OrderByDescending(t => t.CreatedAt)
-                .FirstOrDefault();
-            if (prevTx is not null) mem = _memoryBudgets.SingleOrDefault(b => b.Id == prevTx.BudgetId);
-        }
-        if (mem is null) return ServiceResult<bool>.Success(true);
-
-        mem.CommittedAmount = Math.Max(0m, mem.CommittedAmount - amount);
-        mem.ActualAmount += amount;
-        mem.ConcurrencyVersion++;
-        mem.UpdatedAt = DateTimeOffset.UtcNow;
-        _memoryTransactions.Add(new BudgetTransaction
-        {
-            TenantId = tenantId,
-            BudgetId = mem.Id,
-            BusinessType = businessType,
-            BusinessId = businessId,
-            BusinessNumber = businessNumber,
-            TransactionType = BudgetTransactionType.Consumed,
-            Amount = amount,
-            BalanceAfter = mem.AvailableAmount,
-            Description = description ?? $"{businessType} 单据【{businessNumber}】付款结转实支",
-            OperatorId = operatorId
-        });
-        return ServiceResult<bool>.Success(true);
     }
 
     public ServiceResult<PagedResponse<BudgetTransaction>> GetTransactions(Employee actor, Guid budgetId, int? requestedPage, int? requestedPageSize)
@@ -712,6 +805,7 @@ public sealed class BudgetService
                     BalanceAfter = t.BalanceAfter,
                     Description = t.Description,
                     OperatorId = t.OperatorId,
+                    ActionKey = t.ActionKey,
                     CreatedAt = t.CreatedAt
                 })
                 .ToList();
