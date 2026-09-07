@@ -510,3 +510,38 @@ CREATE INDEX ix_payment_tx_business ON payment_transaction (tenant_id, business_
 | 6 | 采购分批付款 | 采购合同额 ￥10,000；财务依次登记第 1 笔 ￥3,000（状态变为 `PARTIALLY_PAID`）、第 2 笔 ￥7,000（状态变为 `PAID`）；录入第 3 笔 ￥1 提示超出应付额被阻断。 | PostgreSQL 集成测试 |
 | 7 | 采购未验收限额 | 采购下单 ￥10,000 但未完成验收，财务尝试一次性登记 ￥8,000 付款，断言触发预付款上限阻断；验收完成后允许付清。 | PostgreSQL 集成测试 |
 | 8 | 浏览器 E2E | 管理员与财务在 Web 端完成：发票录入 → 预算占用查看 → 审批通过 → 分次付款登记 → 回单查验 → 四单对账看板展示全流程。 | Playwright E2E 自动化 |
+
+---
+
+## 9. 落地实施与闭环交付状态 (P1-F4 最终验收)
+
+### 9.1 交付模块与接口清单
+1. **预算中心与多维核算**：
+   - `GET /api/v1/budgets`（支持部门、年度、月份、科目筛选及服务端分页）
+   - `POST /api/v1/budgets`（编制预算池，支持期初额度与自动发布）
+   - `PUT /api/v1/budgets/{id}/status`（发布、冻结、解冻、关闭状态机流转与并发版本控制）
+   - `PUT /api/v1/budgets/{id}/adjust`（预算调增/调减流水追踪）
+   - `GET /api/v1/budgets/{id}/transactions`（流水追溯与对账）
+   - `GET /api/v1/budgets/check`（申请提交前实时可用性预检，严格限制跨部门旁路泄漏）
+2. **结构化发票防重与全息台账**：
+   - `POST /api/v1/expenses/invoices/validate`（发票指纹预检查重）
+   - `GET /api/v1/finance/invoices`（财务专员/经理全公司发票台账，服务端分页并稳定倒序）
+   - 活动发票数据库唯一索引：`UX_expense_invoice_active_fingerprint` 拦截跨单据/跨并发重复提交
+3. **多笔分期付款流水与采购四单对账**：
+   - `POST /api/v1/expenses/{id}/payments` & `POST /api/v1/purchases/{id}/payments`（分期付款登记）
+   - `GET /api/v1/finance/payments`（财务付款台账，支持角色化卡号脱敏查验）
+   - `GET /api/v1/finance/reconciliations`（采购申请预估额、合同下单额、验收入库额、累计实付额四单汇总与待付敞口看板）
+   - 采购到货验收前 50% 首付款风控拦截 (`PURCHASE_PREPAYMENT_EXCEEDED`) 与合同总额硬约束 (`PAYMENT_AMOUNT_EXCEEDED`)
+4. **受控导出与安全审计**：
+   - `GET /api/v1/finance/export/expenses` & `/api/v1/finance/export/purchases`
+   - 全面转义 `=+-@\t\r` 符号，根绝 CSV 公式注入与代码执行安全隐患；5000 行上限与 `FINANCE_EXPORT` 全程审计追踪
+   - 付款凭证附件下载严格基于单据关联与角色鉴权（申请人、采购经办、财务经理可访问，无关人员拦截）
+
+### 9.2 页面与交互实现
+- 桌面端与 390px 移动端响应式布局适配（`FinanceLedgerPage.vue` 财务台账中心、`BudgetPage.vue` 预算中心、`DetailPage.vue` 与 `PurchaseDetailPage.vue` 超预算预警与四单看板）。
+- 无横向溢出滚动，移动端触控和折叠菜单正常操作。
+
+### 9.3 自动化验证矩阵
+- `scripts/verify.sh`：后端编译 0 警告 0 错误，领域单元测试全部通过，前端 vue-tsc 类型检查与 Vite 生产打包零报错。
+- `scripts/verify-postgres.sh`：覆盖 10 个核心大节（双独立 DbContext 并发付款行锁防超付、并发预算防超占、活动发票唯一指纹防并发重复、凭证附件权限隔离、四单与预算结转对账平账）。
+- Playwright E2E 浏览器自动化：14 个端到端场景（含桌面端财务台账与预算中心全链路、390px 移动端视口无溢出用例）100% 通过。

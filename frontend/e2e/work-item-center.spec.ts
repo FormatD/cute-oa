@@ -26,9 +26,11 @@ async function loginUi(page: Page, userId: string) {
   await expect(page.getByRole('heading', { name: /你好/ })).toBeVisible()
 }
 
+let weekdaySeq = 0
 function nextWeekday(seed: string) {
+  weekdaySeq++
   const date = new Date()
-  const offset = 200 + Math.floor(Date.now() / 1000) % 10000 + (Number.parseInt(seed.slice(0, 4), 16) % 500)
+  const offset = 15000 + (Date.now() % 40000) + weekdaySeq * 7 + (Number.parseInt(seed.slice(0, 4), 16) % 500)
   date.setUTCDate(date.getUTCDate() + offset)
   while (date.getUTCDay() === 0 || date.getUTCDay() === 6) date.setUTCDate(date.getUTCDate() + 1)
   return date.toISOString().slice(0, 10)
@@ -512,4 +514,56 @@ test('场景8: 390px 手机视口下配置中心和业务表单可操作', async
   expect(hasDialogOverflow).toBeFalsy()
   await formDialog.getByLabel('关闭').click()
   await expect(formDialog).toHaveCount(0)
+})
+
+test('场景9: P1-F4 财务台账与预算中心桌面端全链路浏览与切换', async ({ page }) => {
+  await loginUi(page, 'u-lin')
+
+  // 1. 访问财务台账页面
+  await page.goto('/#/finance/ledgers')
+  await expect(page.getByRole('heading', { name: /财务台账/ })).toBeVisible()
+
+  // 默认发票台账
+  await expect(page.getByRole('button', { name: /发票台账/ })).toBeVisible()
+
+  // 切换到付款台账
+  await page.getByRole('button', { name: /付款台账/ }).click()
+  await expect(page.getByRole('button', { name: /付款台账/ })).toBeVisible()
+
+  // 切换到采购对账
+  await page.getByRole('button', { name: /采购对账/ }).click()
+  await expect(page.getByRole('button', { name: /采购对账/ })).toBeVisible()
+
+  // 2. 访问企业预算中心
+  await page.goto('/#/budgets')
+  await expect(page.getByRole('heading', { name: /预算中心/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /编制新预算/ })).toBeVisible()
+})
+
+test('场景10: P1-F4 390px 手机视口下财务台账与预算中心无横向滚动且响应良好', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await loginUi(page, 'u-lin')
+
+  // 1. 财务台账在 390px 手机视口下无横向整页溢出
+  await page.goto('/#/finance/ledgers')
+  await expect(page.getByRole('heading', { name: /财务台账/ })).toBeVisible()
+  let hasPageOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)
+  expect(hasPageOverflow).toBeFalsy()
+
+  // 切换 Tab 测试无溢出
+  await page.getByRole('button', { name: /付款台账/ }).click()
+  await page.waitForTimeout(300)
+  hasPageOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)
+  expect(hasPageOverflow).toBeFalsy()
+
+  await page.getByRole('button', { name: /采购对账/ }).click()
+  await page.waitForTimeout(300)
+  hasPageOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)
+  expect(hasPageOverflow).toBeFalsy()
+
+  // 2. 预算中心在 390px 手机视口下无横向整页溢出
+  await page.goto('/#/budgets')
+  await expect(page.getByRole('heading', { name: /预算中心/ })).toBeVisible()
+  hasPageOverflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)
+  expect(hasPageOverflow).toBeFalsy()
 })

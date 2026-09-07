@@ -55,6 +55,7 @@ public sealed class PaymentService
                 var claim = db.ExpenseClaims.SingleOrDefault(x => x.TenantId == TenantId && x.Id == expenseId);
                 if (claim is null)
                     return ServiceResult<PaymentTransaction>.Failure("报销单不存在。", "DATA_001");
+                db.Entry(claim).Reload();
 
                 if (claim.Status != (int)ExpenseStatus.Approved && claim.Status != (int)ExpenseStatus.Completed)
                     return ServiceResult<PaymentTransaction>.Failure("仅审批通过的报销单可登记付款。", "STATE_001");
@@ -203,6 +204,7 @@ public sealed class PaymentService
                 var purchase = db.PurchaseRequests.SingleOrDefault(x => x.TenantId == TenantId && x.Id == purchaseId);
                 if (purchase is null)
                     return ServiceResult<PaymentTransaction>.Failure("采购申请不存在。", "DATA_001");
+                db.Entry(purchase).Reload();
 
                 var status = (PurchaseStatus)purchase.Status;
                 if (status != PurchaseStatus.Ordered && status != PurchaseStatus.Received)

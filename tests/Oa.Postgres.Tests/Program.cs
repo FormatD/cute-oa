@@ -4568,6 +4568,309 @@ await using (var f4Db = new OaDbContext(options))
     }
 
     Console.WriteLine("Section 9: WP-D 超预算特批与财务台账对账测试通过。");
+
+    // =========================================================================
+    // 10. WP-E 全链路验收测试：双连接并发付款防超付、凭证附件权限与四单及预算对账闭环
+    // =========================================================================
+    Console.WriteLine("Running Section 10: WP-E 全链路验收与并发对账测试...");
+
+    var runIdE = Guid.NewGuid().ToString("N")[..8];
+    var deptE = employee.DepartmentId; // "engineering"
+    var budgetEAmount = 80000m;
+    var bYearE = DateTime.Today.Year;
+    var bMonthE = DateTime.Today.Month;
+    var catPurE = "IT设备";
+
+    var existingPurBudget = f4Db.Budgets.FirstOrDefault(b => b.TenantId == "demo" && b.DepartmentId == deptE && b.Year == bYearE && b.Month == bMonthE && b.ExpenseCategory == catPurE);
+    Guid poolIdE;
+    if (existingPurBudget != null)
+    {
+        poolIdE = existingPurBudget.Id;
+        existingPurBudget.AllocatedAmount += budgetEAmount;
+        f4Db.SaveChanges();
+    }
+    else
+    {
+        var poolResE = budgetService.Create(financeManager, new CreateBudgetRequest(
+            DepartmentId: deptE,
+            Year: bYearE,
+            Month: bMonthE,
+            ExpenseCategory: catPurE,
+            ProjectId: null,
+            AllocatedAmount: budgetEAmount,
+            AutoPublish: true));
+        if (!poolResE.IsSuccess) throw new InvalidOperationException($"WP-E 创建预算池失败: {poolResE.Error}");
+        poolIdE = poolResE.Value!.Id;
+    }
+
+    // 10.1 采购申请 -> 审批 -> 下单 -> 验收 -> 初始付款
+    var pDraftE = purchaseService.CreateDraft(employee, new SavePurchaseRequest(
+        Title: $"WP-E采购全链路-{runIdE}",
+        Purpose: "服务器集群扩容采购",
+        RequiredDate: DateOnly.FromDateTime(DateTime.Today.AddDays(10)),
+        SuggestedSupplier: "联想直销",
+        Items: [new SavePurchaseItem(catPurE, "服务器节点", "ThinkSystem SR650", 1, "台", 20000m, "WP-E测试")],
+        Attachments: ["wp-e-quote.pdf"],
+        CopyRecipientIds: []));
+    if (!pDraftE.IsSuccess) throw new InvalidOperationException($"WP-E 采购申请草稿失败: {pDraftE.Error}");
+    var pIdE = pDraftE.Value!.Id;
+
+    var submitResE = purchaseService.Submit(employee, pIdE);
+    if (!submitResE.IsSuccess) throw new InvalidOperationException($"WP-E 采购提交失败: {submitResE.Error}");
+
+    // 审批通过
+    var tasksE = f4Db.PurchaseTasks.Where(t => t.PurchaseRequestId == pIdE).OrderBy(t => t.Sequence).ToList();
+    foreach (var pt in tasksE)
+    {
+        var app = purchaseService.Approve(f4Data.GetEmployee(pt.AssigneeId), pt.Id, "WP-E审批同意");
+        if (!app.IsSuccess) throw new InvalidOperationException($"WP-E 采购审批失败: {app.Error}");
+    }
+
+    var purchaseAfterApprove = f4Db.PurchaseRequests.Single(p => p.Id == pIdE);
+
+    // 下单登记 20,000 元
+    var poNumE = $"PO-LENOVO-{runIdE}";
+    var orderResE = purchaseService.RegisterOrder(administrator, pIdE, new RegisterPurchaseOrderRequest(
+        Version: purchaseAfterApprove.Version,
+        Supplier: "联想(北京)有限公司",
+        OrderNumber: poNumE,
+        ActualAmount: 20000m,
+        OrderDate: DateOnly.FromDateTime(DateTime.Today),
+        ExpectedDeliveryDate: DateOnly.FromDateTime(DateTime.Today.AddDays(7)),
+        Notes: "签署供货合同",
+        Attachments: []));
+    if (!orderResE.IsSuccess) throw new InvalidOperationException($"WP-E 登记采购订单失败: {orderResE.Error}");
+
+    var purchaseAfterOrder = f4Db.PurchaseRequests.Single(p => p.Id == pIdE);
+
+    // 验收通过
+    var receiveResE = purchaseService.Receive(employee, pIdE, new ReceivePurchaseRequest(
+        Version: purchaseAfterOrder.Version,
+        ReceivedDate: DateOnly.FromDateTime(DateTime.Today),
+        Result: "ALL_ACCEPTED",
+        Notes: "到货核验合格",
+        Attachments: []));
+    if (!receiveResE.IsSuccess) throw new InvalidOperationException($"WP-E 验收入库失败: {receiveResE.Error}");
+
+    // 付款首期 10,000 元（凭证附件 proofIdE1）
+    var proofIdE1 = Guid.NewGuid();
+    var payRes1 = paymentService.RegisterPurchasePayment(financeOfficer, pIdE, new CreatePaymentTransactionRequest(
+        BatchTitle: "首期付款 (50%)",
+        PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+        PaymentMethod: PaymentMethodNames.BankTransfer,
+        PayerAccount: "6222000199990001",
+        PayeeName: "联想(北京)有限公司",
+        PayeeAccount: "8888000011112222",
+        PayeeBank: "招商银行北京分行",
+        TransactionNumber: $"TX-PUR-E1-{runIdE}",
+        PaidAmount: 10000m,
+        FeeAmount: 0m,
+        ProofAttachmentId: proofIdE1.ToString(),
+        Remarks: "首期款支付"));
+    if (!payRes1.IsSuccess) throw new InvalidOperationException($"WP-E 首期付款登记失败: {payRes1.Error}");
+
+    // 10.2 凭证附件权限验证
+    var canEmployeeAccessProof = paymentService.CanAccessPaymentAttachment(employee, payRes1.Value!.Id, proofIdE1);
+    var canFinanceAccessProof = paymentService.CanAccessPaymentAttachment(financeOfficer, payRes1.Value!.Id, proofIdE1);
+    var canHrAccessProof = paymentService.CanAccessPaymentAttachment(hrEmployee, payRes1.Value!.Id, proofIdE1);
+    var canAccessFakeProof = paymentService.CanAccessPaymentAttachment(financeOfficer, payRes1.Value!.Id, Guid.NewGuid());
+
+    if (!canEmployeeAccessProof) throw new InvalidOperationException("WP-E 申请人应有权查看本人采购付款凭证附件。");
+    if (!canFinanceAccessProof) throw new InvalidOperationException("WP-E 财务人员应有权查看采购付款凭证附件。");
+    if (canHrAccessProof) throw new InvalidOperationException("WP-E 无关HR人员不应能查看他人采购付款凭证附件。");
+    if (canAccessFakeProof) throw new InvalidOperationException("WP-E 凭证ID不匹配时不应返回有权访问。");
+
+    // 10.3 双 DbContext 并发付款防超付（剩余 10,000 元，两个连接各尝试支付 7,000 元）
+    // 预期：行级排他锁（FOR UPDATE）保证两笔付款串行校验，且第二笔因累计支付 10,000 + 7,000 + 7,000 = 24,000 > 20,000 被阻断为 PAYMENT_AMOUNT_EXCEEDED（或 CONCURRENCY_001）。
+    ServiceResult<PaymentTransaction>? concurrentPayResA = null;
+    ServiceResult<PaymentTransaction>? concurrentPayResB = null;
+
+    var proofIdA = Guid.NewGuid();
+    var proofIdB = Guid.NewGuid();
+
+    var taskA = Task.Run(async () =>
+    {
+        await using var dbA = new OaDbContext(options);
+        var budgetA = new BudgetService(f4Data, dbA);
+        var paymentA = new PaymentService(f4Data, dbA, budgetA);
+        concurrentPayResA = paymentA.RegisterPurchasePayment(financeOfficer, pIdE, new CreatePaymentTransactionRequest(
+            BatchTitle: "并发第二期-A",
+            PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+            PaymentMethod: PaymentMethodNames.BankTransfer,
+            PayerAccount: "6222000199990001",
+            PayeeName: "联想(北京)有限公司",
+            PayeeAccount: "8888000011112222",
+            PayeeBank: "招商银行北京分行",
+            TransactionNumber: $"TX-PUR-EA-{runIdE}",
+            PaidAmount: 7000m,
+            FeeAmount: 0m,
+            ProofAttachmentId: proofIdA.ToString(),
+            Remarks: "并发支付A"));
+    });
+
+    var taskB = Task.Run(async () =>
+    {
+        await using var dbB = new OaDbContext(options);
+        var budgetB = new BudgetService(f4Data, dbB);
+        var paymentB = new PaymentService(f4Data, dbB, budgetB);
+        concurrentPayResB = paymentB.RegisterPurchasePayment(financeOfficer, pIdE, new CreatePaymentTransactionRequest(
+            BatchTitle: "并发第二期-B",
+            PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+            PaymentMethod: PaymentMethodNames.BankTransfer,
+            PayerAccount: "6222000199990001",
+            PayeeName: "联想(北京)有限公司",
+            PayeeAccount: "8888000011112222",
+            PayeeBank: "招商银行北京分行",
+            TransactionNumber: $"TX-PUR-EB-{runIdE}",
+            PaidAmount: 7000m,
+            FeeAmount: 0m,
+            ProofAttachmentId: proofIdB.ToString(),
+            Remarks: "并发支付B"));
+    });
+
+    await Task.WhenAll(taskA, taskB);
+
+    var successCount = (concurrentPayResA?.IsSuccess == true ? 1 : 0) + (concurrentPayResB?.IsSuccess == true ? 1 : 0);
+    var failedCount = (concurrentPayResA?.IsSuccess == false ? 1 : 0) + (concurrentPayResB?.IsSuccess == false ? 1 : 0);
+
+    if (successCount != 1 || failedCount != 1)
+        throw new InvalidOperationException($"WP-E 双连接并发防超付失败：期望1成功1失败，实际成功={successCount}, 失败={failedCount} (A: {concurrentPayResA?.Code}/{concurrentPayResA?.Error}, B: {concurrentPayResB?.Code}/{concurrentPayResB?.Error})");
+
+    var failedRes = concurrentPayResA?.IsSuccess == false ? concurrentPayResA : concurrentPayResB;
+    if (failedRes!.Code != "PAYMENT_AMOUNT_EXCEEDED" && failedRes.Code != "CONCURRENCY_001")
+        throw new InvalidOperationException($"WP-E 超额支付错误码异常: {failedRes.Code} / {failedRes.Error}");
+
+    // 验证数据库中采购单当前累计已付恰好为 17,000 元（绝不超付）
+    await using (var checkDb = new OaDbContext(options))
+    {
+        var curP = await checkDb.PurchaseRequests.AsNoTracking().SingleAsync(p => p.Id == pIdE);
+        if (curP.PaidTotalAmount != 17000m)
+            throw new InvalidOperationException($"WP-E 并发付款后采购单已付金额异常：期望 17000，实际为 {curP.PaidTotalAmount}");
+        if (curP.PaymentStatus != "PARTIALLY_PAID")
+            throw new InvalidOperationException($"WP-E 部分付款状态异常：期望 PARTIALLY_PAID，实际为 {curP.PaymentStatus}");
+    }
+
+    // 10.4 补齐剩余 3,000 元，达成付清，并核算采购四单对账看板与预算结转
+    var payResFinal = paymentService.RegisterPurchasePayment(financeOfficer, pIdE, new CreatePaymentTransactionRequest(
+        BatchTitle: "尾款结清 (15%)",
+        PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+        PaymentMethod: PaymentMethodNames.BankTransfer,
+        PayerAccount: "6222000199990001",
+        PayeeName: "联想(北京)有限公司",
+        PayeeAccount: "8888000011112222",
+        PayeeBank: "招商银行北京分行",
+        TransactionNumber: $"TX-PUR-FINAL-{runIdE}",
+        PaidAmount: 3000m,
+        FeeAmount: 0m,
+        ProofAttachmentId: null,
+        Remarks: "尾款付清"));
+    if (!payResFinal.IsSuccess) throw new InvalidOperationException($"WP-E 尾款付款失败: {payResFinal.Error}");
+
+    // 验证四单对账
+    var reconResFinal = purchaseService.GetReconciliation(financeOfficer, pIdE);
+    if (!reconResFinal.IsSuccess) throw new InvalidOperationException($"WP-E 四单对账查询失败: {reconResFinal.Error}");
+    var rFinal = reconResFinal.Value!;
+    if (rFinal.EstimatedAmount != 20000m || rFinal.OrderedAmount != 20000m || rFinal.PaidAmount != 20000m ||
+        rFinal.RemainingPayable != 0m || !rFinal.IsAcceptancePassed || rFinal.PaymentStatus != "PAID")
+    {
+        throw new InvalidOperationException($"WP-E 四单对账数据不平：预估={rFinal.EstimatedAmount}, 合同={rFinal.OrderedAmount}, 已付={rFinal.PaidAmount}, 待付={rFinal.RemainingPayable}, 状态={rFinal.PaymentStatus}");
+    }
+
+    // 验证预算占用完全结转为实支：在途预占 CommittedAmount 恢复为 0，实际支出 ActualAmount 增加 20,000 元
+    await using (var verifyPoolDb = new OaDbContext(options))
+    {
+        var pPool = await verifyPoolDb.Budgets.AsNoTracking().SingleAsync(b => b.Id == poolIdE);
+        if (pPool.CommittedAmount != 0m || pPool.ActualAmount < 20000m)
+        {
+            throw new InvalidOperationException($"WP-E 采购全流程完成后预算池额度不一致：Committed={pPool.CommittedAmount}, Actual={pPool.ActualAmount}");
+        }
+    }
+
+    // 10.5 报销单发票从草稿到结转PAID状态闭环
+    var runIdExpE = Guid.NewGuid().ToString("N")[..8];
+    var expCatE = "办公";
+    var existingExpBudget = f4Db.Budgets.FirstOrDefault(b => b.TenantId == "demo" && b.DepartmentId == deptE && b.Year == bYearE && b.Month == bMonthE && b.ExpenseCategory == expCatE);
+    Guid expPoolId;
+    if (existingExpBudget != null)
+    {
+        expPoolId = existingExpBudget.Id;
+        existingExpBudget.AllocatedAmount += 10000m;
+        f4Db.SaveChanges();
+    }
+    else
+    {
+        var expPoolRes = budgetService.Create(financeManager, new CreateBudgetRequest(
+            DepartmentId: deptE,
+            Year: bYearE,
+            Month: bMonthE,
+            ExpenseCategory: expCatE,
+            ProjectId: null,
+            AllocatedAmount: 10000m,
+            AutoPublish: true));
+        if (!expPoolRes.IsSuccess) throw new InvalidOperationException($"WP-E 创建报销预算池失败: {expPoolRes.Error}");
+        expPoolId = expPoolRes.Value!.Id;
+    }
+
+    var invoiceInputE = new ExpenseInvoiceInput(
+        InvoiceType: InvoiceType.VatElectronic,
+        InvoiceCode: "011002000999",
+        InvoiceNumber: $"9988{runIdExpE}",
+        BillingDate: DateOnly.FromDateTime(DateTime.Today),
+        AmountWithoutTax: 2700m,
+        TaxRate: 0.10m,
+        TaxAmount: 300m,
+        TotalAmount: 3000m,
+        VerificationCode: "123456",
+        AttachmentId: null);
+
+    var expClaimDraft = expenseService.CreateDraft(employee, new CreateExpenseClaim(
+        null, "张晨", "6222026000001234", "招商银行", "WP-E全链路发票结清测试",
+        [new ExpenseItem(DateOnly.FromDateTime(DateTime.Today), expCatE, 3000m, "全链路测试招待", "FP-E2E-01", ["proof.pdf"])],
+        Invoices: [invoiceInputE]));
+    if (!expClaimDraft.IsSuccess) throw new InvalidOperationException($"WP-E 报销草稿失败: {expClaimDraft.Error}");
+    var expClaimId = expClaimDraft.Value!.Id;
+
+    var expSubmitRes = expenseService.Submit(employee, expClaimId);
+    if (!expSubmitRes.IsSuccess) throw new InvalidOperationException($"WP-E 报销提交失败: {expSubmitRes.Error}");
+
+    var expTasks = f4Db.ExpenseTasks.Where(t => t.ExpenseClaimId == expClaimId).OrderBy(t => t.Sequence).ToList();
+    foreach (var et in expTasks)
+    {
+        var app = expenseService.Approve(f4Data.GetEmployee(et.AssigneeId), et.Id, "WP-E报销审批通过");
+        if (!app.IsSuccess) throw new InvalidOperationException($"WP-E 报销审批失败: {app.Error}");
+    }
+
+    var expPayRes = paymentService.RegisterExpensePayment(financeOfficer, expClaimId, new CreatePaymentTransactionRequest(
+        BatchTitle: "一次性全额打款",
+        PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+        PaymentMethod: PaymentMethodNames.BankTransfer,
+        PayerAccount: "6222000199990001",
+        PayeeName: "张晨",
+        PayeeAccount: "6222026000001234",
+        PayeeBank: "招商银行",
+        TransactionNumber: $"TX-EXP-E-{runIdExpE}",
+        PaidAmount: 3000m,
+        FeeAmount: 0m,
+        ProofAttachmentId: null,
+        Remarks: "全额付清"));
+    if (!expPayRes.IsSuccess) throw new InvalidOperationException($"WP-E 报销付款失败: {expPayRes.Error}");
+
+    await using (var verifyExpDb = new OaDbContext(options))
+    {
+        var finishedClaim = await verifyExpDb.ExpenseClaims.AsNoTracking().SingleAsync(c => c.Id == expClaimId);
+        if (finishedClaim.PaymentStatus != "PAID" || finishedClaim.Status != (int)ExpenseStatus.Completed)
+            throw new InvalidOperationException($"WP-E 报销单付清状态异常: PaymentStatus={finishedClaim.PaymentStatus}, Status={finishedClaim.Status}");
+
+        var finishedInvoice = await verifyExpDb.ExpenseInvoices.AsNoTracking().SingleAsync(i => i.ExpenseClaimId == expClaimId);
+        if (finishedInvoice.Status != "PAID")
+            throw new InvalidOperationException($"WP-E 发票状态未更新为PAID: {finishedInvoice.Status}");
+
+        var ePool = await verifyExpDb.Budgets.AsNoTracking().SingleAsync(b => b.Id == expPoolId);
+        if (ePool.CommittedAmount != 0m || ePool.ActualAmount < 3000m)
+            throw new InvalidOperationException($"WP-E 报销预算池结转异常: Committed={ePool.CommittedAmount}, Actual={ePool.ActualAmount}");
+    }
+
+    Console.WriteLine("Section 10: WP-E 全链路验收与并发对账测试通过。");
 }
 
 Console.WriteLine("PostgreSQL persistence integration passed.");
