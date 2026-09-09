@@ -339,9 +339,10 @@ public sealed class ExpenseService
         }
 
         // 超预算特批加签节点：若超预算且审批链路未包含财务经理，加签财务经理特批
+        Employee? financeManager = null;
         if (item.IsOverBudget)
         {
-            var financeManager = data.ActiveEmployees.FirstOrDefault(e => data.HasRole(e, "财务经理") || e.Role == "财务经理") ?? data.FindEmployee("u-lin");
+            financeManager = data.ActiveEmployees.FirstOrDefault(e => data.HasRole(e, "财务经理") || e.Role == "财务经理") ?? data.FindEmployee("u-lin");
             if (financeManager is not null && !route.Value.Approvers.Any(a => a.Assignee.Id == financeManager.Id))
             {
                 var extraSeq = item.Tasks.Count + 1;
@@ -381,7 +382,13 @@ public sealed class ExpenseService
                 $"并发数据冲突: {pg.MessageText}",
                 "CONCURRENCY_001");
         }
-        flowInstances.RegisterTasks(instance, "Expense", item.Tasks.Select(task => new ResolvedFlowTask(task.Id, task.Sequence, route.Value.Approvers[task.Sequence - 1])).ToList());
+        flowInstances.RegisterTasks(instance, "Expense", item.Tasks.Select((task, index) =>
+        {
+            if (index < route.Value.Approvers.Count)
+                return new ResolvedFlowTask(task.Id, task.Sequence, route.Value.Approvers[index]);
+            var approver = data.FindEmployee(task.AssigneeId) ?? financeManager!;
+            return new ResolvedFlowTask(task.Id, task.Sequence, new ResolvedApprover(approver, approver, null));
+        }).ToList());
         Audit(actor, "EXPENSE_SUBMITTED", item, "提交报销审批");
         if (item.Tasks.OrderBy(task => task.Sequence).FirstOrDefault() is { } firstTask)
             notifications?.Create(firstTask.AssigneeId, "TODO_CREATED", "新增报销审批待办", $"{item.ApplicantName} 提交了 {item.Number}", "ExpenseClaim", item.Id);

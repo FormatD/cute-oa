@@ -44,10 +44,17 @@ public sealed class PaymentService
             return ServiceResult<PaymentTransaction>.Failure("银行转账流水号不能为空。");
         if (string.IsNullOrWhiteSpace(request.PayeeAccount))
             return ServiceResult<PaymentTransaction>.Failure("收款账号不能为空。");
+        if (string.IsNullOrWhiteSpace(request.ProofAttachmentId))
+            return ServiceResult<PaymentTransaction>.Failure("付款回单凭证不能为空。", "EXP_005");
+        var hasProofGuid = Guid.TryParse(request.ProofAttachmentId, out var proofGuid);
+        if (db is not null && !hasProofGuid)
+            return ServiceResult<PaymentTransaction>.Failure("付款回单凭证必须为有效附件。", "EXP_005");
+        if (files is not null && !files.AreOwnedBy(actor, [request.ProofAttachmentId]))
+            return ServiceResult<PaymentTransaction>.Failure("付款回单凭证不存在或不属于当前付款人。", "FILE_005");
 
         if (db is not null)
         {
-            using var tx = db.Database.BeginTransaction();
+            using var tx = db.Database.CurrentTransaction is null ? db.Database.BeginTransaction() : null;
             try
             {
                 db.Database.ExecuteSqlInterpolated($"SELECT \"Id\" FROM expense_claim WHERE \"TenantId\" = {TenantId} AND \"Id\" = {expenseId} FOR UPDATE");
@@ -67,10 +74,6 @@ public sealed class PaymentService
                 var duplicateTx = db.PaymentTransactions.Any(t => t.TenantId == TenantId && t.TransactionNumber == request.TransactionNumber.Trim());
                 if (duplicateTx)
                     return ServiceResult<PaymentTransaction>.Failure($"银行流水号【{request.TransactionNumber.Trim()}】已被使用，禁止重复录入。", "PAYMENT_TX_DUPLICATE");
-
-                Guid? proofGuid = null;
-                if (!string.IsNullOrWhiteSpace(request.ProofAttachmentId) && Guid.TryParse(request.ProofAttachmentId, out var parsedProof))
-                    proofGuid = parsedProof;
 
                 var maxSeq = db.PaymentTransactions.Where(t => t.TenantId == TenantId && t.BusinessType == "Expense" && t.BusinessId == expenseId)
                     .Select(t => (int?)t.Sequence).Max() ?? 0;
@@ -118,7 +121,7 @@ public sealed class PaymentService
                 }
                 claim.UpdatedAt = DateTimeOffset.UtcNow;
 
-                budgetService.Consume(TenantId, claim.BudgetPoolId, "Expense", claim.Id, claim.Number, request.PaidAmount, actor.Id, $"报销付款登记 第 {sequence} 笔", $"seq-{sequence}");
+                budgetService.Consume(TenantId, null, "Expense", claim.Id, claim.Number, request.PaidAmount, actor.Id, $"报销付款登记 第 {sequence} 笔", $"seq-{sequence}");
 
                 db.AuditLogs.Add(new AuditRecord
                 {
@@ -130,7 +133,7 @@ public sealed class PaymentService
                     Summary = $"登记报销付款 第 {sequence} 笔，实付 {request.PaidAmount:N2} 元，流水号：{request.TransactionNumber.Trim()}"
                 });
                 db.SaveChanges();
-                tx.Commit();
+                tx?.Commit();
 
                 notifications?.Create(claim.ApplicantId, "EXPENSE_PAID", "报销付款通知", $"{claim.Number} 已完成第 {sequence} 笔付款登记（实付 {request.PaidAmount:N2} 元）", "ExpenseClaim", claim.Id);
 
@@ -138,7 +141,7 @@ public sealed class PaymentService
             }
             catch (DbUpdateException ex) when (ex.InnerException is PostgresException pg && pg.SqlState == PostgresErrorCodes.UniqueViolation)
             {
-                tx.Rollback();
+                tx?.Rollback();
                 if (pg.ConstraintName != null && pg.ConstraintName.Contains("UX_payment_transaction_sequence"))
                 {
                     return ServiceResult<PaymentTransaction>.Failure("检测到并发付款冲突，请重试。", "CONCURRENCY_001");
@@ -147,7 +150,7 @@ public sealed class PaymentService
             }
             catch (Exception)
             {
-                tx.Rollback();
+                tx?.Rollback();
                 throw;
             }
         }
@@ -193,10 +196,17 @@ public sealed class PaymentService
             return ServiceResult<PaymentTransaction>.Failure("付款日期不能晚于今天。");
         if (string.IsNullOrWhiteSpace(request.TransactionNumber))
             return ServiceResult<PaymentTransaction>.Failure("银行转账流水号不能为空。");
+        if (string.IsNullOrWhiteSpace(request.ProofAttachmentId))
+            return ServiceResult<PaymentTransaction>.Failure("付款回单凭证不能为空。", "EXP_005");
+        var hasProofGuid = Guid.TryParse(request.ProofAttachmentId, out var proofGuid);
+        if (db is not null && !hasProofGuid)
+            return ServiceResult<PaymentTransaction>.Failure("付款回单凭证必须为有效附件。", "EXP_005");
+        if (files is not null && !files.AreOwnedBy(actor, [request.ProofAttachmentId]))
+            return ServiceResult<PaymentTransaction>.Failure("付款回单凭证不存在或不属于当前付款人。", "FILE_005");
 
         if (db is not null)
         {
-            using var tx = db.Database.BeginTransaction();
+            using var tx = db.Database.CurrentTransaction is null ? db.Database.BeginTransaction() : null;
             try
             {
                 db.Database.ExecuteSqlInterpolated($"SELECT \"Id\" FROM purchase_request WHERE \"TenantId\" = {TenantId} AND \"Id\" = {purchaseId} FOR UPDATE");
@@ -240,10 +250,6 @@ public sealed class PaymentService
                 var duplicateTx = db.PaymentTransactions.Any(t => t.TenantId == TenantId && t.TransactionNumber == request.TransactionNumber.Trim());
                 if (duplicateTx)
                     return ServiceResult<PaymentTransaction>.Failure($"银行流水号【{request.TransactionNumber.Trim()}】已被使用，禁止重复录入。", "PAYMENT_TX_DUPLICATE");
-
-                Guid? proofGuid = null;
-                if (!string.IsNullOrWhiteSpace(request.ProofAttachmentId) && Guid.TryParse(request.ProofAttachmentId, out var parsedProof))
-                    proofGuid = parsedProof;
 
                 var maxSeq = db.PaymentTransactions.Where(t => t.TenantId == TenantId && t.BusinessType == "Purchase" && t.BusinessId == purchaseId)
                     .Select(t => (int?)t.Sequence).Max() ?? 0;
@@ -296,7 +302,7 @@ public sealed class PaymentService
                     Summary = $"登记采购付款 第 {sequence} 笔，实付 {request.PaidAmount:N2} 元，流水号：{request.TransactionNumber.Trim()}"
                 });
                 db.SaveChanges();
-                tx.Commit();
+                tx?.Commit();
 
                 notifications?.Create(purchase.ApplicantId, "PURCHASE_PAID", "采购付款通知", $"{purchase.Number} 已完成第 {sequence} 笔付款登记（实付 {request.PaidAmount:N2} 元）", "PurchaseRequest", purchase.Id);
 
@@ -304,7 +310,7 @@ public sealed class PaymentService
             }
             catch (DbUpdateException ex) when (ex.InnerException is PostgresException pg && pg.SqlState == PostgresErrorCodes.UniqueViolation)
             {
-                tx.Rollback();
+                tx?.Rollback();
                 if (pg.ConstraintName != null && pg.ConstraintName.Contains("UX_payment_transaction_sequence"))
                 {
                     return ServiceResult<PaymentTransaction>.Failure("检测到并发付款冲突，请重试。", "CONCURRENCY_001");
@@ -313,7 +319,7 @@ public sealed class PaymentService
             }
             catch (Exception)
             {
-                tx.Rollback();
+                tx?.Rollback();
                 throw;
             }
         }

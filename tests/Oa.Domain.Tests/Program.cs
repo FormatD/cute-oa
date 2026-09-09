@@ -491,6 +491,26 @@ True(preCheckExceeded.IsExceeded, "超过可用额度触发超预算预警");
 // 3. 报销单结构化发票录入、开票日期校验与单据内查重
 var f4ExpenseService = new ExpenseService(data, budgetService: testBudgetService);
 
+var overBudgetPool = testBudgetService.Create(fManager, new CreateBudgetRequest(
+    DepartmentId: employee.DepartmentId,
+    Year: DateTime.Today.Year,
+    Month: DateTime.Today.Month,
+    ExpenseCategory: "办公",
+    ProjectId: null,
+    AllocatedAmount: 100m,
+    AutoPublish: true));
+True(overBudgetPool.IsSuccess, "建立低金额超预算加签测试预算池");
+var overBudgetClaim = f4ExpenseService.CreateDraft(employee, new CreateExpenseClaim(
+    null, employee.Name, "6222026000001234", "招商银行", "低金额超预算加签测试",
+    [new ExpenseItem(DateOnly.FromDateTime(DateTime.Today), "办公", 500m, "超预算办公用品", "OVER-BUDGET", ["proof.pdf"])],
+    Invoices: []));
+var overBudgetSubmit = f4ExpenseService.Submit(employee, overBudgetClaim.Value!.Id);
+True(overBudgetSubmit.IsSuccess, "低金额超预算报销可正常提交而不发生审批人索引越界");
+True(overBudgetSubmit.Value!.Tasks.Count == 3 && overBudgetSubmit.Value.Tasks[^1].AssigneeId == fManager.Id,
+    "低金额超预算报销在原流程后追加财务经理特批节点");
+True(f4ExpenseService.Withdraw(employee, overBudgetClaim.Value.Id).IsSuccess, "撤回超预算测试单并释放预算");
+True(testBudgetService.Close(fManager, overBudgetPool.Value!.Id).IsSuccess, "关闭超预算测试预算池避免影响后续场景");
+
 // 3a. 发票开票日期不能早于 180 天前
 var oldDate = DateOnly.FromDateTime(DateTime.Today.AddDays(-200));
 var expiredInvoiceClaim = f4ExpenseService.CreateDraft(employee, new CreateExpenseClaim(
@@ -566,7 +586,7 @@ var unauthorizedPay = f4PaymentService.RegisterExpensePayment(employee, claim2.V
     TransactionNumber: "BANK-TX-20260906-001",
     PaidAmount: 500m,
     FeeAmount: 0m,
-    ProofAttachmentId: null,
+    ProofAttachmentId: Guid.NewGuid().ToString(),
     Remarks: "首期付款"));
 True(!unauthorizedPay.IsSuccess && unauthorizedPay.Code == "AUTH_002", "普通员工无权登记付款");
 
@@ -582,7 +602,7 @@ var payBatch1 = f4PaymentService.RegisterExpensePayment(fOfficer, claim2.Value.I
     TransactionNumber: "BANK-TX-20260906-001",
     PaidAmount: 500m,
     FeeAmount: 0m,
-    ProofAttachmentId: null,
+    ProofAttachmentId: Guid.NewGuid().ToString(),
     Remarks: "首期付款"));
 True(payBatch1.IsSuccess, "财务专员成功登记第一笔分批付款");
 
@@ -612,7 +632,7 @@ var payDupTx = f4PaymentService.RegisterExpensePayment(fOfficer, claim2.Value.Id
     TransactionNumber: "BANK-TX-20260906-001", // 重复流水号
     PaidAmount: 500m,
     FeeAmount: 0m,
-    ProofAttachmentId: null,
+    ProofAttachmentId: Guid.NewGuid().ToString(),
     Remarks: "第二期付款"));
 True(payBatch1.Value!.Status == PaymentTransactionStatus.Success, "第一笔款项登记状态为成功");
 

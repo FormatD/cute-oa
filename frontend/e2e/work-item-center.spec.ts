@@ -540,6 +540,135 @@ test('场景9: P1-F4 财务台账与预算中心桌面端全链路浏览与切�
   await expect(page.getByRole('button', { name: /编制新预算/ })).toBeVisible()
 })
 
+test('场景9.1: 真实付款 API 复用幂等事务并强制校验付款回单', async ({ request }) => {
+  const token = await loginApi('u-chen')
+  const runId = crypto.randomUUID().replaceAll('-', '')
+  const headers = { Authorization: `Bearer ${token}` }
+  const upload = await request.post(`${apiBase}/files`, {
+    headers: { ...headers, 'Idempotency-Key': `e2e-proof-${runId}` },
+    multipart: {
+      file: {
+        name: `payment-proof-${runId}.pdf`,
+        mimeType: 'application/pdf',
+        buffer: Buffer.from('%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n%%EOF\n')
+      }
+    }
+  })
+  expect(upload.status()).toBe(201)
+  const proof = await upload.json()
+  const missingBusinessId = crypto.randomUUID()
+  const payment = {
+    batchTitle: '接口事务回归验证',
+    paymentDate: new Date().toISOString().slice(0, 10),
+    paymentMethod: 'BANK_TRANSFER',
+    payerAccount: '955880001',
+    payeeName: '回归测试收款方',
+    payeeAccount: '6222026000009999',
+    payeeBank: '测试银行',
+    transactionNumber: `E2E-TX-${runId}`,
+    paidAmount: 1,
+    feeAmount: 0,
+    proofAttachmentId: proof.id,
+    remarks: '针对不存在业务单据验证事务边界'
+  }
+
+  const expenseResponse = await request.post(`${apiBase}/expense-claims/${missingBusinessId}/payments`, {
+    headers: { ...headers, 'Idempotency-Key': `e2e-expense-payment-${runId}` },
+    data: payment
+  })
+  expect(expenseResponse.status()).toBe(404)
+  expect((await expenseResponse.json()).code).toBe('DATA_001')
+
+  const purchaseResponse = await request.post(`${apiBase}/purchase-requests/${missingBusinessId}/payments`, {
+    headers: { ...headers, 'Idempotency-Key': `e2e-purchase-payment-${runId}` },
+    data: { ...payment, transactionNumber: `E2E-PUR-TX-${runId}` }
+  })
+  expect(purchaseResponse.status()).toBe(404)
+  expect((await purchaseResponse.json()).code).toBe('DATA_001')
+
+  const missingProofResponse = await request.post(`${apiBase}/expense-claims/${missingBusinessId}/payments`, {
+    headers: { ...headers, 'Idempotency-Key': `e2e-missing-proof-${runId}` },
+    data: { ...payment, transactionNumber: `E2E-NO-PROOF-${runId}`, proofAttachmentId: null }
+  })
+  expect(missingProofResponse.status()).toBe(400)
+  expect((await missingProofResponse.json()).code).toBe('EXP_005')
+})
+
+test('场景9.2: 预算页面按目标总额调整而不是重复累加', async ({ page, request }) => {
+  const token = await loginApi('u-lin')
+  const runId = crypto.randomUUID().replaceAll('-', '').slice(0, 12)
+  const createResponse = await request.post(`${apiBase}/budgets`, {
+    headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': `e2e-budget-create-${runId}` },
+    data: {
+      departmentId: 'engineering',
+      expenseCategory: `E2E调整-${runId}`,
+      projectId: null,
+      year: new Date().getFullYear() + 1,
+      month: 12,
+      allocatedAmount: 10000,
+      autoPublish: true
+    }
+  })
+  expect(createResponse.status()).toBe(201)
+  const budget = await createResponse.json()
+
+  await loginUi(page, 'u-lin')
+  await page.goto(`/#/budgets/${budget.id}`)
+  await expect(page.getByRole('heading', { name: /engineering.*预算/ })).toBeVisible()
+  await page.getByRole('button', { name: '调整额度' }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByLabel(/调整后新总额/).fill('12000')
+  await dialog.getByLabel(/调整原因/).fill('验证目标总额不会被重复累加')
+  await dialog.getByRole('button', { name: '确认调整' }).click()
+  await expect(dialog).toHaveCount(0)
+
+  const readResponse = await request.get(`${apiBase}/budgets/${budget.id}`, { headers: { Authorization: `Bearer ${token}` } })
+  expect(readResponse.ok()).toBeTruthy()
+  expect((await readResponse.json()).allocatedAmount).toBe(12000)
+})
+
+test('张晨在研发目录下创建草稿后立即回显，并使用统一按钮样式', async ({ page, request }) => {
+  const token = await loginApi('u-zhang')
+  const runId = crypto.randomUUID().replaceAll('-', '').slice(0, 10)
+  const title = `E2E研发目录草稿-${runId}`
+
+  await loginUi(page, 'u-zhang')
+  await page.goto('/#/documents')
+  await expect(page.getByRole('heading', { name: '企业知识库与制度中心' })).toBeVisible()
+  await page.locator('.category-tree li', { hasText: '技术与研发指引' }).click()
+  await page.getByRole('button', { name: /编制制度\/文档/ }).click()
+
+  const dialog = page.getByRole('dialog')
+  const categorySelect = dialog.getByLabel('所属目录分类')
+  const departmentSelect = dialog.getByLabel('适用部门')
+  await expect(categorySelect).toHaveValue(/.+/)
+  await expect(departmentSelect).toHaveValue('engineering')
+  await expect(departmentSelect).toBeDisabled()
+  await dialog.getByLabel('文档标题').fill(title)
+  await dialog.getByLabel(/摘要简介/).fill('验证研发目录与研发部门范围自动保持一致。')
+  await dialog.getByLabel(/正文内容/).fill('# 研发目录创建验证\n\n该草稿用于验证目录和部门范围联动。')
+  await dialog.getByRole('button', { name: '保存草稿' }).click()
+  await expect(dialog).toHaveCount(0)
+  const createdCard = page.locator('.doc-card', { hasText: title })
+  await expect(createdCard.getByRole('heading', { name: title })).toBeVisible()
+  await expect(createdCard.getByText('草稿', { exact: true })).toBeVisible()
+  await expect(createdCard.getByRole('button', { name: '编辑草稿' })).toBeVisible()
+
+  const listResponse = await request.get(`${apiBase}/documents?keyword=${encodeURIComponent(title)}&page=1&pageSize=10`, {
+    headers: { Authorization: `Bearer ${token}` }
+  })
+  expect(listResponse.ok()).toBeTruthy()
+  const created = (await listResponse.json()).items.find((item: { title: string }) => item.title === title)
+  expect(created?.departmentId).toBe('engineering')
+  const deleteResponse = await request.delete(`${apiBase}/documents/${created.id}`, {
+    headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': `e2e-document-delete-${runId}` }
+  })
+  expect(deleteResponse.ok()).toBeTruthy()
+
+  const primaryButton = page.getByRole('button', { name: /编制制度\/文档/ })
+  expect(await primaryButton.getAttribute('class')).toContain('oa-button--primary')
+})
+
 test('场景10: P1-F4 390px 手机视口下财务台账与预算中心无横向滚动且响应良好', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await loginUi(page, 'u-lin')

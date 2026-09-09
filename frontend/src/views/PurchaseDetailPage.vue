@@ -131,6 +131,10 @@ function selectPaymentProof(event: Event) {
 }
 
 async function submitPayment() {
+  if (!paymentProof.value) {
+    paymentError.value = '请上传付款回单凭证。'
+    return
+  }
   if (!paymentForm.transactionNumber.trim()) {
     paymentError.value = '请填写银行转账流水号。'
     return

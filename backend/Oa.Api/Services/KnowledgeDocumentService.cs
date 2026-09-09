@@ -48,6 +48,7 @@ public sealed class KnowledgeDocumentService
         {
             if (!_data.CanAccessDepartmentDocument(actor, d.DepartmentId)) return false;
             if (d.Status == (int)DocumentStatus.Published) return true;
+            if (d.Status == (int)DocumentStatus.Draft && d.CreatedBy == actor.Id) return true;
             return _data.CanManageDepartmentDocument(actor, d.DepartmentId);
         });
 
@@ -217,8 +218,14 @@ public sealed class KnowledgeDocumentService
             }
             else
             {
-                query = query.Where(item => item.Status == (int)DocumentStatus.Published
-                    && (item.DepartmentId == null || item.DepartmentId == actorDept));
+                query = query.Where(item =>
+                    (item.Status == (int)DocumentStatus.Published
+                        && (item.DepartmentId == null || item.DepartmentId == actorDept))
+                    || (item.Status == (int)DocumentStatus.Draft
+                        && item.CreatedBy == actor.Id
+                        && item.DepartmentId == actorDept));
+                if (status.HasValue)
+                    query = query.Where(item => item.Status == (int)status.Value);
             }
         }
         else if (status.HasValue)
@@ -303,7 +310,8 @@ public sealed class KnowledgeDocumentService
             return ServiceResult<KnowledgeDocumentView>.Failure("文档仅限指定部门查阅。", "DOC_003");
 
         var canManage = _data.CanManageDepartmentDocument(actor, doc.DepartmentId);
-        if (!canManage && doc.Status != (int)DocumentStatus.Published)
+        var isOwnDraft = doc.Status == (int)DocumentStatus.Draft && doc.CreatedBy == actor.Id;
+        if (!canManage && !isOwnDraft && doc.Status != (int)DocumentStatus.Published)
             return ServiceResult<KnowledgeDocumentView>.Failure("文档未发布或已归档。", "DOC_003");
 
         // Increment view count
@@ -675,7 +683,8 @@ public sealed class KnowledgeDocumentService
             return ServiceResult<IReadOnlyList<DocumentVersionView>>.Failure("文档不存在或无权访问。", "DOC_003");
 
         var canManage = _data.CanManageDepartmentDocument(actor, record.DepartmentId);
-        if (!canManage && record.Status != (int)DocumentStatus.Published && record.Status != (int)DocumentStatus.Archived)
+        var isOwnDraft = record.Status == (int)DocumentStatus.Draft && record.CreatedBy == actor.Id;
+        if (!canManage && !isOwnDraft && record.Status != (int)DocumentStatus.Published && record.Status != (int)DocumentStatus.Archived)
             return ServiceResult<IReadOnlyList<DocumentVersionView>>.Failure("无权查看版本历史。", "DOC_003");
 
         var versions = _db.DocumentVersions.AsNoTracking()
@@ -900,7 +909,8 @@ public sealed class KnowledgeDocumentService
             return false;
 
         var canManage = _data.CanManageDepartmentDocument(actor, record.DepartmentId);
-        if (!canManage && record.Status != (int)DocumentStatus.Published)
+        var isOwnDraft = record.Status == (int)DocumentStatus.Draft && record.CreatedBy == actor.Id;
+        if (!canManage && !isOwnDraft && record.Status != (int)DocumentStatus.Published)
             return false;
 
         var files = DeserializeList(record.AttachmentsJson);

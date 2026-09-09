@@ -105,8 +105,10 @@ public sealed class PurchaseService
         var total = source.Count();
         var totalPages = Math.Max(1, (int)Math.Ceiling(total / (decimal)pageSize));
         var page = Math.Clamp(requestedPage ?? 1, 1, totalPages);
-        var items = source.OrderByDescending(item => item.CreatedAt).ThenByDescending(item => item.Id)
+        var records = source.OrderByDescending(item => item.CreatedAt).ThenByDescending(item => item.Id)
             .Skip((page - 1) * pageSize).Take(pageSize)
+            .ToList();
+        var items = records
             .Select(item => new PurchaseRequestListItem(item.Id, item.Number, item.ApplicantId, item.ApplicantName, item.DepartmentName,
                 item.Title, item.RequiredDate, item.ItemCount, item.EstimatedTotal, (PurchaseStatus)item.Status, item.PaymentStatus, item.PaidTotalAmount, item.Version, item.IsDemo, item.CreatedAt, item.UpdatedAt,
                 item.ConfigSnapshotJson != null && item.ConfigSnapshotJson.Contains("\"isOverBudget\":true")))

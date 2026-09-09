@@ -18,6 +18,10 @@ const isGlobalManager = computed(() => auth.currentUser?.permissions?.includes('
 const isDeptManager = computed(() => auth.currentUser?.permissions?.includes('DOCUMENT_DEPT_MANAGE') === true)
 const isManager = computed(() => isGlobalManager.value || isDeptManager.value)
 
+const selectedDocumentCategory = computed(() =>
+  docStore.categories.find(category => category.id === docForm.categoryId) ?? null
+)
+
 function getDepartmentName(deptId?: string | null) {
   if (!deptId) return '全公司'
   const d = organization.departments.find(item => item.id === deptId)
@@ -221,8 +225,9 @@ const pendingAckChecked = computed({
 function resetDocForm() {
   editingDocId.value = null
   docForm.title = ''
-  docForm.categoryId = docStore.categories[0]?.id ?? ''
+  docForm.categoryId = docStore.selectedCategoryId || docStore.categories[0]?.id || ''
   docForm.departmentId = isGlobalManager.value ? '' : (auth.currentUser?.departmentId ?? '')
+  syncDocumentScopeToCategory()
   docForm.summary = ''
   docForm.content = ''
   docForm.tagsInput = ''
@@ -230,6 +235,15 @@ function resetDocForm() {
   docForm.effectiveDate = new Date().toISOString().slice(0, 10)
   docForm.expiryDate = ''
   docForm.attachments = []
+}
+
+function syncDocumentScopeToCategory() {
+  const category = docStore.categories.find(item => item.id === docForm.categoryId)
+  if (category?.departmentId) {
+    docForm.departmentId = category.departmentId
+  } else if (!isGlobalManager.value) {
+    docForm.departmentId = auth.currentUser?.departmentId ?? ''
+  }
 }
 
 function openCreateDocument() {
@@ -281,10 +295,12 @@ async function submitDocument() {
   }
 
   const tags = docForm.tagsInput.split(/[,，]/).map(t => t.trim()).filter(Boolean)
+  const scopedDepartmentId = selectedDocumentCategory.value?.departmentId
+    ?? (docForm.departmentId.trim() || null)
   const payload: SaveDocument = {
     title: docForm.title.trim(),
     categoryId: docForm.categoryId,
-    departmentId: docForm.departmentId.trim() || null,
+    departmentId: scopedDepartmentId,
     summary: docForm.summary.trim(),
     content: docForm.content.trim(),
     tags,
@@ -392,13 +408,13 @@ async function deleteCategory(cat: DocumentCategory) {
       <p>集中查阅全公司规章制度、工作规范指引、合规守则及公文合同模板。</p>
     </div>
     <div class="actions">
-      <button v-if="isManager" class="secondary" @click="docStore.generateDemoData">
+      <button v-if="isManager" class="oa-button oa-button--secondary" @click="docStore.generateDemoData">
         生成示例制度
       </button>
-      <button v-if="isManager" class="secondary" @click="openCategoryManager">
+      <button v-if="isManager" class="oa-button oa-button--secondary" @click="openCategoryManager">
         目录分类管理
       </button>
-      <button @click="openCreateDocument">
+      <button class="oa-button oa-button--primary" @click="openCreateDocument">
         <span>＋</span> 编制制度/文档
       </button>
     </div>
@@ -587,28 +603,28 @@ async function deleteCategory(cat: DocumentCategory) {
             <div class="doc-actions">
               <button
                 v-if="doc.status === 'Draft' && canEditDoc(doc)"
-                class="secondary small-btn"
+                class="oa-button oa-button--secondary oa-button--small"
                 @click="openEditDocument(doc)"
               >
                 编辑草稿
               </button>
               <button
                 v-if="doc.status === 'Draft' && canManageDoc(doc)"
-                class="small-btn"
+                class="oa-button oa-button--primary oa-button--small"
                 @click="publishDraft(doc)"
               >
                 正式发布
               </button>
               <button
                 v-if="canDeleteDoc(doc)"
-                class="danger-outline small-btn"
+                class="oa-button oa-button--danger oa-button--small"
                 @click="handleDeleteDocument(doc)"
               >
                 删除
               </button>
               <button
                 v-if="doc.status === 'Published'"
-                class="secondary small-btn"
+                class="oa-button oa-button--secondary oa-button--small"
                 @click="router.push(`/documents/${doc.id}`)"
               >
                 阅读全文 →
@@ -666,7 +682,7 @@ async function deleteCategory(cat: DocumentCategory) {
     <div class="field-row">
       <label class="dialog-field">
         所属目录分类
-        <select v-model="docForm.categoryId">
+        <select v-model="docForm.categoryId" @change="syncDocumentScopeToCategory">
           <option v-for="cat in docStore.categories" :key="cat.id" :value="cat.id">
             {{ cat.name }}
           </option>
@@ -675,13 +691,16 @@ async function deleteCategory(cat: DocumentCategory) {
 
       <label class="dialog-field">
         适用部门
-        <select v-model="docForm.departmentId" :disabled="!isGlobalManager">
+        <select v-model="docForm.departmentId" :disabled="!isGlobalManager || Boolean(selectedDocumentCategory?.departmentId)">
           <option value="">全公司通用（全体在职员工）</option>
           <option v-for="dept in organization.departments" :key="dept.id" :value="dept.id">
             仅限 {{ dept.name }}
           </option>
         </select>
-        <small v-if="!isGlobalManager" class="hint-text">
+        <small v-if="selectedDocumentCategory?.departmentId" class="hint-text">
+          当前目录限定为「{{ getDepartmentName(selectedDocumentCategory.departmentId) }}」，文档适用范围已自动同步。
+        </small>
+        <small v-else-if="!isGlobalManager" class="hint-text">
           编制的规章制度将归属于您的所属部门「{{ getDepartmentName(auth.currentUser?.departmentId) }}」。
         </small>
       </label>
@@ -734,7 +753,7 @@ async function deleteCategory(cat: DocumentCategory) {
     @submit="categoryManagerOpen = false"
   >
     <div class="cat-mgr-header">
-      <button class="secondary" @click="openCreateCategory">＋ 新增分类</button>
+      <button class="oa-button oa-button--secondary" @click="openCreateCategory">＋ 新增分类</button>
     </div>
 
     <table class="data-table">

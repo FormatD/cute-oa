@@ -174,10 +174,15 @@ async function handleAdjustBudget() {
     adjustError.value = '请填写预算调整原因。'
     return
   }
+  const delta = Number(adjustAmount.value) - targetBudget.value.allocatedAmount
+  if (delta === 0) {
+    adjustError.value = '调整后总额必须与当前总额不同。'
+    return
+  }
   adjustBusy.value = true
   try {
     await api.budgets.adjustBudget(targetBudget.value.id, {
-      amount: Number(adjustAmount.value),
+      amount: delta,
       reason: adjustReason.value.trim(),
       expectedVersion: targetBudget.value.concurrencyVersion
     })
@@ -467,12 +472,12 @@ onMounted(() => {
           <input :value="`¥${targetBudget.allocatedAmount.toFixed(2)}`" disabled />
         </div>
         <div class="form-group">
-          <label>调整后新总额 (元) <span class="required">*</span></label>
-          <input v-model.number="adjustAmount" type="number" min="0" step="100" />
+          <label for="budget-list-adjust-total">调整后新总额 (元) <span class="required">*</span></label>
+          <input id="budget-list-adjust-total" v-model.number="adjustAmount" type="number" min="0" step="100" />
         </div>
         <div class="form-group">
-          <label>调整原因 <span class="required">*</span></label>
-          <textarea v-model="adjustReason" rows="3" placeholder="请详细记录额度追加或调减的原因及审批依据"></textarea>
+          <label for="budget-list-adjust-reason">调整原因 <span class="required">*</span></label>
+          <textarea id="budget-list-adjust-reason" v-model="adjustReason" rows="3" placeholder="请详细记录额度追加或调减的原因及审批依据"></textarea>
         </div>
         <p v-if="adjustError" class="error-text">{{ adjustError }}</p>
       </div>

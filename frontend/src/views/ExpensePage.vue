@@ -228,6 +228,10 @@ function selectPaymentProof(event: Event) {
 }
 
 async function submitPayment() {
+  if (!paymentProof.value) {
+    paymentError.value = '请上传付款凭证或银行回单。'
+    return
+  }
   if (!paymentTarget.value || !paymentForm.paymentDate || !paymentForm.paymentMethod || !paymentForm.transactionNumber.trim()) {
     paymentError.value = '请填写付款日期、方式和银行流水号。'
     return

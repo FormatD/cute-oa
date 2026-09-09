@@ -72,6 +72,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<TravelStatus>());
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<PurchaseStatus>());
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<SealStatus>());
+    options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<DocumentStatus>());
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter<FlowTaskStatus>());
 });
 if (builder.Configuration.GetValue<bool>("Persistence:UsePostgreSql"))
@@ -168,6 +169,7 @@ IResult Write<T>(HttpRequest request, Employee actor, IdempotencyService idempot
         serializerOptions.Converters.Add(new JsonStringEnumConverter<PaymentTransactionStatus>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<TravelStatus>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<PurchaseStatus>());
+        serializerOptions.Converters.Add(new JsonStringEnumConverter<DocumentStatus>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<FlowTaskStatus>());
         var json = JsonSerializer.Serialize(result.Value, serializerOptions);
         idempotency.Store(actor.Id, route, key, statusCode, json, requestHash);
@@ -228,6 +230,7 @@ async Task<IResult> WriteAsync<T>(HttpRequest request, Employee actor, Idempoten
         serializerOptions.Converters.Add(new JsonStringEnumConverter<PaymentTransactionStatus>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<TravelStatus>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<PurchaseStatus>());
+        serializerOptions.Converters.Add(new JsonStringEnumConverter<DocumentStatus>());
         serializerOptions.Converters.Add(new JsonStringEnumConverter<FlowTaskStatus>());
         var json = JsonSerializer.Serialize(result.Value, serializerOptions);
         idempotency.Store(actor.Id, route, key, statusCode, json, requestHash);
@@ -642,7 +645,7 @@ app.MapGet("/api/v1/expense-claims/{id:guid}", (Guid id, HttpRequest request, De
 app.MapPost("/api/v1/expense-claims", (CreateExpenseClaim body, HttpRequest request, DemoAuthService auth, ExpenseService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.CreateDraft(actor, body), true); });
 app.MapPatch("/api/v1/expense-claims/{id:guid}", (Guid id, int version, CreateExpenseClaim body, HttpRequest request, DemoAuthService auth, ExpenseService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Update(actor, id, version, body)); });
 app.MapDelete("/api/v1/expense-claims/{id:guid}", (Guid id, HttpRequest request, DemoAuthService auth, ExpenseService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Delete(actor, id)); });
-app.MapPost("/api/v1/expense-claims/{id:guid}/submit", (Guid id, HttpRequest request, DemoAuthService auth, ExpenseService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Submit(actor, id)); });
+app.MapPost("/api/v1/expense-claims/{id:guid}/submit", (Guid id, HttpRequest request, DemoAuthService auth, ExpenseService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Submit(actor, id), atomic: true, fingerprintPayload: new { id }); });
 app.MapPost("/api/v1/expense-claims/{id:guid}/withdraw", (Guid id, HttpRequest request, DemoAuthService auth, ExpenseService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Withdraw(actor, id)); });
 app.MapPost("/api/v1/expense-tasks/{id:guid}/approve", (Guid id, ApproveTaskRequest body, HttpRequest request, DemoAuthService auth, ExpenseService service, IdempotencyService idempotency) => { var actor = Actor(request, auth); return Write(request, actor, idempotency, () => service.Approve(actor, id, body.Comment)); });
 app.MapGet("/api/v1/expense-tasks/my", (HttpRequest request, DemoAuthService auth, ExpenseService service) => Results.Ok(service.GetPendingTasks(Actor(request, auth))));

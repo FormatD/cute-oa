@@ -225,33 +225,33 @@ async function archiveDocument() {
       </p>
     </div>
     <div class="actions">
-      <button class="secondary" @click="router.push('/documents')">
+      <button class="oa-button oa-button--secondary" @click="router.push('/documents')">
         ← 返回知识库
       </button>
       <button
         v-if="canManageThisDoc"
-        class="secondary"
+        class="oa-button oa-button--secondary"
         @click="openMoveCategoryDialog"
       >
         调整分类
       </button>
       <button
         v-if="canEditThisDoc && doc?.status === 'Published'"
-        class="secondary"
+        class="oa-button oa-button--secondary"
         @click="openReviseDialog"
       >
         修订新版本
       </button>
       <button
         v-if="canManageThisDoc && doc?.status === 'Published'"
-        class="secondary"
+        class="oa-button oa-button--secondary"
         @click="archiveDocument"
       >
         归档下线
       </button>
       <button
         v-if="canManageThisDoc"
-        class="danger-outline"
+        class="oa-button oa-button--danger"
         @click="handleDeleteDocument"
       >
         删除制度
@@ -416,7 +416,7 @@ async function archiveDocument() {
         <div class="attach-list">
           <div v-for="(fileId, idx) in doc.attachments" :key="fileId" class="attach-item">
             <span>📎 附件原件 {{ idx + 1 }} (ID: {{ fileId.slice(0, 8) }}…)</span>
-            <button class="secondary small-btn" @click="docStore.downloadAttachment(doc.id, fileId)">
+            <button class="oa-button oa-button--secondary oa-button--small" @click="docStore.downloadAttachment(doc.id, fileId)">
               下载附件
             </button>
           </div>
@@ -445,7 +445,7 @@ async function archiveDocument() {
             </option>
           </select>
           <button
-            class="secondary small-btn"
+            class="oa-button oa-button--secondary oa-button--small"
             :disabled="selectedCompareV1 === selectedCompareV2"
             @click="openDiffModal(selectedCompareV1, selectedCompareV2)"
           >
@@ -469,14 +469,14 @@ async function archiveDocument() {
             <div class="timeline-actions">
               <button
                 v-if="index < versions.length - 1"
-                class="secondary small-btn"
+                class="oa-button oa-button--secondary oa-button--small"
                 @click="openDiffModal(versions[index + 1].version, v.version)"
               >
                 与上一版本 (v{{ versions[index + 1].version }}.0) 对比
               </button>
               <button
                 v-if="v.version !== doc.version"
-                class="secondary small-btn"
+                class="oa-button oa-button--secondary oa-button--small"
                 @click="openDiffModal(v.version, doc.version)"
               >
                 与当前版本 (v{{ doc.version }}.0) 对比

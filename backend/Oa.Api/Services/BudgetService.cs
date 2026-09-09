@@ -405,6 +405,8 @@ public sealed class BudgetService
         {
             var record = db.Budgets.SingleOrDefault(b => b.TenantId == TenantId && b.Id == id);
             if (record is null) return ServiceResult<Budget>.Failure("预算池不存在。", "DATA_001");
+            if (record.Status != "ACTIVE")
+                return ServiceResult<Budget>.Failure($"只有执行中的预算池可以调整额度（当前状态：{record.Status}）。", "STATE_001");
             if (request.ExpectedVersion.HasValue && record.ConcurrencyVersion != request.ExpectedVersion.Value)
                 return ServiceResult<Budget>.Failure("预算池已被更新，请刷新后重试。", "CONCURRENCY_001");
 
@@ -452,6 +454,8 @@ public sealed class BudgetService
 
         var memBudget = _memoryBudgets.SingleOrDefault(b => b.Id == id);
         if (memBudget is null) return ServiceResult<Budget>.Failure("预算池不存在。", "DATA_001");
+        if (memBudget.Status != BudgetStatus.Active)
+            return ServiceResult<Budget>.Failure($"只有执行中的预算池可以调整额度（当前状态：{memBudget.Status}）。", "STATE_001");
         if (request.ExpectedVersion.HasValue && memBudget.ConcurrencyVersion != request.ExpectedVersion.Value)
             return ServiceResult<Budget>.Failure("预算池已被更新，请刷新后重试。", "CONCURRENCY_001");
 

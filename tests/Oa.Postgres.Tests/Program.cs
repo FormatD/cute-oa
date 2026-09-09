@@ -1220,7 +1220,7 @@ await using (var writeDb = new OaDbContext(options))
         var concurrentSubmittedA = concurrentLeaveA.Submit(employee, concurrentDraftA.Value!.Id);
         var concurrentSubmittedB = concurrentLeaveB.Submit(employee, concurrentDraftB.Value!.Id);
         if (!concurrentSubmittedA.IsSuccess || concurrentSubmittedB.Code != "CONCURRENCY_001")
-            throw new InvalidOperationException("陈旧年度余额提交未被数据库乐观锁拒绝。 ");
+            throw new InvalidOperationException($"陈旧年度余额提交未被数据库乐观锁拒绝：A={concurrentSubmittedA.Code ?? "SUCCESS"}/{concurrentSubmittedA.Error ?? "-"}，B={concurrentSubmittedB.Code ?? "SUCCESS"}/{concurrentSubmittedB.Error ?? "-"}。 ");
 
         await using (var verificationDb = new OaDbContext(options))
         {
@@ -1924,6 +1924,12 @@ await using (var writeDb = new OaDbContext(options))
     if (!empDraftResult.IsSuccess || empDraftResult.Value!.Status != DocumentStatus.Draft)
         throw new InvalidOperationException("研发普通员工编制部门制度草稿失败：" + empDraftResult.Error);
     var empDocId = empDraftResult.Value.Id;
+    var employeeDraftList = docService.ListDocuments(employee, categoryId: subCatId, status: DocumentStatus.Draft);
+    if (!employeeDraftList.IsSuccess || employeeDraftList.Value!.Items.All(item => item.Id != empDocId) ||
+        !docService.GetDocument(employee, empDocId).IsSuccess)
+        throw new InvalidOperationException("研发员工新建的本人草稿未在当前目录回显或无法打开详情。");
+    if (docService.GetDocument(finEmployee, empDocId).IsSuccess)
+        throw new InvalidOperationException("其他部门员工越权读取了研发员工未发布草稿。");
 
     var crossEmpDraft = docService.CreateDraft(finEmployee, new SaveDocumentRequest(
         "越权编制研发规范", subCatId, "试图跨部门编制", "正文", [], false, "engineering", today, null, []));
@@ -3794,6 +3800,42 @@ await using (var f4Db = new OaDbContext(options))
     var txPur3 = $"PG-TX-PUR-3-{testRunId}";
     var poNum = $"PO-DELL-{testRunId}";
 
+    var missingProof = paymentService.RegisterExpensePayment(financeOfficer, Guid.NewGuid(), new CreatePaymentTransactionRequest(
+        BatchTitle: "回单必填校验",
+        PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+        PaymentMethod: PaymentMethodNames.BankTransfer,
+        PayerAccount: "955880001",
+        PayeeName: "测试收款方",
+        PayeeAccount: "6222026000009999",
+        PayeeBank: "测试银行",
+        TransactionNumber: $"PG-TX-NO-PROOF-{testRunId}",
+        PaidAmount: 1m,
+        FeeAmount: 0m,
+        ProofAttachmentId: null,
+        Remarks: "验证付款回单必填"));
+    if (missingProof.IsSuccess || missingProof.Code != "EXP_005")
+        throw new InvalidOperationException($"付款回单缺失未被拒绝：{missingProof.Code}/{missingProof.Error}");
+
+    using (var apiLikeTransaction = f4Db.Database.BeginTransaction())
+    {
+        var nestedTransactionResult = paymentService.RegisterExpensePayment(financeOfficer, Guid.NewGuid(), new CreatePaymentTransactionRequest(
+            BatchTitle: "接口事务边界校验",
+            PaymentDate: DateOnly.FromDateTime(DateTime.Today),
+            PaymentMethod: PaymentMethodNames.BankTransfer,
+            PayerAccount: "955880001",
+            PayeeName: "测试收款方",
+            PayeeAccount: "6222026000009999",
+            PayeeBank: "测试银行",
+            TransactionNumber: $"PG-TX-OUTER-{testRunId}",
+            PaidAmount: 1m,
+            FeeAmount: 0m,
+            ProofAttachmentId: Guid.NewGuid().ToString(),
+            Remarks: "模拟接口幂等包装已开启事务"));
+        if (nestedTransactionResult.IsSuccess || nestedTransactionResult.Code != "DATA_001")
+            throw new InvalidOperationException($"付款服务未正确复用外层事务：{nestedTransactionResult.Code}/{nestedTransactionResult.Error}");
+        apiLikeTransaction.Rollback();
+    }
+
     // 1. 预算池创建或调整与审计
     var curYear = DateTime.Today.Year;
     var existingBudget = f4Db.Budgets.FirstOrDefault(b => b.TenantId == "demo" && b.DepartmentId == "engineering" && b.Year == curYear && b.Month == 0);
@@ -3864,7 +3906,7 @@ await using (var f4Db = new OaDbContext(options))
         TransactionNumber: txExp1,
         PaidAmount: 800m,
         FeeAmount: 0m,
-        ProofAttachmentId: null,
+        ProofAttachmentId: Guid.NewGuid().ToString(),
         Remarks: "首期款"));
     if (!pay1.IsSuccess) throw new InvalidOperationException($"PG登记报销付款失败：{pay1.Error}");
 
@@ -3880,7 +3922,7 @@ await using (var f4Db = new OaDbContext(options))
         TransactionNumber: txExp1, // 重复流水号
         PaidAmount: 1200m,
         FeeAmount: 0m,
-        ProofAttachmentId: null,
+        ProofAttachmentId: Guid.NewGuid().ToString(),
         Remarks: "尾款"));
     if (dupTxPay.IsSuccess || dupTxPay.Code != "PAYMENT_TX_DUPLICATE") throw new InvalidOperationException("PG流水号防重未拦截。");
 
@@ -3896,7 +3938,7 @@ await using (var f4Db = new OaDbContext(options))
         TransactionNumber: txExp2,
         PaidAmount: 1200m,
         FeeAmount: 0m,
-        ProofAttachmentId: null,
+        ProofAttachmentId: Guid.NewGuid().ToString(),
         Remarks: "尾款结清"));
     if (!pay2.IsSuccess) throw new InvalidOperationException($"PG结清尾款失败：{pay2.Error}");
 
@@ -3952,7 +3994,7 @@ await using (var f4Db = new OaDbContext(options))
         TransactionNumber: txPur1,
         PaidAmount: 20000m,
         FeeAmount: 0m,
-        ProofAttachmentId: null,
+        ProofAttachmentId: Guid.NewGuid().ToString(),
         Remarks: "尝试超付"));
     if (overPrepay.IsSuccess || overPrepay.Code != "PURCHASE_PREPAYMENT_EXCEEDED")
         throw new InvalidOperationException("PG采购未验收50%首付限额风控未生效。");
@@ -3969,7 +4011,7 @@ await using (var f4Db = new OaDbContext(options))
         TransactionNumber: txPur2,
         PaidAmount: 12000m,
         FeeAmount: 0m,
-        ProofAttachmentId: null,
+        ProofAttachmentId: Guid.NewGuid().ToString(),
         Remarks: "按约付40%首付款"));
     if (!validPrepay.IsSuccess) throw new InvalidOperationException($"PG首期采购预付款失败：{validPrepay.Error}");
 
@@ -3995,7 +4037,7 @@ await using (var f4Db = new OaDbContext(options))
         TransactionNumber: txPur3,
         PaidAmount: 18000m,
         FeeAmount: 0m,
-        ProofAttachmentId: null,
+        ProofAttachmentId: Guid.NewGuid().ToString(),
         Remarks: "验收付清"));
     if (!finalPay.IsSuccess) throw new InvalidOperationException($"PG采购尾款支付失败：{finalPay.Error}");
 
@@ -4081,7 +4123,7 @@ await using (var f4Db = new OaDbContext(options))
         TransactionNumber: $"TX-UNAUTH-{testRunId}",
         PaidAmount: 100m,
         FeeAmount: 0m,
-        ProofAttachmentId: null,
+        ProofAttachmentId: Guid.NewGuid().ToString(),
         Remarks: "尝试越权"));
     if (purPayAttempt.IsSuccess || purPayAttempt.Code != "AUTH_002")
         throw new InvalidOperationException($"无 EXPENSE_PAY 的采购管理员登记采购付款未被拦截：IsSuccess={purPayAttempt.IsSuccess}, Code={purPayAttempt.Code}");
@@ -4141,7 +4183,7 @@ await using (var f4Db = new OaDbContext(options))
     // 先付一笔 600 元
     var pay600 = paymentService.RegisterExpensePayment(financeOfficer, pClaimId, new CreatePaymentTransactionRequest(
         "首期付款", DateOnly.FromDateTime(DateTime.Today), PaymentMethodNames.BankTransfer, "955880001", "张晨", "6222026000001234", "招商银行",
-        $"TX-INIT600-{testRunId}", 600m, 0m, null, "首笔"));
+        $"TX-INIT600-{testRunId}", 600m, 0m, Guid.NewGuid().ToString(), "首笔"));
     if (!pay600.IsSuccess) throw new InvalidOperationException($"首期付款失败：{pay600.Error}");
 
     var payBarrier = new ManualResetEventSlim(false);
@@ -4155,7 +4197,7 @@ await using (var f4Db = new OaDbContext(options))
         payBarrier.Wait();
         return threadPay.RegisterExpensePayment(threadActor, pClaimId, new CreatePaymentTransactionRequest(
             "并发二期A", DateOnly.FromDateTime(DateTime.Today), PaymentMethodNames.BankTransfer, "955880001", "张晨", "6222026000001234", "招商银行",
-            $"TX-CONC-A-{Guid.NewGuid():N}", 300m, 0m, null, "并发付款A"));
+            $"TX-CONC-A-{Guid.NewGuid():N}", 300m, 0m, Guid.NewGuid().ToString(), "并发付款A"));
     });
     var payTask2 = Task.Run(async () =>
     {
@@ -4167,7 +4209,7 @@ await using (var f4Db = new OaDbContext(options))
         payBarrier.Wait();
         return threadPay.RegisterExpensePayment(threadActor, pClaimId, new CreatePaymentTransactionRequest(
             "并发二期B", DateOnly.FromDateTime(DateTime.Today), PaymentMethodNames.BankTransfer, "955880001", "张晨", "6222026000001234", "招商银行",
-            $"TX-CONC-B-{Guid.NewGuid():N}", 300m, 0m, null, "并发付款B"));
+            $"TX-CONC-B-{Guid.NewGuid():N}", 300m, 0m, Guid.NewGuid().ToString(), "并发付款B"));
     });
     payBarrier.Set();
     var payResults = await Task.WhenAll(payTask1, payTask2);
@@ -4321,7 +4363,7 @@ await using (var f4Db = new OaDbContext(options))
         expenseService.Approve(f4Data.GetEmployee(task.AssigneeId), task.Id, "同意");
     }
     var oldPayRes = expenseService.RegisterPayment(financeOfficer, oldClaimId, new RegisterPaymentRequest(
-        DateOnly.FromDateTime(DateTime.Today), "BANK_TRANSFER", $"TX-LEGACY-{testRunId}", 500m, "proof.pdf"));
+        DateOnly.FromDateTime(DateTime.Today), "BANK_TRANSFER", $"TX-LEGACY-{testRunId}", 500m, Guid.NewGuid().ToString()));
     if (!oldPayRes.IsSuccess) throw new InvalidOperationException($"旧付款入口调用失败：{oldPayRes.Error}");
 
     await using (var verifyDb = new OaDbContext(options))
@@ -4762,7 +4804,7 @@ await using (var f4Db = new OaDbContext(options))
         TransactionNumber: $"TX-PUR-FINAL-{runIdE}",
         PaidAmount: 3000m,
         FeeAmount: 0m,
-        ProofAttachmentId: null,
+        ProofAttachmentId: Guid.NewGuid().ToString(),
         Remarks: "尾款付清"));
     if (!payResFinal.IsSuccess) throw new InvalidOperationException($"WP-E 尾款付款失败: {payResFinal.Error}");
 
@@ -4851,7 +4893,7 @@ await using (var f4Db = new OaDbContext(options))
         TransactionNumber: $"TX-EXP-E-{runIdExpE}",
         PaidAmount: 3000m,
         FeeAmount: 0m,
-        ProofAttachmentId: null,
+        ProofAttachmentId: Guid.NewGuid().ToString(),
         Remarks: "全额付清"));
     if (!expPayRes.IsSuccess) throw new InvalidOperationException($"WP-E 报销付款失败: {expPayRes.Error}");
 
