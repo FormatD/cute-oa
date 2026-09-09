@@ -629,19 +629,36 @@ test('场景9.2: 预算页面按目标总额调整而不是重复累加', async 
 
 test('张晨在研发目录下创建草稿后立即回显，并使用统一按钮样式', async ({ page, request }) => {
   const token = await loginApi('u-zhang')
+  const managerToken = await loginApi('u-li')
   const runId = crypto.randomUUID().replaceAll('-', '').slice(0, 10)
   const title = `E2E研发目录草稿-${runId}`
+  const categoryName = `E2E研发目录-${runId}`
+  const categoryResponse = await request.post(`${apiBase}/documents/categories`, {
+    headers: { Authorization: `Bearer ${managerToken}`, 'Idempotency-Key': `e2e-document-category-${runId}` },
+    data: {
+      code: `E2E_TECH_${runId.toUpperCase()}`,
+      name: categoryName,
+      description: '端到端测试专用研发目录',
+      parentId: null,
+      departmentId: 'engineering',
+      sortOrder: 999
+    }
+  })
+  expect(categoryResponse.status(), await categoryResponse.text()).toBe(201)
+  const category = await categoryResponse.json()
 
   await loginUi(page, 'u-zhang')
   await page.goto('/#/documents')
   await expect(page.getByRole('heading', { name: '企业知识库与制度中心' })).toBeVisible()
-  await page.locator('.category-tree li', { hasText: '技术与研发指引' }).click()
+  const categoryItem = page.locator('.category-tree li', { hasText: categoryName })
+  await expect(categoryItem).toBeVisible()
+  await categoryItem.click()
   await page.getByRole('button', { name: /编制制度\/文档/ }).click()
 
   const dialog = page.getByRole('dialog')
   const categorySelect = dialog.getByLabel('所属目录分类')
   const departmentSelect = dialog.getByLabel('适用部门')
-  await expect(categorySelect).toHaveValue(/.+/)
+  await expect(categorySelect).toHaveValue(category.id)
   await expect(departmentSelect).toHaveValue('engineering')
   await expect(departmentSelect).toBeDisabled()
   await dialog.getByLabel('文档标题').fill(title)
@@ -664,6 +681,10 @@ test('张晨在研发目录下创建草稿后立即回显，并使用统一按�
     headers: { Authorization: `Bearer ${token}`, 'Idempotency-Key': `e2e-document-delete-${runId}` }
   })
   expect(deleteResponse.ok()).toBeTruthy()
+  const deleteCategoryResponse = await request.delete(`${apiBase}/documents/categories/${category.id}`, {
+    headers: { Authorization: `Bearer ${managerToken}`, 'Idempotency-Key': `e2e-document-category-delete-${runId}` }
+  })
+  expect(deleteCategoryResponse.ok(), await deleteCategoryResponse.text()).toBeTruthy()
 
   const primaryButton = page.getByRole('button', { name: /编制制度\/文档/ })
   expect(await primaryButton.getAttribute('class')).toContain('oa-button--primary')
